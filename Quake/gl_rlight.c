@@ -295,8 +295,14 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 
 static void R_BuildEmissiveWorldSurfaces (void)
 {
-	if (r_emissive_rt.value <= 0.0f || !cl.worldmodel || emissive_surface_worldmodel == cl.worldmodel)
+	if (r_emissive_rt.value <= 0.0f || !cl.worldmodel)
 		return;
+	if (emissive_surface_worldmodel == cl.worldmodel)
+	{
+		if (num_emissive_world_fixtures)
+			R_AllocateEmissiveLightmaps ();
+		return;
+	}
 
 	R_ClearEmissiveWorldSurfaces ();
 
@@ -322,6 +328,8 @@ static void R_BuildEmissiveWorldSurfaces (void)
 		}
 		assert (surface_index == num_emissive_world_surfaces);
 		R_BuildEmissiveWorldFixtures (worldmodel);
+		if (num_emissive_world_fixtures)
+			R_AllocateEmissiveLightmaps ();
 	}
 
 	emissive_surface_worldmodel = worldmodel;
@@ -345,10 +353,15 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 
 void R_EmissiveRTStats_f (void)
 {
+	int		  coarse_lightmaps;
+	uint64_t coarse_logical_bytes;
+	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes);
 	Con_Printf (
-		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u bytes\n", r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
+		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes\n",
+		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
 		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)));
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
+		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes);
 }
 
 /*

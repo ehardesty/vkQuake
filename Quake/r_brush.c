@@ -2370,6 +2370,58 @@ void GL_SetupLightmapCompute (void)
 }
 
 /*
+==================
+R_AllocateEmissiveLightmaps
+==================
+*/
+void R_AllocateEmissiveLightmaps (void)
+{
+	if (!cl.worldmodel || !lightmap_count)
+		return;
+
+	qboolean *const world_lightmaps = Mem_Alloc (lightmap_count * sizeof (*world_lightmaps));
+	memset (world_lightmaps, 0, lightmap_count * sizeof (*world_lightmaps));
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int i = 0; i < cl.worldmodel->nummodelsurfaces; ++i)
+	{
+		const msurface_t *const surface = &first_surface[i];
+		if (!(surface->flags & SURF_DRAWTILED) && surface->lightmaptexturenum >= 0 && surface->lightmaptexturenum < lightmap_count)
+			world_lightmaps[surface->lightmaptexturenum] = true;
+	}
+
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!world_lightmaps[i] || lightmap->emissive_texture)
+			continue;
+		char name[32];
+		q_snprintf (name, sizeof (name), "emissive_coarse_%07i", i);
+		const int width = lightmap->surface_indices_texture->width;
+		const int height = lightmap->surface_indices_texture->height;
+		lightmap->emissive_texture = TexMgr_LoadImage (
+			cl.worldmodel, name, width, height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+	}
+	Mem_Free (world_lightmaps);
+}
+
+/*
+==================
+R_EmissiveLightmapStats
+==================
+*/
+void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes)
+{
+	*count = 0;
+	*logical_bytes = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+		if (lightmaps[i].emissive_texture)
+		{
+			++*count;
+			*logical_bytes += (uint64_t)lightmaps[i].emissive_texture->width * lightmaps[i].emissive_texture->height * 8;
+		}
+}
+
+/*
 =============================================================
 
 	VBO support

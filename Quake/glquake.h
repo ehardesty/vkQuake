@@ -663,6 +663,7 @@ typedef struct glMaxUsed_s
 struct lightmap_s
 {
 	gltexture_t	   *texture;
+	gltexture_t	   *emissive_texture;
 	gltexture_t	   *surface_indices_texture;
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
@@ -689,6 +690,8 @@ struct lightmap_s
 };
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
+void R_AllocateEmissiveLightmaps (void);
+void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 

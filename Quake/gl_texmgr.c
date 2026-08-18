@@ -1019,6 +1019,9 @@ TexMgr_LoadImage32 -- handles 32bit source data
 */
 static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 {
+	if (glt->source_format == SRC_RGBA16F && (!(glt->flags & TEXPREF_NOPICMIP) || (glt->flags & TEXPREF_MIPMAP)))
+		Sys_Error ("SRC_RGBA16F requires TEXPREF_NOPICMIP without mipmaps");
+
 	GL_DeleteTexture (glt);
 
 	// do this before any rescaling
@@ -1090,11 +1093,13 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 
 	const qboolean lightmap = glt->source_format == SRC_LIGHTMAP;
 	const qboolean surface_indices = glt->source_format == SRC_SURF_INDICES;
+	const qboolean rgba16f = glt->source_format == SRC_RGBA16F;
 	const qboolean ten_bit = lightmap && vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 
 	VkResult err;
 
-	const VkFormat format = surface_indices ? VK_FORMAT_R32_UINT : ten_bit ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_R8G8B8A8_UNORM;
+	const VkFormat format =
+		surface_indices ? VK_FORMAT_R32_UINT : rgba16f ? VK_FORMAT_R16G16B16A16_SFLOAT : ten_bit ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_R8G8B8A8_UNORM;
 
 	ZEROED_STRUCT (VkImageCreateInfo, image_create_info);
 	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1111,7 +1116,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 		image_create_info.usage =
 			(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 			 VK_IMAGE_USAGE_STORAGE_BIT);
-	else if (lightmap)
+	else if (lightmap || rgba16f)
 		image_create_info.usage = (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 	else
 		image_create_info.usage = (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -1160,7 +1165,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 
 	TexMgr_SetFilterModes (glt);
 
-	if (warp_image || lightmap)
+	if (warp_image || lightmap || rgba16f)
 	{
 		image_view_create_info.subresourceRange.levelCount = 1;
 		err = vkCreateImageView (vulkan_globals.device, &image_view_create_info, NULL, &glt->target_image_view);
@@ -1227,7 +1232,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	// Upload
 	ZEROED_STRUCT_ARRAY (VkBufferImageCopy, regions, MAX_MIPS);
 
-	int staging_size = (glt->flags & TEXPREF_MIPMAP) ? TexMgr_DeriveStagingSize (mipwidth, mipheight) : (mipwidth * mipheight * 4);
+	int staging_size = (glt->flags & TEXPREF_MIPMAP) ? TexMgr_DeriveStagingSize (mipwidth, mipheight) : (mipwidth * mipheight * (rgba16f ? 8 : 4));
 	if (is_cube)
 		staging_size *= 6;
 
@@ -1339,6 +1344,8 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 		for (int i = 0; i < 6; i++)
 			memcpy (staging_memory + i * staging_size, ((byte **)data)[reorder[i]], staging_size);
 	}
+	else if (rgba16f && !data)
+		memset (staging_memory, 0, staging_size);
 	else
 	{
 		if (!ten_bit)
@@ -1596,6 +1603,9 @@ gltexture_t *TexMgr_LoadImage (
 	case SRC_RGBA:
 	case SRC_SURF_INDICES:
 	case SRC_RGBA_CUBEMAP:
+		TexMgr_LoadImage32 (glt, (unsigned *)data);
+		break;
+	case SRC_RGBA16F:
 		TexMgr_LoadImage32 (glt, (unsigned *)data);
 		break;
 	case SRC_INDEXED_PALETTE:
