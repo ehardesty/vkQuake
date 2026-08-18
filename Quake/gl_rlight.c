@@ -90,6 +90,18 @@ static emissive_world_fixture_t *emissive_world_fixtures;
 static int						 num_emissive_world_fixtures;
 static qmodel_t					*emissive_surface_worldmodel;
 
+static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
+{
+	const vec3_t *const source = definition->derive_color ? &fullbright->fullbright_color : &definition->color;
+	for (int channel = 0; channel < 3; ++channel)
+		color[channel] = q_max (0.0f, (*source)[channel]);
+	const float max_component = q_max (color[0], q_max (color[1], color[2]));
+	if (max_component <= 0.0f)
+		return false;
+	VectorScale (color, 1.0f / max_component, color);
+	return true;
+}
+
 static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const texture_t *texture)
 {
 	if (!texture || !texture->fullbright || texture->anim_total || texture->alternate_anims)
@@ -99,7 +111,8 @@ static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const textur
 		if (!q_strcasecmp (texture->name, emissive_texture_defs[i].texture))
 		{
 			const emissive_texture_def_t *const definition = &emissive_texture_defs[i];
-			if (texture->fullbright->fullbright_coverage <= 0.0f || (definition->derive_color && VectorLength (texture->fullbright->fullbright_color) == 0.0f))
+			vec3_t								color;
+			if (texture->fullbright->fullbright_coverage <= 0.0f || !R_ResolveEmissiveTextureColor (definition, texture->fullbright, color))
 				return NULL;
 			return definition;
 		}
@@ -239,10 +252,7 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 		float							largest_luminous_area = 0.0f;
 		fixture->definition = emissive_world_surfaces[group].definition;
 		const gltexture_t *const fullbright = emissive_world_surfaces[group].surface->texinfo->texture->fullbright;
-		if (fixture->definition->derive_color)
-			VectorCopy (fullbright->fullbright_color, fixture->color);
-		else
-			VectorCopy (fixture->definition->color, fixture->color);
+		R_ResolveEmissiveTextureColor (fixture->definition, fullbright, fixture->color);
 
 		for (int i = group; i < num_emissive_world_surfaces; ++i)
 		{
