@@ -9,6 +9,7 @@
 layout (push_constant) uniform PushConsts
 {
 	uint num_lights;
+	uint first_tile;
 }
 push_constants;
 
@@ -38,6 +39,21 @@ layout (std430, set = 0, binding = 5) readonly restrict buffer emissive_lights_b
 {
 	emissive_light_t emissive_lights[];
 };
+struct emissive_tile_t
+{
+	uint first_source;
+	uint num_sources;
+	uint packed_tile;
+};
+
+layout (std430, set = 0, binding = 6) readonly restrict buffer emissive_tiles_buffer
+{
+	emissive_tile_t emissive_tiles[];
+};
+layout (std430, set = 0, binding = 7) readonly restrict buffer emissive_source_indices_buffer
+{
+	uint emissive_source_indices[];
+};
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
@@ -58,12 +74,15 @@ bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 lig
 
 #include "lightmap_coords.inc"
 #define EMISSIVE_DETAIL_VISIBILITY
+#define EMISSIVE_SOURCE_INDICES
 #include "emissive_lighting.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
-	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	const emissive_tile_t tile = emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z];
+	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
+	const ivec2 coords = tile_coords * 16 + ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 
@@ -83,7 +102,7 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		contribution = CalculateEmissiveContribution (world_pos, normal);
+		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources);
 		validity = 1.0f;
 	}
 

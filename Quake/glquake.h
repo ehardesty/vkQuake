@@ -712,6 +712,20 @@ typedef struct emissive_light_s
 } emissive_light_t;
 COMPILE_TIME_ASSERT (emissive_light_t, sizeof (emissive_light_t) == 32);
 
+typedef struct emissive_surface_light_s
+{
+	uint32_t surface;
+	uint32_t light;
+} emissive_surface_light_t;
+COMPILE_TIME_ASSERT (emissive_surface_light_t, sizeof (emissive_surface_light_t) == 8);
+
+typedef struct emissive_compute_push_constants_s
+{
+	uint32_t num_lights;
+	uint32_t first_tile;
+} emissive_compute_push_constants_t;
+COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 8);
+
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
@@ -722,9 +736,9 @@ void R_EmissiveDetailLightmapStats (
 void R_EmissiveDetailCompleted (void);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
-void R_SetEmissiveLights (const emissive_light_t *lights, int count);
+void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
-void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, uint64_t *cpu_bytes);
+void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
 void GL_ResetEmissiveCoarseTimestamp (void);
 void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);

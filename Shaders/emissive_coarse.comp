@@ -8,6 +8,7 @@
 layout (push_constant) uniform PushConsts
 {
 	uint num_lights;
+	uint first_tile;
 }
 push_constants;
 
@@ -62,7 +63,7 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		contribution = CalculateEmissiveContribution (world_pos, normal);
+		contribution = CalculateEmissiveContribution (world_pos, normal, 0, push_constants.num_lights);
 	}
 
 	imageStore (output_image, coords, vec4 (contribution, 0.0f));

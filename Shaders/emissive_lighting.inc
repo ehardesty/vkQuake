@@ -1,9 +1,14 @@
-vec3 CalculateEmissiveContribution (const vec3 world_pos, const vec3 normal)
+vec3 CalculateEmissiveContribution (const vec3 world_pos, const vec3 normal, const uint first_source, const uint num_lights)
 {
 	vec3 contribution = vec3 (0.0f);
-	for (uint i = 0; i < push_constants.num_lights; ++i)
+	for (uint i = 0; i < num_lights; ++i)
 	{
-		const emissive_light_t light = emissive_lights[i];
+#ifdef EMISSIVE_SOURCE_INDICES
+		const uint light_index = emissive_source_indices[first_source + i];
+#else
+		const uint light_index = i;
+#endif
+		const emissive_light_t light = emissive_lights[light_index];
 		const vec3			   light_vec = light.origin - world_pos;
 		const float			   dist = length (light_vec);
 		if (dist >= light.radius)

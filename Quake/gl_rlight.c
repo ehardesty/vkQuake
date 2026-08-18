@@ -91,6 +91,8 @@ static int						 num_emissive_world_surfaces;
 static emissive_world_fixture_t *emissive_world_fixtures;
 static int						 num_emissive_world_fixtures;
 static int						 num_emissive_world_receivers;
+static emissive_surface_light_t *emissive_world_surface_lights;
+static int						 num_emissive_world_surface_lights;
 static qmodel_t					*emissive_surface_worldmodel;
 static uint32_t					 emissive_prepare_time_us;
 static qboolean					 emissive_world_lights_uploaded;
@@ -135,9 +137,11 @@ static void R_ClearEmissiveWorldSurfaces (void)
 {
 	SAFE_FREE (emissive_world_surfaces);
 	SAFE_FREE (emissive_world_fixtures);
+	SAFE_FREE (emissive_world_surface_lights);
 	num_emissive_world_surfaces = 0;
 	num_emissive_world_fixtures = 0;
 	num_emissive_world_receivers = 0;
+	num_emissive_world_surface_lights = 0;
 	emissive_surface_worldmodel = NULL;
 	emissive_prepare_time_us = 0;
 	emissive_world_lights_uploaded = false;
@@ -395,6 +399,7 @@ static qboolean R_EmissiveWorldFixtureInfluencesSurface (const qmodel_t *worldmo
 
 static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 {
+	int surface_light_capacity = 0;
 	msurface_t *const first_surface = &worldmodel->surfaces[worldmodel->firstmodelsurface];
 	for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
 	{
@@ -405,11 +410,25 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 		for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
 			if (R_EmissiveWorldFixtureInfluencesSurface (worldmodel, &emissive_world_fixtures[fixture], surface))
 			{
-				surface->emissive_influence = true;
-				++num_emissive_world_receivers;
-				break;
+				if (!surface->emissive_influence)
+				{
+					surface->emissive_influence = true;
+					++num_emissive_world_receivers;
+				}
+				if (num_emissive_world_surface_lights == surface_light_capacity)
+				{
+					surface_light_capacity = surface_light_capacity ? surface_light_capacity * 2 : 64;
+					emissive_world_surface_lights =
+						Mem_Realloc (emissive_world_surface_lights, surface_light_capacity * sizeof (*emissive_world_surface_lights));
+				}
+				emissive_world_surface_lights[num_emissive_world_surface_lights].surface = i;
+				emissive_world_surface_lights[num_emissive_world_surface_lights].light = fixture;
+				++num_emissive_world_surface_lights;
 			}
 	}
+	if (num_emissive_world_surface_lights)
+		emissive_world_surface_lights =
+			Mem_Realloc (emissive_world_surface_lights, num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights));
 }
 
 static void R_UploadEmissiveLights (void)
@@ -426,7 +445,7 @@ static void R_UploadEmissiveLights (void)
 		VectorCopy (fixture->color, lights[i].color);
 		lights[i].intensity = fixture->definition->intensity;
 	}
-	R_SetEmissiveLights (lights, num_emissive_world_fixtures);
+	R_SetEmissiveLights (lights, num_emissive_world_fixtures, emissive_world_surface_lights, num_emissive_world_surface_lights);
 	Mem_Free (lights);
 	emissive_world_lights_uploaded = true;
 }
@@ -472,7 +491,8 @@ static void R_BuildEmissiveWorldSurfaceCache (void)
 		"RT emissives: %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s (%u bytes, %.3f ms)\n", num_emissive_world_surfaces,
 		num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies", num_emissive_world_receivers,
 		num_emissive_world_receivers == 1 ? "" : "s",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)),
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures) +
+			num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights)),
 		(double)emissive_prepare_time_us / 1000.0);
 }
 
@@ -529,7 +549,10 @@ void R_EmissiveRTStats_f (void)
 	qboolean detail_ready;
 	int		 affected_tiles;
 	int		 total_tiles;
+	int		 tile_source_links;
+	int		 tile_dispatches;
 	uint64_t tile_cpu_bytes;
+	uint64_t tile_gpu_bytes;
 	int		 emissive_lights;
 	uint64_t emissive_light_bytes;
 	qboolean coarse_pending;
@@ -543,7 +566,7 @@ void R_EmissiveRTStats_f (void)
 		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
 		&detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
-	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_cpu_bytes);
+	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_source_links, &tile_dispatches, &tile_cpu_bytes, &tile_gpu_bytes);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -553,21 +576,29 @@ void R_EmissiveRTStats_f (void)
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
 	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected"};
 	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
+	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
+	const uint64_t		 max_source_evaluations = (uint64_t)tile_source_links * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE;
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64
 		" logical GPU bytes, %" PRIu64 " allocated GPU bytes, %d uploaded source light%s, %" PRIu64
 		" light-buffer bytes, %.3f ms CPU prepare, last GPU coarse %s, coarse %s, debug view %s\n",
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
 		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies", num_emissive_world_receivers, num_emissive_world_receivers == 1 ? "" : "s",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)),
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures) +
+			num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights)),
 		coarse_lightmaps, coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s",
 		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
 	Con_Printf (
 		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
-		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %" PRIu64 " tile CPU bytes, last GPU detail %s, %s%s\n",
+		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64
+		" tile CPU bytes, %" PRIu64 " tile-list GPU bytes, %d dispatch%s/%d workgroups, %" PRIu64
+		" maximum source evaluation%s, last GPU detail %s, %s%s\n",
 		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, affected_tiles,
-		total_tiles, affected_tiles == 1 ? "" : "s", total_tiles ? 100.0 * affected_tiles / total_tiles : 0.0, tile_cpu_bytes, detail_gpu_time,
-		detail_state, detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
+		total_tiles, affected_tiles == 1 ? "" : "s", total_tiles ? 100.0 * affected_tiles / total_tiles : 0.0, tile_source_links,
+		tile_source_links == 1 ? "" : "s", affected_tiles ? (double)tile_source_links / affected_tiles : 0.0, tile_cpu_bytes, tile_gpu_bytes,
+		tile_dispatches, tile_dispatches == 1 ? "" : "es", detail_workgroups, max_source_evaluations,
+		max_source_evaluations == 1 ? "" : "s", detail_gpu_time, detail_state,
+		detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
 	if (emissive_world_as_build_time_valid)
 		Con_Printf (
 			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, %.3f ms GPU build\n",

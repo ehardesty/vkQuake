@@ -1577,7 +1577,7 @@ void R_CreateDescriptorSetLayouts ()
 
 	{
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 6);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 8);
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1600,7 +1600,7 @@ void R_CreateDescriptorSetLayouts ()
 		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
 		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
 		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 1;
-		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 4;
+		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 6;
 
 		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
 		if (err != VK_SUCCESS)
@@ -2079,7 +2079,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = sizeof (uint32_t);
+		push_constant_range.size = sizeof (emissive_compute_push_constants_t);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -2106,7 +2106,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, emissive_push_constant_range);
 		emissive_push_constant_range.offset = 0;
-		emissive_push_constant_range.size = sizeof (uint32_t);
+		emissive_push_constant_range.size = sizeof (emissive_compute_push_constants_t);
 		emissive_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, emissive_pipeline_layout_create_info);
