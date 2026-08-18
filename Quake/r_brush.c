@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug;
 
 int gl_lightmap_format;
 
@@ -987,13 +987,21 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			const int		  lm_idx = indirect_draws[i].lightmap_idx;
 			gltexture_t		 *emissive_texture = !draw_water && indirect_draws[i].is_world_model && lm_idx >= 0 ? lightmaps[lm_idx].emissive_texture : NULL;
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
-												 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
+											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
+			const qboolean	  emissive_debug = emissive_enabled && r_emissive_rt_debug.value > 0.0f;
 			int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0);
-			vulkan_pipeline_t pipeline = R_PipelineForRenderPass (
-				cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
-				vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
-				vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
+			vulkan_pipeline_t pipeline;
+			if (emissive_debug)
+			{
+				const int debug_pipeline_index = alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
+				pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
+			}
+			else
+				pipeline = R_PipelineForRenderPass (
+					cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
+					vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
+					vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
 			qboolean use_zbias = INDIRECT_ZBIAS && gl_zfix.value && indirect_draws[i].is_bmodel;
@@ -2525,10 +2533,11 @@ void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count
 R_EmissiveCoarseLightStats
 ==================
 */
-void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes)
+void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending)
 {
 	*count = num_emissive_coarse_lights;
 	*allocated_bytes = emissive_coarse_lights_buffer_memory.size;
+	*pending = emissive_coarse_pending;
 }
 
 /*

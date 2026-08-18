@@ -36,7 +36,7 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -3508,7 +3508,7 @@ static void R_CreateWorldPipelines ()
 	base.vertex_input_state.vertexBindingDescriptionCount = 1;
 	base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
 
-	VkSpecializationMapEntry specialization_entries[5];
+	VkSpecializationMapEntry specialization_entries[6];
 	specialization_entries[0].constantID = 0;
 	specialization_entries[0].offset = 0;
 	specialization_entries[0].size = 4;
@@ -3524,15 +3524,19 @@ static void R_CreateWorldPipelines ()
 	specialization_entries[4].constantID = 4;
 	specialization_entries[4].offset = 16;
 	specialization_entries[4].size = 4;
-	uint32_t specialization_data[5];
+	specialization_entries[5].constantID = 5;
+	specialization_entries[5].offset = 20;
+	specialization_entries[5].size = 4;
+	uint32_t specialization_data[6];
 	specialization_data[0] = 0;
 	specialization_data[1] = 0;
 	specialization_data[2] = 0;
 	specialization_data[3] = 0;
 	specialization_data[4] = vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32; // 10-bit lightmap
+	specialization_data[5] = 0;
 
 	VkSpecializationInfo specialization_info;
-	specialization_info.mapEntryCount = countof (specialization_entries);
+	specialization_info.mapEntryCount = countof (specialization_entries) - 1;
 	specialization_info.pMapEntries = specialization_entries;
 	specialization_info.dataSize = sizeof (specialization_data);
 	specialization_info.pData = specialization_data;
@@ -3564,11 +3568,25 @@ static void R_CreateWorldPipelines ()
 							R_CopyPipelineCreateInfos (&infos, &base);
 							infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
 							infos.shader_stages[1].module = emissive_coarse ? world_emissive_frag_module : world_frag_module;
+							infos.shader_stages[1].pSpecializationInfo = &specialization_info;
 							infos.blend_attachment_states[0].blendEnable = alpha_blend ? VK_TRUE : VK_FALSE;
 							infos.depth_stencil_state.depthWriteEnable = alpha_blend ? VK_FALSE : VK_TRUE;
 							R_CreateGraphicsPipeline (
 								&vulkan_globals.world_pipelines[variant][pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
 								va (variant ? "world_main_oit %d" : "world %d", pipeline_index));
+
+							if (emissive_coarse && !fullbright_enabled)
+							{
+								const int debug_pipeline_index = alpha_test + (quantize_lm * 2);
+								specialization_data[5] = 1;
+								specialization_info.mapEntryCount = countof (specialization_entries);
+								infos.shader_stages[1].pSpecializationInfo = &specialization_info;
+								R_CreateGraphicsPipeline (
+									&vulkan_globals.world_emissive_debug_pipelines[variant][debug_pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+									va (variant ? "world_emissive_debug_main_oit %d" : "world_emissive_debug %d", debug_pipeline_index));
+								specialization_data[5] = 0;
+								specialization_info.mapEntryCount = countof (specialization_entries) - 1;
+							}
 						}
 
 						if (alpha_blend)
@@ -4155,6 +4173,12 @@ void R_DestroyPipelines (void)
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_mboit_composite_pipelines[i].handle, NULL);
 		vulkan_globals.world_mboit_composite_pipelines[i].handle = VK_NULL_HANDLE;
 	}
+	for (i = 0; i < WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT; ++i)
+		for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_emissive_debug_pipelines[variant][i].handle, NULL);
+			vulkan_globals.world_emissive_debug_pipelines[variant][i].handle = VK_NULL_HANDLE;
+		}
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.raster_tex_warp_pipeline.handle, NULL);
 	vulkan_globals.raster_tex_warp_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.particle_pipeline.handle, NULL);
@@ -4407,6 +4431,7 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_entdlightscale);
 	Cvar_RegisterVariable (&r_emissive_rt);
 	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);

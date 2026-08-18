@@ -35,6 +35,9 @@ layout (constant_id = 1) const bool use_alpha_test = false;
 layout (constant_id = 2) const bool use_alpha_blend = false;
 layout (constant_id = 3) const bool quantize_lm = false;
 layout (constant_id = 4) const bool scaled_lm = false;
+#ifdef EMISSIVE_COARSE
+layout (constant_id = 5) const bool emissive_coarse_debug = false;
+#endif
 
 #include "world_common.inc"
 

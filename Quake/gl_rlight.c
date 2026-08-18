@@ -34,6 +34,7 @@ extern cvar_t r_lerplightstyles;
 extern cvar_t r_gpulightmapupdate;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
+cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 
 /*
 =============================================================================
@@ -379,15 +380,17 @@ void R_EmissiveRTStats_f (void)
 	uint64_t coarse_allocated_bytes;
 	int		 coarse_lights;
 	uint64_t coarse_light_bytes;
+	qboolean coarse_pending;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
-	R_EmissiveCoarseLightStats (&coarse_lights, &coarse_light_bytes);
+	R_EmissiveCoarseLightStats (&coarse_lights, &coarse_light_bytes, &coarse_pending);
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
-		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes\n",
+		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes, coarse %s, debug view %s\n",
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
 		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
-		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, coarse_lights, coarse_lights == 1 ? "" : "s", coarse_light_bytes);
+		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, coarse_lights, coarse_lights == 1 ? "" : "s", coarse_light_bytes,
+		coarse_pending ? "pending" : "ready", r_emissive_rt_debug.value > 0.0f ? "coarse" : "off");
 }
 
 /*

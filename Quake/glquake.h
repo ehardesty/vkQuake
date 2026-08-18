@@ -189,6 +189,7 @@ typedef struct vulkan_memory_s
 } vulkan_memory_t;
 
 #define WORLD_PIPELINE_COUNT			   32
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 4
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -408,6 +409,7 @@ typedef struct
 	vulkan_pipeline_t		 basic_notex_blend_pipeline[RENDER_PASS_INDEX_COUNT];
 	vulkan_pipeline_layout_t basic_pipeline_layout;
 	vulkan_pipeline_t		 world_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT];
+	vulkan_pipeline_t		 world_emissive_debug_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT];
 	vulkan_pipeline_t		 world_wboit_pipelines[WORLD_PIPELINE_COUNT];
 	vulkan_pipeline_t		 world_mboit_moment_pipelines[WORLD_PIPELINE_COUNT];
 	vulkan_pipeline_t		 world_mboit_composite_pipelines[WORLD_PIPELINE_COUNT];
@@ -706,7 +708,7 @@ extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count);
-void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes);
+void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 

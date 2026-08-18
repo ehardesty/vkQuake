@@ -15,7 +15,10 @@ vec4 WorldFragmentColor ()
 	vec3 light = texture (lightmap_tex, lightmap_uv).rgb * lm_multiplier;
 #ifdef EMISSIVE_COARSE
 	const vec2 emissive_uv_scale = vec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT) / vec2 (textureSize (emissive_coarse_tex, 0));
-	light += texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
+	const vec3 emissive_coarse = texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
+	if (emissive_coarse_debug)
+		return vec4 (emissive_coarse, 1.0);
+	light += emissive_coarse;
 #endif
 
 	vec4 frag_color;

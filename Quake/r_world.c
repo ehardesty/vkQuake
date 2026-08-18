@@ -33,7 +33,7 @@ extern cvar_t r_showtris;
 extern cvar_t r_simd;
 extern cvar_t gl_zfix;
 extern cvar_t r_gpulightmapupdate;
-extern cvar_t r_emissive_rt;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug;
 extern cvar_t vid_filter;
 extern cvar_t vid_palettize;
 
@@ -1161,12 +1161,20 @@ static void R_FlushBatch (
 	{
 		const qboolean emissive_enabled =
 			!alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
+		const qboolean emissive_debug = emissive_enabled && r_emissive_rt_debug.value > 0.0f;
 		int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 										   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0);
-		vulkan_pipeline_t pipeline = R_PipelineForRenderPass (
-			cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
-			vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
-			vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
+		vulkan_pipeline_t pipeline;
+		if (emissive_debug)
+		{
+			const int debug_pipeline_index = alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
+			pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
+		}
+		else
+			pipeline = R_PipelineForRenderPass (
+				cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
+				vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
+				vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
 		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
 		float constant_factor = 0.0f, slope_factor = 0.0f;
