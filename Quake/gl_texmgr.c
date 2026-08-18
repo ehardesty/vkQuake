@@ -1491,14 +1491,14 @@ static void TexMgr_LoadFullbrightMetadata (gltexture_t *glt, const byte *data)
 		if (glt->source_format == SRC_INDEXED)
 		{
 			const byte index = data[i];
-			if (index <= 223 || index == 255)
+			if (index <= 223 || (index == 255 && (glt->flags & TEXPREF_ALPHA)))
 				continue;
 			rgba = (const byte *)&d_8to24table[index];
 		}
 		else if (glt->source_format == SRC_INDEXED_PALETTE)
 		{
 			const byte index = data[i];
-			if (index <= 223 || index == 255 || index >= palette_colors)
+			if (index <= 223 || (index == 255 && (glt->flags & TEXPREF_ALPHA)) || index >= palette_colors)
 				continue;
 			rgba = &palette[index * 3];
 		}
