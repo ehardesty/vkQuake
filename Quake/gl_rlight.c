@@ -89,8 +89,10 @@ static emissive_world_surface_t *emissive_world_surfaces;
 static int						 num_emissive_world_surfaces;
 static emissive_world_fixture_t *emissive_world_fixtures;
 static int						 num_emissive_world_fixtures;
+static int						 num_emissive_world_receivers;
 static qmodel_t					*emissive_surface_worldmodel;
 static uint32_t					 emissive_prepare_time_us;
+static qboolean					 emissive_world_lights_uploaded;
 
 static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
 {
@@ -134,8 +136,10 @@ static void R_ClearEmissiveWorldSurfaces (void)
 	SAFE_FREE (emissive_world_fixtures);
 	num_emissive_world_surfaces = 0;
 	num_emissive_world_fixtures = 0;
+	num_emissive_world_receivers = 0;
 	emissive_surface_worldmodel = NULL;
 	emissive_prepare_time_us = 0;
+	emissive_world_lights_uploaded = false;
 }
 
 static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex)
@@ -296,6 +300,117 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 	Mem_Free (surface_groups);
 }
 
+static float R_PointTriangleDistanceSquared (const vec3_t point, const vec3_t a, const vec3_t b, const vec3_t c)
+{
+	vec3_t ab, ac, ap;
+	VectorSubtract (b, a, ab);
+	VectorSubtract (c, a, ac);
+	VectorSubtract (point, a, ap);
+	const float d1 = DotProduct (ab, ap);
+	const float d2 = DotProduct (ac, ap);
+	if (d1 <= 0.0f && d2 <= 0.0f)
+		return DotProduct (ap, ap);
+
+	vec3_t bp;
+	VectorSubtract (point, b, bp);
+	const float d3 = DotProduct (ab, bp);
+	const float d4 = DotProduct (ac, bp);
+	if (d3 >= 0.0f && d4 <= d3)
+		return DotProduct (bp, bp);
+
+	const float vc = d1 * d4 - d3 * d2;
+	if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+	{
+		const float v = d1 / (d1 - d3);
+		vec3_t		closest, delta;
+		VectorMA (a, v, ab, closest);
+		VectorSubtract (point, closest, delta);
+		return DotProduct (delta, delta);
+	}
+
+	vec3_t cp;
+	VectorSubtract (point, c, cp);
+	const float d5 = DotProduct (ab, cp);
+	const float d6 = DotProduct (ac, cp);
+	if (d6 >= 0.0f && d5 <= d6)
+		return DotProduct (cp, cp);
+
+	const float vb = d5 * d2 - d1 * d6;
+	if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+	{
+		const float w = d2 / (d2 - d6);
+		vec3_t		closest, delta;
+		VectorMA (a, w, ac, closest);
+		VectorSubtract (point, closest, delta);
+		return DotProduct (delta, delta);
+	}
+
+	const float va = d3 * d6 - d5 * d4;
+	if (va <= 0.0f && d4 - d3 >= 0.0f && d5 - d6 >= 0.0f)
+	{
+		const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		vec3_t		bc, closest, delta;
+		VectorSubtract (c, b, bc);
+		VectorMA (b, w, bc, closest);
+		VectorSubtract (point, closest, delta);
+		return DotProduct (delta, delta);
+	}
+
+	const float denominator = 1.0f / (va + vb + vc);
+	const float v = vb * denominator;
+	const float w = vc * denominator;
+	vec3_t		closest, delta;
+	VectorCopy (a, closest);
+	VectorMA (closest, v, ab, closest);
+	VectorMA (closest, w, ac, closest);
+	VectorSubtract (point, closest, delta);
+	return DotProduct (delta, delta);
+}
+
+static qboolean R_EmissiveWorldFixtureInfluencesSurface (const qmodel_t *worldmodel, const emissive_world_fixture_t *fixture, const msurface_t *surface)
+{
+	vec3_t normal;
+	VectorCopy (surface->plane->normal, normal);
+	float plane_dist = surface->plane->dist;
+	if (surface->flags & SURF_PLANEBACK)
+	{
+		VectorScale (normal, -1.0f, normal);
+		plane_dist = -plane_dist;
+	}
+	if (DotProduct (fixture->origin, normal) <= plane_dist)
+		return false;
+
+	const float	  radius_squared = fixture->definition->radius * fixture->definition->radius;
+	const vec3_t *first = R_EmissiveWorldSurfaceVertex (worldmodel, surface, 0);
+	for (int vertex = 1; vertex < surface->numedges - 1; ++vertex)
+	{
+		const vec3_t *second = R_EmissiveWorldSurfaceVertex (worldmodel, surface, vertex);
+		const vec3_t *third = R_EmissiveWorldSurfaceVertex (worldmodel, surface, vertex + 1);
+		if (R_PointTriangleDistanceSquared (fixture->origin, *first, *second, *third) < radius_squared)
+			return true;
+	}
+	return false;
+}
+
+static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
+{
+	msurface_t *const first_surface = &worldmodel->surfaces[worldmodel->firstmodelsurface];
+	for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
+	{
+		msurface_t *const surface = &first_surface[i];
+		surface->emissive_influence = false;
+		if (surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
+			continue;
+		for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
+			if (R_EmissiveWorldFixtureInfluencesSurface (worldmodel, &emissive_world_fixtures[fixture], surface))
+			{
+				surface->emissive_influence = true;
+				++num_emissive_world_receivers;
+				break;
+			}
+	}
+}
+
 static void R_UploadEmissiveLights (void)
 {
 	if (!num_emissive_world_fixtures)
@@ -312,18 +427,15 @@ static void R_UploadEmissiveLights (void)
 	}
 	R_SetEmissiveLights (lights, num_emissive_world_fixtures);
 	Mem_Free (lights);
+	emissive_world_lights_uploaded = true;
 }
 
-static void R_BuildEmissiveWorldSurfaces (void)
+static void R_BuildEmissiveWorldSurfaceCache (void)
 {
-	if (r_emissive_rt.value <= 0.0f || !cl.worldmodel)
+	if (!cl.worldmodel)
 		return;
 	if (emissive_surface_worldmodel == cl.worldmodel)
-	{
-		if (num_emissive_world_fixtures)
-			R_AllocateEmissiveLightmaps ();
 		return;
-	}
 	const double prepare_start = Sys_DoubleTime ();
 
 	R_ClearEmissiveWorldSurfaces ();
@@ -350,31 +462,54 @@ static void R_BuildEmissiveWorldSurfaces (void)
 		}
 		assert (surface_index == num_emissive_world_surfaces);
 		R_BuildEmissiveWorldFixtures (worldmodel);
-		if (num_emissive_world_fixtures)
-		{
-			R_AllocateEmissiveLightmaps ();
-			R_UploadEmissiveLights ();
-		}
 	}
+	R_ClassifyEmissiveWorldReceivers (worldmodel);
 
 	emissive_surface_worldmodel = worldmodel;
 	emissive_prepare_time_us = (uint32_t)((Sys_DoubleTime () - prepare_start) * 1000000.0);
 	Con_DPrintf (
-		"RT emissives: %d cacheable world surface%s, %d fixture prox%s (%u bytes)\n", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
-		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)));
+		"RT emissives: %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s (%u bytes, %.3f ms)\n", num_emissive_world_surfaces,
+		num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies", num_emissive_world_receivers,
+		num_emissive_world_receivers == 1 ? "" : "s",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)),
+		(double)emissive_prepare_time_us / 1000.0);
+}
+
+static void R_ActivateEmissiveWorldSurfaceCache (void)
+{
+	if (r_emissive_rt.value <= 0.0f || !num_emissive_world_fixtures)
+		return;
+	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
+	R_AllocateEmissiveLightmaps ();
+	if (!emissive_world_lights_uploaded)
+		R_UploadEmissiveLights ();
+}
+
+void R_EmissiveRTPrepareNewMap (void)
+{
+	R_ClearEmissiveWorldSurfaces ();
+	if (r_emissive_rt.value <= 0.0f)
+		return;
+	R_BuildEmissiveWorldSurfaceCache ();
 }
 
 void R_EmissiveRTNewMap (void)
 {
-	R_ClearEmissiveWorldSurfaces ();
-	R_BuildEmissiveWorldSurfaces ();
+	if (r_emissive_rt.value <= 0.0f)
+		return;
+	R_BuildEmissiveWorldSurfaceCache ();
+	R_ActivateEmissiveWorldSurfaceCache ();
 }
 
 void R_EmissiveRTChanged_f (cvar_t *var)
 {
 	if (var->value > 0.0f)
-		R_BuildEmissiveWorldSurfaces ();
+	{
+		R_BuildEmissiveWorldSurfaceCache ();
+		R_ActivateEmissiveWorldSurfaceCache ();
+	}
+	else if (cl.worldmodel)
+		GL_RebuildIndirectDraws (false);
 }
 
 void R_EmissiveRTStats_f (void)
@@ -397,14 +532,17 @@ void R_EmissiveRTStats_f (void)
 	const char *detail_gpu_time = rs_emissive_detail_gputime_valid ? va ("%.3f ms", (double)rs_emissive_detail_gputime_us / 1000.0) : "unavailable";
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
+	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected"};
+	const int			 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	Con_Printf (
-		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
-		" allocated GPU bytes, %d uploaded source light%s, %" PRIu64 " light-buffer bytes, %.3f ms CPU prepare, last GPU coarse %s, coarse %s, debug view %s\n",
-		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
-		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
-		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s", emissive_light_bytes,
-		(double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, r_emissive_rt_debug.value > 0.0f ? "coarse" : "off");
+		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64
+		" logical GPU bytes, %" PRIu64 " allocated GPU bytes, %d uploaded source light%s, %" PRIu64
+		" light-buffer bytes, %.3f ms CPU prepare, last GPU coarse %s, coarse %s, debug view %s\n",
+		r_emissive_rt.value > 0.0f ? "enabled" : "disabled", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
+		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies", num_emissive_world_receivers, num_emissive_world_receivers == 1 ? "" : "s",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)),
+		coarse_lightmaps, coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s",
+		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
 	Con_Printf (
 		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, last GPU detail %s, %s\n",
 		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_gpu_time, detail_state);

@@ -59,14 +59,19 @@ typedef struct
 	texture_t *texture;
 	short	   lightmap_idx;
 	byte	   is_bmodel; // for gl_zfix
-	byte	   is_world_model;
+	byte	   world_flags;
 	int		   max_indices;
 } indirectdraw_t;
+
+#define INDIRECT_WORLD_MODEL		1
+#define INDIRECT_EMISSIVE_INFLUENCE 2
+COMPILE_TIME_ASSERT (indirectdraw_t, sizeof (indirectdraw_t) == 16);
 
 #define MAX_INDIRECT_DRAWS 32768
 static indirectdraw_t indirect_draws[MAX_INDIRECT_DRAWS];
 static int			  used_indirect_draws = 0;
 static uint32_t		  indirect_bmodel_start;
+static qboolean		  indirect_emissive_grouping;
 
 #define INDIRECT_ZBIAS 1 // suport gl_zfix for nontransformed models. Costs extra indirect drawcalls
 extern cvar_t gl_zfix;
@@ -926,8 +931,11 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 
 	gltexture_t *lastfullbright = NULL;
 	gltexture_t *lastemissive = NULL;
+	gltexture_t *lastemissivedetail = NULL;
 	gltexture_t *lastlightmap = NULL;
 	gltexture_t *lasttexture = NULL;
+	const int	 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 4);
+	const qboolean detail_ready = R_EmissiveDetailReady ();
 	float		 last_alpha = FLT_MAX;
 	float		 last_constant_factor = FLT_MAX;
 
@@ -988,16 +996,22 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			const qboolean	  alpha_test = texture->type == TEXTYPE_CUTOUT;
 			const qboolean	  alpha_blend = alpha < 1.0f;
 			const int		  lm_idx = indirect_draws[i].lightmap_idx;
-			gltexture_t		 *emissive_texture = !draw_water && indirect_draws[i].is_world_model && lm_idx >= 0 ? lightmaps[lm_idx].emissive_texture : NULL;
+			gltexture_t		 *emissive_texture =
+				!draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0 ? lightmaps[lm_idx].emissive_texture : NULL;
+			gltexture_t *emissive_detail_texture =
+				!draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0 ? lightmaps[lm_idx].emissive_detail_texture : NULL;
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
-			const qboolean	  emissive_debug = emissive_enabled && r_emissive_rt_debug.value > 0.0f;
+			const qboolean	  detail_enabled = emissive_enabled && emissive_detail_texture && detail_ready;
+			const qboolean	  emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || detail_enabled);
 			int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
-											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0);
+											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) +
+											   (detail_enabled ? 32 : 0);
 			vulkan_pipeline_t pipeline;
 			if (emissive_debug)
 			{
-				const int debug_pipeline_index = alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
+				const int debug_pipeline_index =
+					alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4);
 				pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
 			}
 			else
@@ -1040,6 +1054,14 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &emissive_texture->descriptor_set, 0, NULL);
 				lastemissive = emissive_texture;
+			}
+			gltexture_t *const emissive_detail_binding = emissive_detail_texture ? emissive_detail_texture : emissive_texture;
+			if (emissive_enabled && lastemissivedetail != emissive_detail_binding)
+			{
+				vulkan_globals.vk_cmd_bind_descriptor_sets (
+					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1,
+					&emissive_detail_binding->descriptor_set, 0, NULL);
+				lastemissivedetail = emissive_detail_binding;
 			}
 		}
 
@@ -1372,12 +1394,14 @@ static void R_AssignWorkgroupBounds (msurface_t *surf, int submodel)
 UpdateIndirectStructs
 ================
 */
-static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolean is_world_model)
+static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolean is_world_model, qboolean emissive_grouping)
 {
 	static int last;
 	int		   i;
+	const byte world_flags =
+		(is_world_model ? INDIRECT_WORLD_MODEL : 0) | (is_world_model && emissive_grouping && surf->emissive_influence ? INDIRECT_EMISSIVE_INFLUENCE : 0);
 	if (last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum && indirect_draws[last].texture == surf->texinfo->texture &&
-		indirect_draws[last].is_bmodel == is_bmodel && indirect_draws[last].is_world_model == is_world_model)
+		indirect_draws[last].is_bmodel == is_bmodel && indirect_draws[last].world_flags == world_flags)
 	{
 		surf->indirect_idx = last;
 		indirect_draws[last].max_indices += 3 * (surf->numedges - 2);
@@ -1386,7 +1410,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 	for (i = 0; i < used_indirect_draws; i++)
 	{
 		if (indirect_draws[i].lightmap_idx == surf->lightmaptexturenum && indirect_draws[i].texture == surf->texinfo->texture &&
-			indirect_draws[i].is_bmodel == is_bmodel && indirect_draws[i].is_world_model == is_world_model)
+			indirect_draws[i].is_bmodel == is_bmodel && indirect_draws[i].world_flags == world_flags)
 		{
 			surf->indirect_idx = last = i;
 			indirect_draws[i].max_indices += 3 * (surf->numedges - 2);
@@ -1403,7 +1427,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 	indirect_draws[i].texture = surf->texinfo->texture;
 	indirect_draws[i].lightmap_idx = surf->lightmaptexturenum;
 	indirect_draws[i].is_bmodel = is_bmodel;
-	indirect_draws[i].is_world_model = is_world_model;
+	indirect_draws[i].world_flags = world_flags;
 	indirect_draws[i].max_indices = 3 * (surf->numedges - 2);
 }
 
@@ -1930,6 +1954,7 @@ void GL_BuildLightmaps (void)
 	memset (shelf_idx, 0, sizeof (shelf_idx));
 	used_indirect_draws = 0;
 	indirect_ready = true;
+	indirect_emissive_grouping = r_emissive_rt.value > 0.0f;
 	indirect_bmodel_start = INT_MAX;
 	used_deps_data = 0;
 	Mem_Free (brush_deps_data);
@@ -1990,7 +2015,7 @@ void GL_BuildLightmaps (void)
 					R_AssignWorkgroupBounds (surf, submodel);
 			}
 			if (indirect_ready)
-				UpdateIndirectStructs (surf, INDIRECT_ZBIAS && surface_index >= indirect_bmodel_start, j == 1 && submodel == 0);
+				UpdateIndirectStructs (surf, INDIRECT_ZBIAS && surface_index >= indirect_bmodel_start, j == 1 && submodel == 0, indirect_emissive_grouping);
 
 			lm_compute_surface_data_t *surf_data = &surface_data[surface_index];
 			surf_data->packed_lightstyles = ((uint32_t)(surf->styles[0]) << 0) | ((uint32_t)(surf->styles[1]) << 8) | ((uint32_t)(surf->styles[2]) << 16) |
@@ -2141,6 +2166,110 @@ void GL_SetupIndirectDraws ()
 		if (m->name[0] == '*')
 			R_CalcDeps (m, NULL);
 	}
+}
+
+/*
+==================
+GL_RebuildIndirectDraws
+
+Regroup indirect draws after an RT-emissive runtime toggle without rebuilding
+lightmaps or changing the surface-data buffer referenced by their descriptors.
+==================
+*/
+void GL_RebuildIndirectDraws (qboolean emissive_grouping)
+{
+	if (!cl.worldmodel || !indirect_ready || indirect_emissive_grouping == emissive_grouping)
+		return;
+
+	GL_WaitForDeviceIdle ();
+	const double rebuild_start = Sys_DoubleTime ();
+	const int previous_used_indirect_draws = used_indirect_draws;
+	TEMP_ALLOC (indirectdraw_t, previous_indirect_draws, previous_used_indirect_draws);
+	memcpy (previous_indirect_draws, indirect_draws, previous_used_indirect_draws * sizeof (*previous_indirect_draws));
+	used_indirect_draws = 0;
+	indirect_ready = true;
+
+	TEMP_ALLOC (uint32_t, packed_tex_edgecounts, num_surfaces);
+	TEMP_ALLOC (VkBufferCopy, copy_regions, num_surfaces);
+	TEMP_ALLOC (msurface_t *, regrouped_surfaces, num_surfaces);
+	TEMP_ALLOC (int, previous_indirect_indices, num_surfaces);
+	uint32_t surface_index = 0;
+	int		 current_submodel = 0;
+	for (int j = 1; j < MAX_MODELS; ++j)
+	{
+		qmodel_t *const model = cl.model_precache[j];
+		if (!model)
+			break;
+		if (model->name[0] == '*')
+			continue;
+
+		for (int i = 0; i < model->numsurfaces; ++i)
+		{
+			int submodel = 0;
+			if (j == 1)
+			{
+				while ((current_submodel + 1) < model->numsubmodels && i >= model->submodels[current_submodel + 1].firstface)
+					++current_submodel;
+				if (current_submodel < num_worldmodel_submodels)
+					submodel = current_submodel;
+			}
+
+			msurface_t *const surface = &model->surfaces[i];
+			regrouped_surfaces[surface_index] = surface;
+			previous_indirect_indices[surface_index] = surface->indirect_idx;
+			UpdateIndirectStructs (surface, INDIRECT_ZBIAS && surface_index >= indirect_bmodel_start, j == 1 && submodel == 0, emissive_grouping);
+			if (!indirect_ready)
+				break;
+
+			packed_tex_edgecounts[surface_index] = surface->indirect_idx | !!(surface->flags & SURF_PLANEBACK) << 15 | surface->numedges << 16;
+			copy_regions[surface_index].srcOffset = surface_index * sizeof (*packed_tex_edgecounts);
+			copy_regions[surface_index].dstOffset =
+				surface_index * sizeof (lm_compute_surface_data_t) + offsetof (lm_compute_surface_data_t, packed_tex_edgecount);
+			copy_regions[surface_index].size = sizeof (*packed_tex_edgecounts);
+			++surface_index;
+		}
+		if (!indirect_ready)
+			break;
+	}
+
+	if (indirect_ready)
+	{
+		assert (surface_index == (uint32_t)num_surfaces);
+		VkCommandBuffer command_buffer;
+		VkBuffer		staging_buffer;
+		int				staging_offset;
+		uint32_t *const staging_memory =
+			(uint32_t *)R_StagingAllocate (num_surfaces * sizeof (*packed_tex_edgecounts), 4, &command_buffer, &staging_buffer, &staging_offset);
+		for (uint32_t i = 0; i < surface_index; ++i)
+			copy_regions[i].srcOffset += staging_offset;
+		vkCmdCopyBuffer (command_buffer, staging_buffer, surface_data_buffer, surface_index, copy_regions);
+		R_StagingBeginCopy ();
+		memcpy (staging_memory, packed_tex_edgecounts, num_surfaces * sizeof (*packed_tex_edgecounts));
+		R_StagingEndCopy ();
+
+		indirect_emissive_grouping = emissive_grouping;
+		used_deps_data = 0;
+		Mem_Free (brush_deps_data);
+		GL_SetupIndirectDraws ();
+		Con_DPrintf (
+			"RT emissives: rebuilt %d indirect draw%s in %.3f ms\n", used_indirect_draws, used_indirect_draws == 1 ? "" : "s",
+			(Sys_DoubleTime () - rebuild_start) * 1000.0);
+	}
+	else
+	{
+		memcpy (indirect_draws, previous_indirect_draws, previous_used_indirect_draws * sizeof (*indirect_draws));
+		used_indirect_draws = previous_used_indirect_draws;
+		indirect_ready = true;
+		for (uint32_t i = 0; i < surface_index; ++i)
+			regrouped_surfaces[i]->indirect_idx = previous_indirect_indices[i];
+		Con_Warning ("map exceeds indirect dispatch limits after RT-emissive regroup\n");
+	}
+
+	TEMP_FREE (previous_indirect_indices);
+	TEMP_FREE (regrouped_surfaces);
+	TEMP_FREE (copy_regions);
+	TEMP_FREE (packed_tex_edgecounts);
+	TEMP_FREE (previous_indirect_draws);
 }
 
 /*
@@ -2477,6 +2606,16 @@ void R_EmissiveDetailCompleted (void)
 {
 	emissive_detail_building = false;
 	emissive_detail_ready = true;
+}
+
+/*
+==================
+R_EmissiveDetailReady
+==================
+*/
+qboolean R_EmissiveDetailReady (void)
+{
+	return emissive_detail_ready;
 }
 
 /*

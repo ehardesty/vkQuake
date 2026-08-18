@@ -188,8 +188,8 @@ typedef struct vulkan_memory_s
 	vulkan_memory_type_t type;
 } vulkan_memory_t;
 
-#define WORLD_PIPELINE_COUNT			   32
-#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 4
+#define WORLD_PIPELINE_COUNT			   64
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 16
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -719,6 +719,7 @@ void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *all
 void R_EmissiveDetailLightmapStats (
 	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, qboolean *pending, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
+qboolean R_EmissiveDetailReady (void);
 void R_SetEmissiveLights (const emissive_light_t *lights, int count);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void GL_ResetEmissiveCoarseTimestamp (void);
@@ -755,6 +756,7 @@ void R_NewGame (void);
 
 void R_AnimateLight (void);
 void R_EmissiveRTNewMap (void);
+void		  R_EmissiveRTPrepareNewMap (void);
 void R_EmissiveRTChanged_f (cvar_t *var);
 void R_EmissiveRTStats_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
@@ -814,6 +816,7 @@ void GL_UpdateLightmapDescriptorSets (void);
 void GL_DeleteBModelVertexBuffer (void);
 void GL_DeleteBModelAccelerationStructures (void);
 void GL_BuildBModelVertexBuffer (void);
+void GL_RebuildIndirectDraws (qboolean emissive_grouping);
 void GL_BuildBModelAccelerationStructures (void);
 void GL_PrepareSIMDAndParallelData (void);
 void GLMesh_UploadBuffers (

@@ -25,6 +25,9 @@ layout (set = 1, binding = 0) uniform sampler2D lightmap_tex;
 layout (set = 2, binding = 0) uniform sampler2D fullbright_tex;
 #ifdef EMISSIVE_COARSE
 layout (set = 5, binding = 0) uniform sampler2D emissive_coarse_tex;
+#ifdef EMISSIVE_DETAIL
+layout (set = 6, binding = 0) uniform sampler2D emissive_detail_tex;
+#endif
 #endif
 
 layout (location = 0) in vec4 in_texcoords;
@@ -36,7 +39,10 @@ layout (constant_id = 2) const bool use_alpha_blend = false;
 layout (constant_id = 3) const bool quantize_lm = false;
 layout (constant_id = 4) const bool scaled_lm = false;
 #ifdef EMISSIVE_COARSE
-layout (constant_id = 5) const bool emissive_coarse_debug = false;
+layout (constant_id = 5) const uint emissive_debug_mode = 0;
+#ifdef EMISSIVE_DETAIL
+layout (constant_id = 6) const bool emissive_detail_enabled = false;
+#endif
 #endif
 
 #include "world_common.inc"

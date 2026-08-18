@@ -15,10 +15,35 @@ vec4 WorldFragmentColor ()
 	vec3 light = texture (lightmap_tex, lightmap_uv).rgb * lm_multiplier;
 #ifdef EMISSIVE_COARSE
 	const vec2 emissive_uv_scale = vec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT) / vec2 (textureSize (emissive_coarse_tex, 0));
-	const vec3 emissive_coarse = texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
-	if (emissive_coarse_debug)
-		return vec4 (emissive_coarse, 1.0);
-	light += emissive_coarse;
+	vec3	   emissive_selected;
+#ifdef EMISSIVE_DETAIL
+	if (emissive_detail_enabled)
+	{
+		const ivec2 emissive_detail_size = textureSize (emissive_detail_tex, 0);
+		const ivec2 emissive_detail_coords =
+			clamp (ivec2 (lightmap_uv * vec2 (LMBLOCK_WIDTH * 2, LMBLOCK_HEIGHT * 2)), ivec2 (0), emissive_detail_size - ivec2 (1));
+		const vec4 emissive_detail = texelFetch (emissive_detail_tex, emissive_detail_coords, 0);
+		if (emissive_debug_mode == 2)
+			return vec4 (emissive_detail.rgb, 1.0);
+		if (emissive_debug_mode == 3)
+			return vec4 (vec3 (emissive_detail.a), 1.0);
+		if (emissive_detail.a >= 0.5)
+			emissive_selected = emissive_detail.rgb;
+		else
+			emissive_selected = texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
+	}
+	else
+#endif
+	{
+		emissive_selected = texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
+		if (emissive_debug_mode == 1)
+			return vec4 (emissive_selected, 1.0);
+	}
+#ifdef EMISSIVE_DETAIL
+	if (emissive_debug_mode == 4)
+		return vec4 (emissive_selected, 1.0);
+#endif
+	light += emissive_selected;
 #endif
 
 	vec4 frag_color;
