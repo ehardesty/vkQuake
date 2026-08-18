@@ -2420,16 +2420,45 @@ void R_AllocateEmissiveLightmaps (void)
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
-		if (!world_lightmaps[i] || lightmap->emissive_texture)
+		if (!world_lightmaps[i])
 			continue;
 		char name[32];
-		q_snprintf (name, sizeof (name), "emissive_coarse_%07i", i);
 		const int width = lightmap->surface_indices_texture->width;
 		const int height = lightmap->surface_indices_texture->height;
-		lightmap->emissive_texture = TexMgr_LoadImage (
-			cl.worldmodel, name, width, height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		if (!lightmap->emissive_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_coarse_%07i", i);
+			lightmap->emissive_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, width, height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		}
+		if (!lightmap->emissive_detail_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_detail_%07i", i);
+			lightmap->emissive_detail_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, width * EMISSIVE_DETAIL_SCALE, height * EMISSIVE_DETAIL_SCALE, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		}
 	}
 	Mem_Free (world_lightmaps);
+}
+
+/*
+==================
+R_EmissiveDetailLightmapStats
+==================
+*/
+void R_EmissiveDetailLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes)
+{
+	*count = 0;
+	*logical_bytes = 0;
+	*allocated_bytes = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+		if (lightmaps[i].emissive_detail_texture)
+		{
+			++*count;
+			*logical_bytes += (uint64_t)lightmaps[i].emissive_detail_texture->width * lightmaps[i].emissive_detail_texture->height * 8;
+			*allocated_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_detail_texture->allocation);
+		}
 }
 
 /*

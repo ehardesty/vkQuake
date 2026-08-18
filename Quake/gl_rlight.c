@@ -382,13 +382,18 @@ void R_EmissiveRTStats_f (void)
 	int		  coarse_lightmaps;
 	uint64_t coarse_logical_bytes;
 	uint64_t coarse_allocated_bytes;
+	int		 detail_lightmaps;
+	uint64_t detail_logical_bytes;
+	uint64_t detail_allocated_bytes;
 	int		 coarse_lights;
 	uint64_t coarse_light_bytes;
 	qboolean coarse_pending;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
+	R_EmissiveDetailLightmapStats (&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes);
 	R_EmissiveCoarseLightStats (&coarse_lights, &coarse_light_bytes, &coarse_pending);
 	const char *coarse_gpu_time = rs_emissive_coarse_gputime_valid ? va ("%.3f ms", (double)rs_emissive_coarse_gputime_us / 1000.0) : "unavailable";
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
+	const char *detail_state = detail_lightmaps ? "unbuilt" : "unavailable";
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
 		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes, %.3f ms CPU prepare, last GPU coarse %s, coarse %s, debug view %s\n",
@@ -397,6 +402,9 @@ void R_EmissiveRTStats_f (void)
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
 		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, coarse_lights, coarse_lights == 1 ? "" : "s", coarse_light_bytes,
 		(double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, r_emissive_rt_debug.value > 0.0f ? "coarse" : "off");
+	Con_Printf (
+		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %s\n", detail_lightmaps,
+		detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_state);
 }
 
 /*

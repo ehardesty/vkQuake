@@ -647,6 +647,8 @@ extern int gl_lightmap_format;
 #define LM_CULL_BLOCK_W 128
 #define LM_CULL_BLOCK_H 256
 
+#define EMISSIVE_DETAIL_SCALE 2
+
 #define LM_WORKGROUP_SUBMODEL_EMPTY 0xFFFFFFFE // no surfaces assigned yet, converted to 0 before upload
 #define LM_WORKGROUP_SUBMODEL_MIXED 0xFFFFFFFF // surfaces from multiple coordinate spaces, the shader can't cull and passes all lights
 
@@ -670,6 +672,7 @@ struct lightmap_s
 {
 	gltexture_t	   *texture;
 	gltexture_t	   *emissive_texture;
+	gltexture_t	   *emissive_detail_texture; // resolved RGB detail; alpha is publication validity
 	gltexture_t	   *surface_indices_texture;
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
@@ -709,6 +712,7 @@ extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
+void R_EmissiveDetailLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count);
 void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void GL_ResetEmissiveCoarseTimestamp (void);
