@@ -5,16 +5,18 @@ vec4 WorldFragmentColor ()
 		discard;
 
 	float lm_multiplier = scaled_lm ? 8.0f : 2.0f;
-	vec3  light;
+	vec2  lightmap_uv = in_texcoords.zw;
 
 	if (quantize_lm)
 	{
 		ivec2 lm_size = ivec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT);
-		vec2  uv_exp = (floor ((lm_size * 16) * in_texcoords.zw) + 0.5) / (lm_size * 16);
-		light = texture (lightmap_tex, uv_exp).rgb * lm_multiplier;
+		lightmap_uv = (floor ((lm_size * 16) * lightmap_uv) + 0.5) / (lm_size * 16);
 	}
-	else
-		light = texture (lightmap_tex, in_texcoords.zw).rgb * lm_multiplier;
+	vec3 light = texture (lightmap_tex, lightmap_uv).rgb * lm_multiplier;
+#ifdef EMISSIVE_COARSE
+	const vec2 emissive_uv_scale = vec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT) / vec2 (textureSize (emissive_coarse_tex, 0));
+	light += texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;
+#endif
 
 	vec4 frag_color;
 	frag_color.rgb = diffuse.rgb * light.rgb;

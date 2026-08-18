@@ -35,6 +35,7 @@ DECLARE_SHADER_SPV (basic_alphatest_frag);
 DECLARE_SHADER_SPV (basic_notex_frag);
 DECLARE_SHADER_SPV (world_vert);
 DECLARE_SHADER_SPV (world_frag);
+DECLARE_SHADER_SPV (world_emissive_frag);
 DECLARE_SHADER_SPV (world_oit_frag);
 DECLARE_SHADER_SPV (world_mboit_moment_frag);
 DECLARE_SHADER_SPV (world_mboit_composite_frag);

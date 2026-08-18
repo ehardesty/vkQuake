@@ -58,7 +58,8 @@ typedef struct
 {
 	texture_t *texture;
 	short	   lightmap_idx;
-	short	   is_bmodel; // for gl_zfix
+	byte	   is_bmodel; // for gl_zfix
+	byte	   is_world_model;
 	int		   max_indices;
 } indirectdraw_t;
 
@@ -921,6 +922,7 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 	}
 
 	gltexture_t *lastfullbright = NULL;
+	gltexture_t *lastemissive = NULL;
 	gltexture_t *lastlightmap = NULL;
 	gltexture_t *lasttexture = NULL;
 	float		 last_alpha = FLT_MAX;
@@ -980,10 +982,14 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 
 		if (!draw_sky)
 		{
-			const qboolean alpha_test = texture->type == TEXTYPE_CUTOUT;
-			const qboolean alpha_blend = alpha < 1.0f;
-			int			   pipeline_index =
-				(fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) + (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0);
+			const qboolean	  alpha_test = texture->type == TEXTYPE_CUTOUT;
+			const qboolean	  alpha_blend = alpha < 1.0f;
+			const int		  lm_idx = indirect_draws[i].lightmap_idx;
+			gltexture_t		 *emissive_texture = !draw_water && indirect_draws[i].is_world_model && lm_idx >= 0 ? lightmaps[lm_idx].emissive_texture : NULL;
+			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
+												 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
+			int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
+											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0);
 			vulkan_pipeline_t pipeline = R_PipelineForRenderPass (
 				cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
 				vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
@@ -1011,13 +1017,18 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				last_constant_factor = constant_factor;
 			}
 
-			const int	 lm_idx = indirect_draws[i].lightmap_idx;
 			gltexture_t *lightmap_texture = (r_fullbright_cheatsafe || lm_idx < 0) ? greylightmap : lightmaps[lm_idx].texture;
 			if (lastlightmap != lightmap_texture)
 			{
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 1, 1, &lightmap_texture->descriptor_set, 0, NULL);
 				lastlightmap = lightmap_texture;
+			}
+			if (emissive_enabled && lastemissive != emissive_texture)
+			{
+				vulkan_globals.vk_cmd_bind_descriptor_sets (
+					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &emissive_texture->descriptor_set, 0, NULL);
+				lastemissive = emissive_texture;
 			}
 		}
 
@@ -1350,12 +1361,12 @@ static void R_AssignWorkgroupBounds (msurface_t *surf, int submodel)
 UpdateIndirectStructs
 ================
 */
-static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel)
+static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolean is_world_model)
 {
 	static int last;
 	int		   i;
 	if (last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum && indirect_draws[last].texture == surf->texinfo->texture &&
-		indirect_draws[last].is_bmodel == is_bmodel)
+		indirect_draws[last].is_bmodel == is_bmodel && indirect_draws[last].is_world_model == is_world_model)
 	{
 		surf->indirect_idx = last;
 		indirect_draws[last].max_indices += 3 * (surf->numedges - 2);
@@ -1364,7 +1375,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel)
 	for (i = 0; i < used_indirect_draws; i++)
 	{
 		if (indirect_draws[i].lightmap_idx == surf->lightmaptexturenum && indirect_draws[i].texture == surf->texinfo->texture &&
-			indirect_draws[i].is_bmodel == is_bmodel)
+			indirect_draws[i].is_bmodel == is_bmodel && indirect_draws[i].is_world_model == is_world_model)
 		{
 			surf->indirect_idx = last = i;
 			indirect_draws[i].max_indices += 3 * (surf->numedges - 2);
@@ -1381,6 +1392,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel)
 	indirect_draws[i].texture = surf->texinfo->texture;
 	indirect_draws[i].lightmap_idx = surf->lightmaptexturenum;
 	indirect_draws[i].is_bmodel = is_bmodel;
+	indirect_draws[i].is_world_model = is_world_model;
 	indirect_draws[i].max_indices = 3 * (surf->numedges - 2);
 }
 
@@ -1965,7 +1977,7 @@ void GL_BuildLightmaps (void)
 					R_AssignWorkgroupBounds (surf, submodel);
 			}
 			if (indirect_ready)
-				UpdateIndirectStructs (surf, INDIRECT_ZBIAS && surface_index >= indirect_bmodel_start);
+				UpdateIndirectStructs (surf, INDIRECT_ZBIAS && surface_index >= indirect_bmodel_start, j == 1 && submodel == 0);
 
 			lm_compute_surface_data_t *surf_data = &surface_data[surface_index];
 			surf_data->packed_lightstyles = ((uint32_t)(surf->styles[0]) << 0) | ((uint32_t)(surf->styles[1]) << 8) | ((uint32_t)(surf->styles[2]) << 16) |

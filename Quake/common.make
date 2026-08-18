@@ -187,6 +187,7 @@ SHADER_OBJS = \
 	mboit_resolve_frag.o \
 	mboit_resolve_msaa_frag.o \
 	world_frag.o \
+	world_emissive_frag.o \
 	world_oit_frag.o \
 	world_mboit_moment_frag.o \
 	world_mboit_composite_frag.o \
@@ -332,6 +333,7 @@ $(eval $(call SHADER_VARIANT,basic_mboit_moment_frag,basic.frag,-DMBOIT=1))
 $(eval $(call SHADER_VARIANT,basic_mboit_composite_frag,basic.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1))
 $(eval $(call SHADER_VARIANT,basic_mboit_composite_msaa_frag,basic.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
 $(eval $(call SHADER_VARIANT,world_oit_frag,world.frag,-DWBOIT=1))
+$(eval $(call SHADER_VARIANT,world_emissive_frag,world.frag,-DEMISSIVE_COARSE=1))
 $(eval $(call SHADER_VARIANT,world_mboit_moment_frag,world.frag,-DMBOIT=1))
 $(eval $(call SHADER_VARIANT,world_mboit_composite_frag,world.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1))
 $(eval $(call SHADER_VARIANT,world_mboit_composite_msaa_frag,world.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))

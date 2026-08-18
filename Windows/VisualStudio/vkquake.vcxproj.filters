@@ -421,6 +421,9 @@
     <ClCompile Include="..\..\Shaders\Compiled\Debug\world.frag.c">
       <Filter>Shaders\Debug\World</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Debug\world_emissive.frag.c">
+      <Filter>Shaders\Debug\World</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\world_oit.frag.c">
       <Filter>Shaders\Debug\World</Filter>
     </ClCompile>
@@ -518,6 +521,9 @@
       <Filter>Shaders\Release\Sky</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Release\world.frag.c">
+      <Filter>Shaders\Release\World</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Release\world_emissive.frag.c">
       <Filter>Shaders\Release\World</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Release\world_oit.frag.c">

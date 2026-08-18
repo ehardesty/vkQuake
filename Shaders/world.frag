@@ -23,6 +23,9 @@ push_constants;
 layout (set = 0, binding = 0) uniform sampler2D diffuse_tex;
 layout (set = 1, binding = 0) uniform sampler2D lightmap_tex;
 layout (set = 2, binding = 0) uniform sampler2D fullbright_tex;
+#ifdef EMISSIVE_COARSE
+layout (set = 5, binding = 0) uniform sampler2D emissive_coarse_tex;
+#endif
 
 layout (location = 0) in vec4 in_texcoords;
 layout (location = 1) in float in_fog_frag_coord;
