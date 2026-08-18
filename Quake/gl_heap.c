@@ -771,6 +771,16 @@ VkDeviceSize GL_HeapGetAllocationOffset (glheapallocation_t *allocation)
 
 /*
 ===============
+GL_HeapGetAllocationSize
+===============
+*/
+VkDeviceSize GL_HeapGetAllocationSize (glheapallocation_t *allocation)
+{
+	return allocation->size;
+}
+
+/*
+===============
 GL_HeapGetStats
 ===============
 */

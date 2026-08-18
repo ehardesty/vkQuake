@@ -355,13 +355,15 @@ void R_EmissiveRTStats_f (void)
 {
 	int		  coarse_lightmaps;
 	uint64_t coarse_logical_bytes;
-	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes);
+	uint64_t coarse_allocated_bytes;
+	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	Con_Printf (
-		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes\n",
+		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
+		" allocated GPU bytes\n",
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
 		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
-		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes);
+		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes);
 }
 
 /*

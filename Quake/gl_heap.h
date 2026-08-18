@@ -48,6 +48,7 @@ glheapallocation_t *GL_HeapAllocate (glheap_t *heap, VkDeviceSize size, VkDevice
 void				GL_HeapFree (glheap_t *heap, glheapallocation_t *allocation, atomic_uint32_t *num_allocations);
 VkDeviceMemory		GL_HeapGetAllocationMemory (glheapallocation_t *allocation);
 VkDeviceSize		GL_HeapGetAllocationOffset (glheapallocation_t *allocation);
+VkDeviceSize		GL_HeapGetAllocationSize (glheapallocation_t *allocation);
 glheapstats_t	   *GL_HeapGetStats (glheap_t *heap);
 
 #ifdef _DEBUG

@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // r_brush.c: brush model rendering. renamed from r_surf.c
 
 #include "quakedef.h"
+#include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
 
@@ -2409,15 +2410,17 @@ void R_AllocateEmissiveLightmaps (void)
 R_EmissiveLightmapStats
 ==================
 */
-void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes)
+void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes)
 {
 	*count = 0;
 	*logical_bytes = 0;
+	*allocated_bytes = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 		if (lightmaps[i].emissive_texture)
 		{
 			++*count;
 			*logical_bytes += (uint64_t)lightmaps[i].emissive_texture->width * lightmaps[i].emissive_texture->height * 8;
+			*allocated_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_texture->allocation);
 		}
 }
 

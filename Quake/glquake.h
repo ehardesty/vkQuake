@@ -691,7 +691,7 @@ struct lightmap_s
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
-void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes);
+void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 
