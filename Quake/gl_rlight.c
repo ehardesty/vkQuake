@@ -90,6 +90,7 @@ static int						 num_emissive_world_surfaces;
 static emissive_world_fixture_t *emissive_world_fixtures;
 static int						 num_emissive_world_fixtures;
 static qmodel_t					*emissive_surface_worldmodel;
+static uint32_t					 emissive_prepare_time_us;
 
 static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
 {
@@ -134,6 +135,7 @@ static void R_ClearEmissiveWorldSurfaces (void)
 	num_emissive_world_surfaces = 0;
 	num_emissive_world_fixtures = 0;
 	emissive_surface_worldmodel = NULL;
+	emissive_prepare_time_us = 0;
 }
 
 static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex)
@@ -322,6 +324,7 @@ static void R_BuildEmissiveWorldSurfaces (void)
 			R_AllocateEmissiveLightmaps ();
 		return;
 	}
+	const double prepare_start = Sys_DoubleTime ();
 
 	R_ClearEmissiveWorldSurfaces ();
 
@@ -355,6 +358,7 @@ static void R_BuildEmissiveWorldSurfaces (void)
 	}
 
 	emissive_surface_worldmodel = worldmodel;
+	emissive_prepare_time_us = (uint32_t)((Sys_DoubleTime () - prepare_start) * 1000000.0);
 	Con_DPrintf (
 		"RT emissives: %d cacheable world surface%s, %d fixture prox%s (%u bytes)\n", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
 		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
@@ -383,14 +387,16 @@ void R_EmissiveRTStats_f (void)
 	qboolean coarse_pending;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveCoarseLightStats (&coarse_lights, &coarse_light_bytes, &coarse_pending);
+	const char *coarse_gpu_time = rs_emissive_coarse_gputime_valid ? va ("%.3f ms", (double)rs_emissive_coarse_gputime_us / 1000.0) : "unavailable";
+	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
-		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes, coarse %s, debug view %s\n",
+		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes, %.3f ms CPU prepare, last GPU coarse %s, coarse %s, debug view %s\n",
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
 		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
 		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, coarse_lights, coarse_lights == 1 ? "" : "s", coarse_light_bytes,
-		coarse_pending ? "pending" : "ready", r_emissive_rt_debug.value > 0.0f ? "coarse" : "off");
+		(double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, r_emissive_rt_debug.value > 0.0f ? "coarse" : "off");
 }
 
 /*

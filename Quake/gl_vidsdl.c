@@ -143,6 +143,16 @@ static VkFence			command_buffer_fences[DOUBLE_BUFFERED];
 static qboolean			frame_submitted[DOUBLE_BUFFERED];
 static VkQueryPool		timestamp_query_pool;
 static qboolean			timestamps_written[DOUBLE_BUFFERED];
+static qboolean			emissive_coarse_timestamps_written[DOUBLE_BUFFERED];
+
+#define TIMESTAMP_QUERY_COUNT			 4
+#define TIMESTAMP_QUERY_FRAME_START	 0
+#define TIMESTAMP_QUERY_FRAME_END	 1
+#define TIMESTAMP_QUERY_EMISSIVE_START 2
+#define TIMESTAMP_QUERY_EMISSIVE_END	 3
+
+uint32_t rs_emissive_coarse_gputime_us;
+qboolean rs_emissive_coarse_gputime_valid;
 static VkFramebuffer	main_framebuffers[NUM_COLOR_BUFFERS];
 static VkSemaphore		image_aquired_semaphores[DOUBLE_BUFFERED];
 static VkSemaphore		draw_complete_semaphores[MAX_SWAP_CHAIN_IMAGES];
@@ -1544,7 +1554,7 @@ static void GL_InitCommandBuffers (void)
 		ZEROED_STRUCT (VkQueryPoolCreateInfo, query_pool_create_info);
 		query_pool_create_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		query_pool_create_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-		query_pool_create_info.queryCount = 2 * DOUBLE_BUFFERED;
+		query_pool_create_info.queryCount = TIMESTAMP_QUERY_COUNT * DOUBLE_BUFFERED;
 		err = vkCreateQueryPool (vulkan_globals.device, &query_pool_create_info, NULL, &timestamp_query_pool);
 		if (err != VK_SUCCESS)
 			Sys_Error ("vkCreateQueryPool failed with code %i", (int)err);
@@ -3260,6 +3270,35 @@ static void GL_DestroyRenderResources (void)
 	GL_DestroyMainRenderPasses ();
 }
 
+void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+	{
+		vkCmdResetQueryPool (
+			cbx->cb, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_EMISSIVE_START, 2);
+		vkCmdWriteTimestamp (
+			cbx->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool,
+			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_EMISSIVE_START);
+	}
+}
+
+void GL_ResetEmissiveCoarseTimestamp (void)
+{
+	memset (emissive_coarse_timestamps_written, 0, sizeof (emissive_coarse_timestamps_written));
+	rs_emissive_coarse_gputime_valid = false;
+}
+
+void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+	{
+		vkCmdWriteTimestamp (
+			cbx->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool,
+			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_EMISSIVE_END);
+		emissive_coarse_timestamps_written[current_cb_index] = true;
+	}
+}
+
 /*
 =================
 GL_BeginRenderingTask
@@ -3287,9 +3326,23 @@ void GL_BeginRenderingTask (void *unused)
 	{
 		uint64_t timestamps[2];
 		if (vkGetQueryPoolResults (
-				vulkan_globals.device, timestamp_query_pool, current_cb_index * 2, 2, sizeof (timestamps), timestamps, sizeof (uint64_t),
+				vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_FRAME_START, 2, sizeof (timestamps),
+				timestamps, sizeof (uint64_t),
 				VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
 			rs_gputime_us = (uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+	}
+	if ((timestamp_query_pool != VK_NULL_HANDLE) && emissive_coarse_timestamps_written[current_cb_index])
+	{
+		uint64_t timestamps[2];
+		if (vkGetQueryPoolResults (
+				vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_EMISSIVE_START, 2, sizeof (timestamps),
+				timestamps, sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+		{
+			rs_emissive_coarse_gputime_us =
+				(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+			rs_emissive_coarse_gputime_valid = true;
+		}
+		emissive_coarse_timestamps_written[current_cb_index] = false;
 	}
 
 	R_CollectDynamicBufferGarbage ();
@@ -3318,8 +3371,11 @@ void GL_BeginRenderingTask (void *unused)
 	if (timestamp_query_pool != VK_NULL_HANDLE)
 	{
 		VkCommandBuffer first_cb = vulkan_globals.primary_cb_contexts[0].cb;
-		vkCmdResetQueryPool (first_cb, timestamp_query_pool, current_cb_index * 2, 2);
-		vkCmdWriteTimestamp (first_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool, current_cb_index * 2);
+		vkCmdResetQueryPool (
+			first_cb, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_FRAME_START, 2);
+		vkCmdWriteTimestamp (
+			first_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool,
+			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_FRAME_START);
 	}
 
 	for (int scbx_index = 0; scbx_index < SCBX_NUM; ++scbx_index)
@@ -4129,7 +4185,8 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
 
 	if (timestamp_query_pool != VK_NULL_HANDLE)
 	{
-		vkCmdWriteTimestamp (render_passes_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool, (cb_index * 2) + 1);
+		vkCmdWriteTimestamp (
+			render_passes_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool, (cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_FRAME_END);
 		timestamps_written[cb_index] = true;
 	}
 

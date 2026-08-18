@@ -594,6 +594,8 @@ extern atomic_uint32_t rs_dynamiclightmaps, rs_brushpasses, rs_aliaspasses;
 extern uint32_t		   rs_cputime_us, rs_gputime_us;
 extern uint32_t		   rs_gpuwaittime_us; // time the CPU spent blocked on the GPU during the last completed frame
 extern uint32_t		   rs_gpuwaitaccum_us;
+extern uint32_t		   rs_emissive_coarse_gputime_us;
+extern qboolean		   rs_emissive_coarse_gputime_valid;
 extern double		   rs_frame_starttime;
 extern char			   rs_display_lines[3][40]; // scr_speeds on screen overlay, updated from the counters once per frame
 extern int			   rs_display_numlines;
@@ -709,6 +711,9 @@ void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count);
 void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
+void GL_ResetEmissiveCoarseTimestamp (void);
+void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 

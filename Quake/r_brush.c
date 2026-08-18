@@ -2470,6 +2470,7 @@ void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count
 	emissive_coarse_lights_buffer = VK_NULL_HANDLE;
 	num_emissive_coarse_lights = 0;
 	emissive_coarse_pending = false;
+	GL_ResetEmissiveCoarseTimestamp ();
 	if (!lights || count <= 0)
 		return;
 
@@ -2551,6 +2552,7 @@ static void R_UpdateEmissiveCoarseLightmaps (cb_context_t *cbx)
 		return;
 
 	R_BeginDebugUtilsLabel (cbx, "Update Coarse Emissive Lightmaps");
+	GL_BeginEmissiveCoarseTimestamp (cbx);
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_coarse_pipeline);
 	R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (num_emissive_coarse_lights), &num_emissive_coarse_lights);
 
@@ -2588,6 +2590,7 @@ static void R_UpdateEmissiveCoarseLightmaps (cb_context_t *cbx)
 	}
 
 	emissive_coarse_pending = false;
+	GL_EndEmissiveCoarseTimestamp (cbx);
 	R_EndDebugUtilsLabel (cbx);
 }
 
