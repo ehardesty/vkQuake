@@ -215,6 +215,7 @@ extern cvar_t r_rtshadows;
 // scales the intensity of the rerelease dynamiclight entities; the KEX intensity
 // units don't map 1:1 onto lightmap space, so this is calibrated visually
 cvar_t r_entdlightscale = {"r_entdlightscale", "1", CVAR_NONE};
+cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 
 typedef struct entity_dlight_s
 {
