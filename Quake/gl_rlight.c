@@ -64,7 +64,17 @@ typedef struct emissive_world_surface_s
 {
 	msurface_t					 *surface;
 	const emissive_texture_def_t *definition;
+	int							  fixture_index;
 } emissive_world_surface_t;
+
+typedef struct emissive_world_fixture_s
+{
+	const emissive_texture_def_t *definition;
+	vec3_t						  origin;
+	vec3_t						  normal;
+	float						  geometric_area;
+	int							  num_surfaces;
+} emissive_world_fixture_t;
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
 	{"TLIGHT01", 192.0f, 0.2f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true},
@@ -73,6 +83,8 @@ static const emissive_texture_def_t emissive_texture_defs[] = {
 
 static emissive_world_surface_t *emissive_world_surfaces;
 static int						 num_emissive_world_surfaces;
+static emissive_world_fixture_t *emissive_world_fixtures;
+static int						 num_emissive_world_fixtures;
 static qmodel_t					*emissive_surface_worldmodel;
 
 static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const texture_t *texture)
@@ -88,7 +100,7 @@ static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const textur
 
 static const emissive_texture_def_t *R_CacheableWorldEmissiveSurfaceDef (const msurface_t *surface)
 {
-	if (!surface->numedges || !surface->texinfo || (surface->flags & SURF_DRAWTILED))
+	if (surface->numedges < 3 || !surface->texinfo || (surface->flags & SURF_DRAWTILED))
 		return NULL;
 	return R_CacheableEmissiveTextureDef (surface->texinfo->texture);
 }
@@ -96,8 +108,164 @@ static const emissive_texture_def_t *R_CacheableWorldEmissiveSurfaceDef (const m
 static void R_ClearEmissiveWorldSurfaces (void)
 {
 	SAFE_FREE (emissive_world_surfaces);
+	SAFE_FREE (emissive_world_fixtures);
 	num_emissive_world_surfaces = 0;
+	num_emissive_world_fixtures = 0;
 	emissive_surface_worldmodel = NULL;
+}
+
+static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex)
+{
+	const int surfedge = model->surfedges[surface->firstedge + vertex];
+	const int vertex_index = surfedge >= 0 ? model->edges[surfedge].v[0] : model->edges[-surfedge].v[1];
+	return &model->vertexes[vertex_index].position;
+}
+
+static qboolean R_EmissiveWorldSurfacesShareEdge (const qmodel_t *model, const msurface_t *a, const msurface_t *b)
+{
+	for (int a_edge_index = 0; a_edge_index < a->numedges; ++a_edge_index)
+	{
+		const medge_t *const a_edge = &model->edges[abs (model->surfedges[a->firstedge + a_edge_index])];
+		for (int b_edge_index = 0; b_edge_index < b->numedges; ++b_edge_index)
+		{
+			const medge_t *const b_edge = &model->edges[abs (model->surfedges[b->firstedge + b_edge_index])];
+			if ((a_edge->v[0] == b_edge->v[0] && a_edge->v[1] == b_edge->v[1]) || (a_edge->v[0] == b_edge->v[1] && a_edge->v[1] == b_edge->v[0]))
+				return true;
+		}
+	}
+	return false;
+}
+
+static qboolean R_EmissiveWorldSurfacesShareFixture (const qmodel_t *model, const emissive_world_surface_t *a, const emissive_world_surface_t *b)
+{
+	return a->definition == b->definition && R_EmissiveWorldSurfacesShareEdge (model, a->surface, b->surface);
+}
+
+static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area)
+{
+	const vec3_t *const first = R_EmissiveWorldSurfaceVertex (model, surface, 0);
+	vec3_t				weighted_center = {0.0f, 0.0f, 0.0f};
+	float				total_area = 0.0f;
+
+	for (int vertex = 1; vertex < surface->numedges - 1; ++vertex)
+	{
+		const vec3_t *const second = R_EmissiveWorldSurfaceVertex (model, surface, vertex);
+		const vec3_t *const third = R_EmissiveWorldSurfaceVertex (model, surface, vertex + 1);
+		vec3_t				edge1, edge2, cross, triangle_center;
+		VectorSubtract (*second, *first, edge1);
+		VectorSubtract (*third, *first, edge2);
+		CrossProduct (edge1, edge2, cross);
+		const float triangle_area = 0.5f * VectorLength (cross);
+		VectorAdd (*first, *second, triangle_center);
+		VectorAdd (triangle_center, *third, triangle_center);
+		VectorMA (weighted_center, triangle_area / 3.0f, triangle_center, weighted_center);
+		total_area += triangle_area;
+	}
+
+	if (total_area > 0.0f)
+		VectorScale (weighted_center, 1.0f / total_area, center);
+	else
+		VectorCopy (*first, center);
+	VectorCopy (surface->plane->normal, normal);
+	if (surface->flags & SURF_PLANEBACK)
+		VectorScale (normal, -1.0f, normal);
+	*area = total_area;
+}
+
+static int R_EmissiveWorldFixtureRoot (int *surface_groups, int surface_index)
+{
+	int root = surface_index;
+	while (surface_groups[root] != root)
+		root = surface_groups[root];
+	while (surface_groups[surface_index] != surface_index)
+	{
+		const int parent = surface_groups[surface_index];
+		surface_groups[surface_index] = root;
+		surface_index = parent;
+	}
+	return root;
+}
+
+static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
+{
+	int *const surface_groups = Mem_Alloc (num_emissive_world_surfaces * sizeof (*surface_groups));
+	for (int i = 0; i < num_emissive_world_surfaces; ++i)
+		surface_groups[i] = i;
+
+	for (int i = 0; i < num_emissive_world_surfaces; ++i)
+		for (int j = 0; j < i; ++j)
+		{
+			if (!R_EmissiveWorldSurfacesShareFixture (worldmodel, &emissive_world_surfaces[i], &emissive_world_surfaces[j]))
+				continue;
+			const int group_i = R_EmissiveWorldFixtureRoot (surface_groups, i);
+			const int group_j = R_EmissiveWorldFixtureRoot (surface_groups, j);
+			if (group_i != group_j)
+				surface_groups[q_max (group_i, group_j)] = q_min (group_i, group_j);
+		}
+	for (int i = 0; i < num_emissive_world_surfaces; ++i)
+		surface_groups[i] = R_EmissiveWorldFixtureRoot (surface_groups, i);
+
+	for (int i = 0; i < num_emissive_world_surfaces; ++i)
+		if (surface_groups[i] == i)
+			++num_emissive_world_fixtures;
+	if (!num_emissive_world_fixtures)
+	{
+		Mem_Free (surface_groups);
+		return;
+	}
+
+	emissive_world_fixtures = Mem_Alloc (num_emissive_world_fixtures * sizeof (*emissive_world_fixtures));
+	memset (emissive_world_fixtures, 0, num_emissive_world_fixtures * sizeof (*emissive_world_fixtures));
+	int fixture_index = 0;
+	for (int group = 0; group < num_emissive_world_surfaces; ++group)
+	{
+		if (surface_groups[group] != group)
+			continue;
+
+		const int						current_fixture = fixture_index++;
+		emissive_world_fixture_t *const fixture = &emissive_world_fixtures[current_fixture];
+		vec3_t							weighted_origin = {0.0f, 0.0f, 0.0f};
+		vec3_t							weighted_normal = {0.0f, 0.0f, 0.0f};
+		vec3_t							fallback_origin = {0.0f, 0.0f, 0.0f};
+		vec3_t							fallback_normal = {0.0f, 0.0f, 1.0f};
+		float							largest_surface_area = 0.0f;
+		fixture->definition = emissive_world_surfaces[group].definition;
+
+		for (int i = group; i < num_emissive_world_surfaces; ++i)
+		{
+			if (surface_groups[i] != group)
+				continue;
+			emissive_world_surfaces[i].fixture_index = current_fixture;
+			vec3_t center, normal;
+			float  area;
+			R_EmissiveWorldSurfaceGeometry (worldmodel, emissive_world_surfaces[i].surface, center, normal, &area);
+			if (!fixture->num_surfaces)
+				VectorCopy (center, fallback_origin);
+			VectorMA (weighted_origin, area, center, weighted_origin);
+			VectorMA (weighted_normal, area, normal, weighted_normal);
+			fixture->geometric_area += area;
+			++fixture->num_surfaces;
+			if (area > largest_surface_area)
+			{
+				largest_surface_area = area;
+				VectorCopy (normal, fallback_normal);
+			}
+		}
+
+		if (fixture->geometric_area > 0.0f)
+			VectorScale (weighted_origin, 1.0f / fixture->geometric_area, fixture->origin);
+		else
+			VectorCopy (fallback_origin, fixture->origin);
+		if (VectorNormalize (weighted_normal) > 0.0f)
+			VectorCopy (weighted_normal, fixture->normal);
+		else
+			VectorCopy (fallback_normal, fixture->normal);
+		VectorMA (fixture->origin, fixture->definition->normal_offset, fixture->normal, fixture->origin);
+	}
+	assert (fixture_index == num_emissive_world_fixtures);
+	for (int i = 0; i < num_emissive_world_surfaces; ++i)
+		assert (emissive_world_surfaces[i].fixture_index >= 0 && emissive_world_surfaces[i].fixture_index < num_emissive_world_fixtures);
+	Mem_Free (surface_groups);
 }
 
 static void R_BuildEmissiveWorldSurfaces (void)
@@ -128,12 +296,14 @@ static void R_BuildEmissiveWorldSurfaces (void)
 			++surface_index;
 		}
 		assert (surface_index == num_emissive_world_surfaces);
+		R_BuildEmissiveWorldFixtures (worldmodel);
 	}
 
 	emissive_surface_worldmodel = worldmodel;
 	Con_DPrintf (
-		"RT emissives: %d cacheable world surface candidate%s (%u bytes)\n", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces)));
+		"RT emissives: %d cacheable world surface%s, %d fixture prox%s (%u bytes)\n", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
+		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)));
 }
 
 void R_EmissiveRTNewMap (void)
@@ -151,9 +321,9 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 void R_EmissiveRTStats_f (void)
 {
 	Con_Printf (
-		"RT emissives: %s, %d cacheable world surface candidate%s, %u bytes\n", r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
-		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
-		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces)));
+		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u bytes\n", r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
+		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)));
 }
 
 /*
