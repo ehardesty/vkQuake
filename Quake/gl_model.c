@@ -1076,7 +1076,7 @@ static void Mod_LoadTextureTask (int i, qmodel_t **ppmod)
 			}
 
 			if (data)
-				tx->fullbright = TexMgr_LoadImage (mod, filename2, fwidth, fheight, fmt, data, filename2, 0, TEXPREF_MIPMAP | extraflags);
+				tx->fullbright = TexMgr_LoadImage (mod, filename2, fwidth, fheight, fmt, data, filename2, 0, TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT | extraflags);
 		}
 		else // use the texture from the bsp file
 		{

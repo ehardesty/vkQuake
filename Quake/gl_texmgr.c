@@ -1455,6 +1455,76 @@ static void TexMgr_LoadImage8Valve (gltexture_t *glt, byte *data)
 
 /*
 ================
+TexMgr_LoadFullbrightMetadata
+================
+*/
+static void TexMgr_LoadFullbrightMetadata (gltexture_t *glt, const byte *data)
+{
+	glt->fullbright_color[0] = glt->fullbright_color[1] = glt->fullbright_color[2] = 0.0f;
+	glt->fullbright_coverage = 0.0f;
+	if (!(glt->flags & TEXPREF_FULLBRIGHT) || !data || !glt->source_width || !glt->source_height)
+		return;
+
+	const int	pixel_count = glt->source_width * glt->source_height;
+	const byte *palette = NULL;
+	int			palette_colors = 0;
+	if (glt->source_format == SRC_INDEXED_PALETTE)
+	{
+		const byte *const palette_data = data + pixel_count / 64 * 85;
+		unsigned short	  colors;
+		memcpy (&colors, palette_data, sizeof (colors));
+		palette_colors = LittleShort (colors);
+		palette = palette_data + sizeof (colors);
+	}
+
+	double color_accum[3] = {0.0, 0.0, 0.0};
+	double coverage = 0.0;
+	for (int i = 0; i < pixel_count; ++i)
+	{
+		const byte *rgba;
+		double		alpha = 1.0;
+		if (glt->source_format == SRC_INDEXED)
+		{
+			const byte index = data[i];
+			if (index <= 223 || index == 255)
+				continue;
+			rgba = (const byte *)&d_8to24table[index];
+		}
+		else if (glt->source_format == SRC_INDEXED_PALETTE)
+		{
+			const byte index = data[i];
+			if (index <= 223 || index == 255 || index >= palette_colors)
+				continue;
+			rgba = &palette[index * 3];
+		}
+		else if (glt->source_format == SRC_RGBA)
+		{
+			rgba = &data[i * 4];
+			alpha = (double)rgba[3] / 255.0;
+			if (alpha == 0.0 || (rgba[0] | rgba[1] | rgba[2]) == 0)
+				continue;
+		}
+		else
+			return;
+
+		double linear[3];
+		for (int channel = 0; channel < 3; ++channel)
+		{
+			linear[channel] = pow ((double)rgba[channel] / 255.0, 2.2);
+			color_accum[channel] += linear[channel] * alpha;
+		}
+		coverage += glt->source_format == SRC_RGBA ? q_max (linear[0], q_max (linear[1], linear[2])) * alpha : 1.0;
+	}
+
+	const double max_component = q_max (color_accum[0], q_max (color_accum[1], color_accum[2]));
+	if (max_component > 0.0)
+		for (int channel = 0; channel < 3; ++channel)
+			glt->fullbright_color[channel] = (float)(color_accum[channel] / max_component);
+	glt->fullbright_coverage = (float)(coverage / pixel_count);
+}
+
+/*
+================
 TexMgr_LoadImage -- the one entry point for loading all textures
 ================
 */
@@ -1508,6 +1578,7 @@ gltexture_t *TexMgr_LoadImage (
 	glt->source_width = width;
 	glt->source_height = height;
 	glt->source_crc = crc;
+	TexMgr_LoadFullbrightMetadata (glt, data);
 
 	// upload it
 	switch (glt->source_format)
