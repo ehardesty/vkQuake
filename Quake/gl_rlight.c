@@ -58,6 +58,7 @@ typedef struct emissive_texture_def_s
 	qboolean		 shadows;
 	qboolean		 two_sided;
 	qboolean		 derive_color;
+	vec3_t			 color;
 } emissive_texture_def_t;
 
 typedef struct emissive_world_surface_s
@@ -72,13 +73,15 @@ typedef struct emissive_world_fixture_s
 	const emissive_texture_def_t *definition;
 	vec3_t						  origin;
 	vec3_t						  normal;
+	vec3_t						  color;
 	float						  geometric_area;
+	float						  luminous_area;
 	int							  num_surfaces;
 } emissive_world_fixture_t;
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 0.2f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true},
-	{"TLIGHT11", 192.0f, 0.6f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true},
+	{"TLIGHT01", 192.0f, 0.2f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 0.6f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
 };
 
 static emissive_world_surface_t *emissive_world_surfaces;
@@ -94,7 +97,12 @@ static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const textur
 
 	for (int i = 0; i < countof (emissive_texture_defs); ++i)
 		if (!q_strcasecmp (texture->name, emissive_texture_defs[i].texture))
-			return &emissive_texture_defs[i];
+		{
+			const emissive_texture_def_t *const definition = &emissive_texture_defs[i];
+			if (texture->fullbright->fullbright_coverage <= 0.0f || (definition->derive_color && VectorLength (texture->fullbright->fullbright_color) == 0.0f))
+				return NULL;
+			return definition;
+		}
 	return NULL;
 }
 
@@ -228,8 +236,13 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 		vec3_t							weighted_normal = {0.0f, 0.0f, 0.0f};
 		vec3_t							fallback_origin = {0.0f, 0.0f, 0.0f};
 		vec3_t							fallback_normal = {0.0f, 0.0f, 1.0f};
-		float							largest_surface_area = 0.0f;
+		float							largest_luminous_area = 0.0f;
 		fixture->definition = emissive_world_surfaces[group].definition;
+		const gltexture_t *const fullbright = emissive_world_surfaces[group].surface->texinfo->texture->fullbright;
+		if (fixture->definition->derive_color)
+			VectorCopy (fullbright->fullbright_color, fixture->color);
+		else
+			VectorCopy (fixture->definition->color, fixture->color);
 
 		for (int i = group; i < num_emissive_world_surfaces; ++i)
 		{
@@ -239,21 +252,23 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			vec3_t center, normal;
 			float  area;
 			R_EmissiveWorldSurfaceGeometry (worldmodel, emissive_world_surfaces[i].surface, center, normal, &area);
+			const float luminous_area = area * fullbright->fullbright_coverage;
 			if (!fixture->num_surfaces)
 				VectorCopy (center, fallback_origin);
-			VectorMA (weighted_origin, area, center, weighted_origin);
-			VectorMA (weighted_normal, area, normal, weighted_normal);
+			VectorMA (weighted_origin, luminous_area, center, weighted_origin);
+			VectorMA (weighted_normal, luminous_area, normal, weighted_normal);
 			fixture->geometric_area += area;
+			fixture->luminous_area += luminous_area;
 			++fixture->num_surfaces;
-			if (area > largest_surface_area)
+			if (luminous_area > largest_luminous_area)
 			{
-				largest_surface_area = area;
+				largest_luminous_area = luminous_area;
 				VectorCopy (normal, fallback_normal);
 			}
 		}
 
-		if (fixture->geometric_area > 0.0f)
-			VectorScale (weighted_origin, 1.0f / fixture->geometric_area, fixture->origin);
+		if (fixture->luminous_area > 0.0f)
+			VectorScale (weighted_origin, 1.0f / fixture->luminous_area, fixture->origin);
 		else
 			VectorCopy (fallback_origin, fixture->origin);
 		if (VectorNormalize (weighted_normal) > 0.0f)
