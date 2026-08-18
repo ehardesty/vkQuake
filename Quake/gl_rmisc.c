@@ -2094,16 +2094,36 @@ void R_CreatePipelineLayouts ()
 			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_coarse_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_coarse_pipeline_layout");
 		vulkan_globals.emissive_coarse_pipeline.layout.push_constant_range = push_constant_range;
-
-		err = vkCreatePipelineLayout (vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.emissive_detail_pipeline.layout.handle);
-		if (err != VK_SUCCESS)
-			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
-		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_detail_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_detail_pipeline_layout");
-		vulkan_globals.emissive_detail_pipeline.layout.push_constant_range = push_constant_range;
 	}
 
 	if (vulkan_globals.ray_query)
 	{
+		// Detail emissive lightmaps
+		VkDescriptorSetLayout emissive_detail_descriptor_set_layouts[2] = {
+			vulkan_globals.emissive_compute_set_layout.handle,
+			vulkan_globals.ray_query_push_set_layout.handle,
+		};
+
+		ZEROED_STRUCT (VkPushConstantRange, emissive_push_constant_range);
+		emissive_push_constant_range.offset = 0;
+		emissive_push_constant_range.size = sizeof (uint32_t);
+		emissive_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, emissive_pipeline_layout_create_info);
+		emissive_pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		emissive_pipeline_layout_create_info.setLayoutCount = countof (emissive_detail_descriptor_set_layouts);
+		emissive_pipeline_layout_create_info.pSetLayouts = emissive_detail_descriptor_set_layouts;
+		emissive_pipeline_layout_create_info.pushConstantRangeCount = 1;
+		emissive_pipeline_layout_create_info.pPushConstantRanges = &emissive_push_constant_range;
+
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &emissive_pipeline_layout_create_info, NULL, &vulkan_globals.emissive_detail_pipeline.layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.emissive_detail_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_detail_pipeline_layout");
+		vulkan_globals.emissive_detail_pipeline.layout.push_constant_range = emissive_push_constant_range;
+
 		// Update lightmaps RT
 		VkDescriptorSetLayout update_lightmap_rt_descriptor_set_layouts[2] = {
 			vulkan_globals.lightmap_compute_set_layout.handle,
@@ -3974,7 +3994,8 @@ static void R_CreateUpdateLightmapPipelines ()
 			&specialization_info, "update_lightmap_rt");
 
 	R_CreateComputePipeline (&vulkan_globals.emissive_coarse_pipeline, emissive_coarse_comp_module, 0, NULL, "emissive_coarse");
-	R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
+	if (vulkan_globals.ray_query)
+		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
 }
 
 /*
@@ -4055,7 +4076,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_8bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
-	CREATE_SHADER_MODULE (emissive_detail_comp);
+	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
 #endif
@@ -4363,8 +4384,11 @@ void R_DestroyPipelines (void)
 	vulkan_globals.update_lightmap_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_coarse_pipeline.handle, NULL);
 	vulkan_globals.emissive_coarse_pipeline.handle = VK_NULL_HANDLE;
-	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
-	vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
+	if (vulkan_globals.emissive_detail_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
+		vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
+	}
 	if (vulkan_globals.update_lightmap_rt_pipeline.handle != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.update_lightmap_rt_pipeline.handle, NULL);

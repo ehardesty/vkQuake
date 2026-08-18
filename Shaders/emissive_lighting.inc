@@ -10,7 +10,13 @@ vec3 CalculateEmissiveContribution (const vec3 world_pos, const vec3 normal)
 			continue;
 		const vec3  direction = light_vec / max (dist, 0.001f);
 		const float receiver_lambert = max (dot (normal, direction), 0.0f);
+		if (receiver_lambert <= 0.0f)
+			continue;
 		const float radial_falloff = max (1.0f - dist / light.radius, 0.0f);
+#ifdef EMISSIVE_DETAIL_VISIBILITY
+		if (EmissiveIsOccluded (world_pos, normal, light.origin))
+			continue;
+#endif
 		contribution += light.intensity * radial_falloff * receiver_lambert * light.color;
 	}
 	return max (contribution, 0.0f);

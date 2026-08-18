@@ -2581,7 +2581,7 @@ void R_AllocateEmissiveLightmaps (void)
 			lightmap->emissive_texture = TexMgr_LoadImage (
 				cl.worldmodel, name, width, height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
 		}
-		if (!lightmap->emissive_detail_texture)
+		if (vulkan_globals.ray_query && !lightmap->emissive_detail_texture)
 		{
 			q_snprintf (name, sizeof (name), "emissive_detail_%07i", i);
 			lightmap->emissive_detail_texture = TexMgr_LoadImage (
@@ -2746,16 +2746,17 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count)
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
-		if (!lightmap->emissive_texture || !lightmap->emissive_detail_texture)
-			continue;
-
-		lightmap->emissive_coarse_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
-			lightmap, lightmap->emissive_texture, size, "coarse", i);
-		lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
-			lightmap, lightmap->emissive_detail_texture, size, "detail", i);
+		if (lightmap->emissive_texture)
+			lightmap->emissive_coarse_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_texture, size, "coarse", i);
+		if (lightmap->emissive_detail_texture)
+		{
+			lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_detail_texture, size, "detail", i);
+			emissive_detail_pending = true;
+		}
 	}
 	emissive_coarse_pending = true;
-	emissive_detail_pending = true;
 }
 
 /*
@@ -2775,6 +2776,8 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	qboolean *const pending = detail ? &emissive_detail_pending : &emissive_coarse_pending;
 	if (!*pending || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
+	if (detail && emissive_world_tlas == VK_NULL_HANDLE)
+		return;
 
 	const vulkan_pipeline_t *const pipeline = detail ? &vulkan_globals.emissive_detail_pipeline : &vulkan_globals.emissive_coarse_pipeline;
 	R_BeginDebugUtilsLabel (cbx, detail ? "Update Detail Emissive Lightmaps" : "Update Coarse Emissive Lightmaps");
@@ -2783,6 +2786,22 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	else
 		GL_BeginEmissiveCoarseTimestamp (cbx);
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+	if (detail)
+	{
+		ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
+		tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+		tlas_info.accelerationStructureCount = 1;
+		tlas_info.pAccelerationStructures = &emissive_world_tlas;
+
+		ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
+		tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		tlas_write.pNext = &tlas_info;
+		tlas_write.dstBinding = 0;
+		tlas_write.descriptorCount = 1;
+		tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+
+		vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
+	}
 	R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (num_emissive_lights), &num_emissive_lights);
 
 	for (int i = 0; i < lightmap_count; ++i)

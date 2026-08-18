@@ -1,6 +1,7 @@
 #version 460
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : enable
 
 #include "globals.inc"
@@ -37,8 +38,26 @@ layout (std430, set = 0, binding = 5) readonly restrict buffer emissive_lights_b
 {
 	emissive_light_t emissive_lights[];
 };
+layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
+
+bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
+{
+	const vec3 ray_origin = world_pos + normal * 0.25f;
+	const vec3 ray_vector = light_origin - ray_origin;
+	const float ray_distance = length (ray_vector);
+	if (ray_distance <= 0.5f)
+		return false;
+
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT (
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 0.0f,
+		ray_vector / ray_distance, ray_distance - 0.5f);
+	rayQueryProceedEXT (ray_query);
+	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+}
 
 #include "lightmap_coords.inc"
+#define EMISSIVE_DETAIL_VISIBILITY
 #include "emissive_lighting.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
