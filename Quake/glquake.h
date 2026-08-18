@@ -724,6 +724,7 @@ qboolean R_EmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
 void R_SetEmissiveLights (const emissive_light_t *lights, int count);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
+void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, uint64_t *cpu_bytes);
 void GL_ResetEmissiveCoarseTimestamp (void);
 void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);

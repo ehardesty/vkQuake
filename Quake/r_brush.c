@@ -339,6 +339,17 @@ static qboolean			   emissive_detail_pending;
 static qboolean			   emissive_detail_building;
 static qboolean			   emissive_detail_ready;
 static qboolean			   emissive_detail_budget_limited;
+typedef struct emissive_logical_tile_s
+{
+	uint16_t lightmap;
+	byte	 x;
+	byte	 y;
+} emissive_logical_tile_t;
+COMPILE_TIME_ASSERT (emissive_logical_tile_t, sizeof (emissive_logical_tile_t) == 4);
+static emissive_logical_tile_t *emissive_logical_tiles;
+static int					 num_emissive_logical_tiles;
+static int					 num_emissive_logical_tiles_total;
+static qboolean				 emissive_logical_tiles_built;
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -1967,6 +1978,10 @@ void GL_BuildLightmaps (void)
 	last_lightmap_allocated = 0;
 	lightmap_count = 0;
 	emissive_detail_budget_limited = false;
+	SAFE_FREE (emissive_logical_tiles);
+	num_emissive_logical_tiles = 0;
+	num_emissive_logical_tiles_total = 0;
+	emissive_logical_tiles_built = false;
 	num_surfaces = 0;
 	memset (columns, -1, sizeof (columns));
 	memset (lightmap_idx, 0, sizeof (lightmap_idx));
@@ -2552,6 +2567,85 @@ void GL_SetupLightmapCompute (void)
 
 /*
 ==================
+R_BuildEmissiveLogicalTiles
+==================
+*/
+static void R_BuildEmissiveLogicalTiles (void)
+{
+	if (emissive_logical_tiles_built || !cl.worldmodel || !R_EmissiveDetailAvailable ())
+		return;
+
+	int *const lightmap_offsets = Mem_Alloc (lightmap_count * sizeof (*lightmap_offsets));
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		lightmap_offsets[i] = -1;
+		if (!lightmaps[i].emissive_detail_texture)
+			continue;
+		lightmap_offsets[i] = num_emissive_logical_tiles_total;
+		const gltexture_t *const texture = lightmaps[i].surface_indices_texture;
+		num_emissive_logical_tiles_total += ((texture->width + 7) / 8) * ((texture->height + 7) / 8);
+	}
+
+	byte *const affected = Mem_Alloc (num_emissive_logical_tiles_total);
+	memset (affected, 0, num_emissive_logical_tiles_total);
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int i = 0; i < cl.worldmodel->nummodelsurfaces; ++i)
+	{
+		const msurface_t *const surface = &first_surface[i];
+		const int			 lightmap_index = surface->lightmaptexturenum;
+		if (!surface->emissive_influence || lightmap_index < 0 || lightmap_index >= lightmap_count || lightmap_offsets[lightmap_index] < 0)
+			continue;
+
+		const gltexture_t *const texture = lightmaps[lightmap_index].surface_indices_texture;
+		const int			 tiles_wide = (texture->width + 7) / 8;
+		const int			 tiles_high = (texture->height + 7) / 8;
+		const int			 surface_width = (surface->extents[0] >> 4) + 1;
+		const int			 surface_height = (surface->extents[1] >> 4) + 1;
+		const int			 first_x = CLAMP (0, surface->light_s / 8, tiles_wide - 1);
+		const int			 first_y = CLAMP (0, surface->light_t / 8, tiles_high - 1);
+		const int			 last_x = CLAMP (0, (surface->light_s + surface_width - 1) / 8, tiles_wide - 1);
+		const int			 last_y = CLAMP (0, (surface->light_t + surface_height - 1) / 8, tiles_high - 1);
+		for (int y = first_y; y <= last_y; ++y)
+			for (int x = first_x; x <= last_x; ++x)
+				affected[lightmap_offsets[lightmap_index] + y * tiles_wide + x] = true;
+	}
+
+	for (int i = 0; i < num_emissive_logical_tiles_total; ++i)
+		if (affected[i])
+			++num_emissive_logical_tiles;
+	if (num_emissive_logical_tiles)
+		emissive_logical_tiles = Mem_Alloc (num_emissive_logical_tiles * sizeof (*emissive_logical_tiles));
+	int tile_index = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		if (lightmap_offsets[i] < 0)
+			continue;
+		const gltexture_t *const texture = lightmaps[i].surface_indices_texture;
+		const int			 tiles_wide = (texture->width + 7) / 8;
+		const int			 tiles_high = (texture->height + 7) / 8;
+		for (int y = 0; y < tiles_high; ++y)
+			for (int x = 0; x < tiles_wide; ++x)
+				if (affected[lightmap_offsets[i] + y * tiles_wide + x])
+				{
+					emissive_logical_tiles[tile_index].lightmap = i;
+					emissive_logical_tiles[tile_index].x = x;
+					emissive_logical_tiles[tile_index].y = y;
+					++tile_index;
+				}
+	}
+	assert (tile_index == num_emissive_logical_tiles);
+	emissive_logical_tiles_built = true;
+	Con_DPrintf (
+		"RT emissives: %d/%d affected 8x8 logical tile%s (%.1f%%, %" PRIu64 " CPU bytes)\n", num_emissive_logical_tiles,
+		num_emissive_logical_tiles_total, num_emissive_logical_tiles == 1 ? "" : "s",
+		num_emissive_logical_tiles_total ? 100.0 * num_emissive_logical_tiles / num_emissive_logical_tiles_total : 0.0,
+		(uint64_t)num_emissive_logical_tiles * sizeof (*emissive_logical_tiles));
+	Mem_Free (affected);
+	Mem_Free (lightmap_offsets);
+}
+
+/*
+==================
 R_AllocateEmissiveLightmaps
 ==================
 */
@@ -2633,6 +2727,7 @@ void R_AllocateEmissiveLightmaps (void)
 				"RT emissives: dense detail rejected (%" PRIu64 " required Vulkan bytes, %" PRIu64 " byte budget); using coarse fallback\n",
 				detail_required_bytes, detail_budget_bytes);
 	}
+	R_BuildEmissiveLogicalTiles ();
 	Mem_Free (world_lightmaps);
 }
 
@@ -2693,6 +2788,18 @@ qboolean R_EmissiveDetailAvailable (void)
 		if (lightmaps[i].emissive_detail_texture)
 			return true;
 	return false;
+}
+
+/*
+==================
+R_EmissiveTileStats
+==================
+*/
+void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, uint64_t *cpu_bytes)
+{
+	*affected_tiles = num_emissive_logical_tiles;
+	*total_tiles = num_emissive_logical_tiles_total;
+	*cpu_bytes = num_emissive_logical_tiles * sizeof (*emissive_logical_tiles);
 }
 
 /*

@@ -527,6 +527,9 @@ void R_EmissiveRTStats_f (void)
 	qboolean detail_budget_limited;
 	qboolean detail_pending;
 	qboolean detail_ready;
+	int		 affected_tiles;
+	int		 total_tiles;
+	uint64_t tile_cpu_bytes;
 	int		 emissive_lights;
 	uint64_t emissive_light_bytes;
 	qboolean coarse_pending;
@@ -540,6 +543,7 @@ void R_EmissiveRTStats_f (void)
 		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
 		&detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
+	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_cpu_bytes);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -560,8 +564,9 @@ void R_EmissiveRTStats_f (void)
 		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
 	Con_Printf (
 		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
-		" byte budget, last GPU detail %s, %s%s\n",
-		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, detail_gpu_time,
+		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %" PRIu64 " tile CPU bytes, last GPU detail %s, %s%s\n",
+		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, affected_tiles,
+		total_tiles, affected_tiles == 1 ? "" : "s", total_tiles ? 100.0 * affected_tiles / total_tiles : 0.0, tile_cpu_bytes, detail_gpu_time,
 		detail_state, detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
 	if (emissive_world_as_build_time_valid)
 		Con_Printf (
