@@ -1464,8 +1464,13 @@ static void TexMgr_LoadFullbrightMetadata (gltexture_t *glt, const byte *data)
 	glt->fullbright_coverage = 0.0f;
 	if (!(glt->flags & TEXPREF_FULLBRIGHT) || !data || !glt->source_width || !glt->source_height)
 		return;
+	if (glt->source_format != SRC_INDEXED && glt->source_format != SRC_INDEXED_PALETTE && glt->source_format != SRC_RGBA)
+		return;
 
-	const int	pixel_count = glt->source_width * glt->source_height;
+	const int pixel_count = glt->source_width * glt->source_height;
+	double	  srgb_to_linear[256];
+	for (int i = 0; i < countof (srgb_to_linear); ++i)
+		srgb_to_linear[i] = pow ((double)i / 255.0, 2.2);
 	const byte *palette = NULL;
 	int			palette_colors = 0;
 	if (glt->source_format == SRC_INDEXED_PALETTE)
@@ -1506,11 +1511,10 @@ static void TexMgr_LoadFullbrightMetadata (gltexture_t *glt, const byte *data)
 		}
 		else
 			return;
-
 		double linear[3];
 		for (int channel = 0; channel < 3; ++channel)
 		{
-			linear[channel] = pow ((double)rgba[channel] / 255.0, 2.2);
+			linear[channel] = srgb_to_linear[rgba[channel]];
 			color_accum[channel] += linear[channel] * alpha;
 		}
 		coverage += glt->source_format == SRC_RGBA ? q_max (linear[0], q_max (linear[1], linear[2])) * alpha : 1.0;
@@ -1665,6 +1669,7 @@ void TexMgr_ReloadImage (gltexture_t *glt, int shirt, int pants)
 
 	glt->width = glt->source_width;
 	glt->height = glt->source_height;
+	TexMgr_LoadFullbrightMetadata (glt, data);
 	//
 	// apply shirt and pants colors
 	//
