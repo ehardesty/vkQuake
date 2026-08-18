@@ -33,6 +33,129 @@ extern cvar_t r_flatlightstyles; // johnfitz
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_gpulightmapupdate;
 
+cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
+
+/*
+=============================================================================
+
+RT EMISSIVE LIGHTS
+
+=============================================================================
+*/
+
+typedef enum emissive_proxy_e
+{
+	EMISSIVE_PROXY_POINT
+} emissive_proxy_t;
+
+typedef struct emissive_texture_def_s
+{
+	const char		*texture;
+	float			 radius;
+	float			 intensity;
+	float			 normal_offset;
+	emissive_proxy_t proxy;
+	qboolean		 shadows;
+	qboolean		 two_sided;
+	qboolean		 derive_color;
+} emissive_texture_def_t;
+
+typedef struct emissive_world_surface_s
+{
+	msurface_t					 *surface;
+	const emissive_texture_def_t *definition;
+} emissive_world_surface_t;
+
+static const emissive_texture_def_t emissive_texture_defs[] = {
+	{"TLIGHT01", 192.0f, 0.2f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true},
+	{"TLIGHT11", 192.0f, 0.6f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true},
+};
+
+static emissive_world_surface_t *emissive_world_surfaces;
+static int						 num_emissive_world_surfaces;
+static qmodel_t					*emissive_surface_worldmodel;
+
+static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const texture_t *texture)
+{
+	if (!texture || !texture->fullbright || texture->anim_total || texture->alternate_anims)
+		return NULL;
+
+	for (int i = 0; i < countof (emissive_texture_defs); ++i)
+		if (!q_strcasecmp (texture->name, emissive_texture_defs[i].texture))
+			return &emissive_texture_defs[i];
+	return NULL;
+}
+
+static const emissive_texture_def_t *R_CacheableWorldEmissiveSurfaceDef (const msurface_t *surface)
+{
+	if (!surface->numedges || !surface->texinfo || (surface->flags & SURF_DRAWTILED))
+		return NULL;
+	return R_CacheableEmissiveTextureDef (surface->texinfo->texture);
+}
+
+static void R_ClearEmissiveWorldSurfaces (void)
+{
+	SAFE_FREE (emissive_world_surfaces);
+	num_emissive_world_surfaces = 0;
+	emissive_surface_worldmodel = NULL;
+}
+
+static void R_BuildEmissiveWorldSurfaces (void)
+{
+	if (r_emissive_rt.value <= 0.0f || !cl.worldmodel || emissive_surface_worldmodel == cl.worldmodel)
+		return;
+
+	R_ClearEmissiveWorldSurfaces ();
+
+	qmodel_t *const	  worldmodel = cl.worldmodel;
+	msurface_t *const first_surface = &worldmodel->surfaces[worldmodel->firstmodelsurface];
+	for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
+		if (R_CacheableWorldEmissiveSurfaceDef (&first_surface[i]))
+			++num_emissive_world_surfaces;
+
+	if (num_emissive_world_surfaces)
+	{
+		emissive_world_surfaces = Mem_Alloc (num_emissive_world_surfaces * sizeof (*emissive_world_surfaces));
+
+		int surface_index = 0;
+		for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
+		{
+			const emissive_texture_def_t *definition = R_CacheableWorldEmissiveSurfaceDef (&first_surface[i]);
+			if (!definition)
+				continue;
+			emissive_world_surfaces[surface_index].surface = &first_surface[i];
+			emissive_world_surfaces[surface_index].definition = definition;
+			++surface_index;
+		}
+		assert (surface_index == num_emissive_world_surfaces);
+	}
+
+	emissive_surface_worldmodel = worldmodel;
+	Con_DPrintf (
+		"RT emissives: %d cacheable world surface candidate%s (%u bytes)\n", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces)));
+}
+
+void R_EmissiveRTNewMap (void)
+{
+	R_ClearEmissiveWorldSurfaces ();
+	R_BuildEmissiveWorldSurfaces ();
+}
+
+void R_EmissiveRTChanged_f (cvar_t *var)
+{
+	if (var->value > 0.0f)
+		R_BuildEmissiveWorldSurfaces ();
+}
+
+void R_EmissiveRTStats_f (void)
+{
+	Con_Printf (
+		"RT emissives: %s, %d cacheable world surface candidate%s, %u bytes\n", r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
+		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
+		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces)));
+}
+
 /*
 ==================
 R_AnimateLight
@@ -215,7 +338,6 @@ extern cvar_t r_rtshadows;
 // scales the intensity of the rerelease dynamiclight entities; the KEX intensity
 // units don't map 1:1 onto lightmap space, so this is calibrated visually
 cvar_t r_entdlightscale = {"r_entdlightscale", "1", CVAR_NONE};
-cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 
 typedef struct entity_dlight_s
 {

@@ -4298,6 +4298,7 @@ void R_Init (void)
 	Cmd_AddCommand ("r_showbboxes_filter_clear", R_ShowbboxesFilterClear_f);
 
 	Cmd_AddCommand ("vkmemstats", R_VulkanMemStats_f);
+	Cmd_AddCommand ("r_emissive_rt_stats", R_EmissiveRTStats_f);
 
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_lightmap);
@@ -4332,6 +4333,7 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_lerplightstyles);
 	Cvar_RegisterVariable (&r_entdlightscale);
 	Cvar_RegisterVariable (&r_emissive_rt);
+	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);
@@ -4613,6 +4615,7 @@ void R_NewMap (void)
 	Fog_NewMap ();			 // johnfitz -- global fog in worldspawn
 	R_ParseWorldspawn ();	 // ericw -- wateralpha, lavaalpha, telealpha, slimealpha in worldspawn
 	R_ParseEntityDlights (); // 2021 rerelease shadow casting light entities
+	R_EmissiveRTNewMap ();
 
 	VEC_CLEAR (r_pointfile);
 

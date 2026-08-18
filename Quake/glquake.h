@@ -716,6 +716,9 @@ void		Fog_Init (void);
 void R_NewGame (void);
 
 void R_AnimateLight (void);
+void R_EmissiveRTNewMap (void);
+void R_EmissiveRTChanged_f (cvar_t *var);
+void R_EmissiveRTStats_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateLightmapsAndIndirect (void *unused);
