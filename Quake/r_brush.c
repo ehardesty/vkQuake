@@ -2961,6 +2961,11 @@ void GL_EmissiveWorldAccelerationStructureStats (
 	*ready = emissive_world_tlas != VK_NULL_HANDLE;
 }
 
+static qboolean R_SurfaceInEmissiveWorldAccelerationStructure (const msurface_t *surface)
+{
+	return (surface->flags & ~(SURF_PLANEBACK | SURF_DRAWFENCE)) == 0;
+}
+
 /*
 ==================
 GL_BuildEmissiveWorldAccelerationStructure
@@ -2980,7 +2985,7 @@ void GL_BuildEmissiveWorldAccelerationStructure (void)
 	for (int i = worldmodel->firstmodelsurface; i < worldmodel->firstmodelsurface + worldmodel->nummodelsurfaces; ++i)
 	{
 		const msurface_t *const surface = &worldmodel->surfaces[i];
-		if ((surface->flags & ~SURF_PLANEBACK) == 0)
+		if (R_SurfaceInEmissiveWorldAccelerationStructure (surface))
 			num_triangles += surface->numedges - 2;
 	}
 	if (!num_triangles)
@@ -3142,7 +3147,7 @@ void GL_BuildEmissiveWorldAccelerationStructure (void)
 	for (int i = worldmodel->firstmodelsurface; i < worldmodel->firstmodelsurface + worldmodel->nummodelsurfaces; ++i)
 	{
 		const msurface_t *const surface = &worldmodel->surfaces[i];
-		if ((surface->flags & ~SURF_PLANEBACK) != 0)
+		if (!R_SurfaceInEmissiveWorldAccelerationStructure (surface))
 			continue;
 		for (int k = 2; k < surface->numedges; ++k)
 		{
