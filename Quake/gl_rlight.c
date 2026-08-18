@@ -32,6 +32,7 @@ vec3_t lightmap_dlight_origins[MAX_DLIGHTS];
 extern cvar_t r_flatlightstyles; // johnfitz
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_gpulightmapupdate;
+extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
@@ -477,8 +478,10 @@ static void R_BuildEmissiveWorldSurfaceCache (void)
 
 static void R_ActivateEmissiveWorldSurfaceCache (void)
 {
-	if (r_emissive_rt.value <= 0.0f || !num_emissive_world_fixtures)
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !num_emissive_world_fixtures || !num_emissive_world_receivers)
 		return;
+	if (!R_EmissiveDetailReady ())
+		GL_BuildEmissiveWorldAccelerationStructure ();
 	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
 	R_AllocateEmissiveLightmaps ();
 	if (!emissive_world_lights_uploaded)
@@ -503,7 +506,7 @@ void R_EmissiveRTNewMap (void)
 
 void R_EmissiveRTChanged_f (cvar_t *var)
 {
-	if (var->value > 0.0f)
+	if (var->value > 0.0f && gl_fullbrights.value > 0.0f)
 	{
 		R_BuildEmissiveWorldSurfaceCache ();
 		R_ActivateEmissiveWorldSurfaceCache ();
@@ -514,7 +517,7 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 
 void R_EmissiveRTStats_f (void)
 {
-	int		  coarse_lightmaps;
+	int		 coarse_lightmaps;
 	uint64_t coarse_logical_bytes;
 	uint64_t coarse_allocated_bytes;
 	int		 detail_lightmaps;
@@ -525,15 +528,23 @@ void R_EmissiveRTStats_f (void)
 	int		 emissive_lights;
 	uint64_t emissive_light_bytes;
 	qboolean coarse_pending;
+	uint64_t emissive_world_as_bytes;
+	uint32_t emissive_world_as_triangles;
+	uint32_t emissive_world_as_build_time_us;
+	qboolean emissive_world_as_build_time_valid;
+	qboolean emissive_world_as_ready;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveDetailLightmapStats (&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_pending, &detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
+	GL_EmissiveWorldAccelerationStructureStats (
+		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
+		&emissive_world_as_ready);
 	const char *coarse_gpu_time = rs_emissive_coarse_gputime_valid ? va ("%.3f ms", (double)rs_emissive_coarse_gputime_us / 1000.0) : "unavailable";
 	const char *detail_gpu_time = rs_emissive_detail_gputime_valid ? va ("%.3f ms", (double)rs_emissive_detail_gputime_us / 1000.0) : "unavailable";
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
 	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected"};
-	const int			 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
+	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64
 		" logical GPU bytes, %" PRIu64 " allocated GPU bytes, %d uploaded source light%s, %" PRIu64
@@ -546,6 +557,16 @@ void R_EmissiveRTStats_f (void)
 	Con_Printf (
 		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, last GPU detail %s, %s\n",
 		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_gpu_time, detail_state);
+	if (emissive_world_as_build_time_valid)
+		Con_Printf (
+			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, %.3f ms GPU build\n",
+			emissive_world_as_ready ? "ready" : "unavailable", emissive_world_as_triangles, emissive_world_as_triangles == 1 ? "" : "s",
+			emissive_world_as_bytes, (double)emissive_world_as_build_time_us / 1000.0);
+	else
+		Con_Printf (
+			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, GPU build timing unavailable\n",
+			emissive_world_as_ready ? "ready" : "unavailable", emissive_world_as_triangles, emissive_world_as_triangles == 1 ? "" : "s",
+			emissive_world_as_bytes);
 }
 
 /*

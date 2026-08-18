@@ -815,9 +815,13 @@ void GL_SetupLightmapCompute (void);
 void GL_UpdateLightmapDescriptorSets (void);
 void GL_DeleteBModelVertexBuffer (void);
 void GL_DeleteBModelAccelerationStructures (void);
+void GL_DeleteEmissiveWorldAccelerationStructure (void);
 void GL_BuildBModelVertexBuffer (void);
 void GL_RebuildIndirectDraws (qboolean emissive_grouping);
 void GL_BuildBModelAccelerationStructures (void);
+void GL_BuildEmissiveWorldAccelerationStructure (void);
+void GL_EmissiveWorldAccelerationStructureStats (
+	uint64_t *bytes, uint32_t *triangle_count, uint32_t *build_time_us, qboolean *build_time_valid, qboolean *ready);
 void GL_PrepareSIMDAndParallelData (void);
 void GLMesh_UploadBuffers (
 	qmodel_t *mod, aliashdr_t *hdr, unsigned short *indexes, byte *vertexes, aliasmesh_t *desc, jointpose_t *joints, unsigned short *skeleton_indexes,

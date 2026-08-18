@@ -115,6 +115,22 @@ static VkBuffer			   bmodel_indices_buffer;
 static VkDeviceAddress	   bmodel_indices_device_address;
 static vulkan_memory_t	   bmodel_as_device_memory;
 
+static VkAccelerationStructureKHR emissive_world_blas;
+static VkAccelerationStructureKHR emissive_world_tlas;
+static VkBuffer					  emissive_world_indices_buffer;
+static VkBuffer					  emissive_world_instances_buffer;
+static VkBuffer					  emissive_world_blas_buffer;
+static VkBuffer					  emissive_world_tlas_buffer;
+static VkDeviceAddress			  emissive_world_indices_address;
+static VkDeviceAddress			  emissive_world_instances_address;
+static VkDeviceAddress			  emissive_world_blas_buffer_address;
+static VkDeviceAddress			  emissive_world_blas_address;
+static vulkan_memory_t			  emissive_world_as_memory;
+static uint64_t					  emissive_world_as_bytes;
+static uint32_t					  emissive_world_as_triangles;
+static uint32_t					  emissive_world_as_build_time_us;
+static qboolean					  emissive_world_as_build_time_valid;
+
 #define TLAS_GARBAGE_FRAME_COUNT 2
 static VkAccelerationStructureKHR tlas_garbage[TLAS_GARBAGE_FRAME_COUNT];
 static int						  tlas_garbage_index;
@@ -1954,7 +1970,7 @@ void GL_BuildLightmaps (void)
 	memset (shelf_idx, 0, sizeof (shelf_idx));
 	used_indirect_draws = 0;
 	indirect_ready = true;
-	indirect_emissive_grouping = r_emissive_rt.value > 0.0f;
+	indirect_emissive_grouping = r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f;
 	indirect_bmodel_start = INT_MAX;
 	used_deps_data = 0;
 	Mem_Free (brush_deps_data);
@@ -2757,7 +2773,7 @@ void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pend
 static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 {
 	qboolean *const pending = detail ? &emissive_detail_pending : &emissive_coarse_pending;
-	if (!*pending || r_emissive_rt.value <= 0.0f)
+	if (!*pending || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
 
 	const vulkan_pipeline_t *const pipeline = detail ? &vulkan_globals.emissive_detail_pipeline : &vulkan_globals.emissive_coarse_pipeline;
@@ -2877,6 +2893,282 @@ void GL_DeleteBModelAccelerationStructures (void)
 	bmodel_indices_buffer = VK_NULL_HANDLE;
 	bmodel_indices_device_address = 0;
 	TEMP_FREE (buffers);
+}
+
+/*
+==================
+GL_DeleteEmissiveWorldAccelerationStructure
+==================
+*/
+void GL_DeleteEmissiveWorldAccelerationStructure (void)
+{
+	if (emissive_world_tlas == VK_NULL_HANDLE)
+		return;
+
+	GL_WaitForDeviceIdle ();
+	vulkan_globals.vk_destroy_acceleration_structure (vulkan_globals.device, emissive_world_tlas, NULL);
+	vulkan_globals.vk_destroy_acceleration_structure (vulkan_globals.device, emissive_world_blas, NULL);
+	VkBuffer buffers[] = {emissive_world_indices_buffer, emissive_world_instances_buffer, emissive_world_blas_buffer, emissive_world_tlas_buffer};
+	R_FreeBuffers (countof (buffers), buffers, &emissive_world_as_memory, &num_vulkan_bmodel_allocations);
+
+	emissive_world_blas = VK_NULL_HANDLE;
+	emissive_world_tlas = VK_NULL_HANDLE;
+	emissive_world_indices_buffer = VK_NULL_HANDLE;
+	emissive_world_instances_buffer = VK_NULL_HANDLE;
+	emissive_world_blas_buffer = VK_NULL_HANDLE;
+	emissive_world_tlas_buffer = VK_NULL_HANDLE;
+	emissive_world_indices_address = 0;
+	emissive_world_instances_address = 0;
+	emissive_world_blas_buffer_address = 0;
+	emissive_world_blas_address = 0;
+	emissive_world_as_bytes = 0;
+	emissive_world_as_triangles = 0;
+	emissive_world_as_build_time_us = 0;
+	emissive_world_as_build_time_valid = false;
+}
+
+/*
+==================
+GL_EmissiveWorldAccelerationStructureStats
+==================
+*/
+void GL_EmissiveWorldAccelerationStructureStats (
+	uint64_t *bytes, uint32_t *triangle_count, uint32_t *build_time_us, qboolean *build_time_valid, qboolean *ready)
+{
+	*bytes = emissive_world_as_bytes;
+	*triangle_count = emissive_world_as_triangles;
+	*build_time_us = emissive_world_as_build_time_us;
+	*build_time_valid = emissive_world_as_build_time_valid;
+	*ready = emissive_world_tlas != VK_NULL_HANDLE;
+}
+
+/*
+==================
+GL_BuildEmissiveWorldAccelerationStructure
+
+Builds the immutable worldspawn-only AS used while generating cacheable
+emissive detail. It is independent from the live entity TLAS owned by
+r_rtshadows.
+==================
+*/
+void GL_BuildEmissiveWorldAccelerationStructure (void)
+{
+	if (!vulkan_globals.ray_query || !cl.worldmodel || emissive_world_tlas != VK_NULL_HANDLE)
+		return;
+
+	qmodel_t *const worldmodel = cl.worldmodel;
+	uint32_t		num_triangles = 0;
+	for (int i = worldmodel->firstmodelsurface; i < worldmodel->firstmodelsurface + worldmodel->nummodelsurfaces; ++i)
+	{
+		const msurface_t *const surface = &worldmodel->surfaces[i];
+		if ((surface->flags & ~SURF_PLANEBACK) == 0)
+			num_triangles += surface->numedges - 2;
+	}
+	if (!num_triangles)
+		return;
+
+	ZEROED_STRUCT (VkAccelerationStructureGeometryKHR, blas_geometry);
+	blas_geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	blas_geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+	blas_geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+	blas_geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	blas_geometry.geometry.triangles.vertexStride = VERTEXSIZE * sizeof (float);
+	blas_geometry.geometry.triangles.maxVertex = bmodel_numverts;
+	blas_geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+
+	ZEROED_STRUCT (VkAccelerationStructureBuildGeometryInfoKHR, blas_geometry_info);
+	blas_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	blas_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	blas_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	blas_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	blas_geometry_info.geometryCount = 1;
+	blas_geometry_info.pGeometries = &blas_geometry;
+
+	ZEROED_STRUCT (VkAccelerationStructureBuildSizesInfoKHR, blas_sizes);
+	blas_sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	vulkan_globals.vk_get_acceleration_structure_build_sizes (
+		vulkan_globals.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &blas_geometry_info, &num_triangles, &blas_sizes);
+
+	ZEROED_STRUCT (VkAccelerationStructureGeometryKHR, tlas_geometry);
+	tlas_geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+	tlas_geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	tlas_geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+
+	ZEROED_STRUCT (VkAccelerationStructureBuildGeometryInfoKHR, tlas_geometry_info);
+	tlas_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+	tlas_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+	tlas_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+	tlas_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	tlas_geometry_info.geometryCount = 1;
+	tlas_geometry_info.pGeometries = &tlas_geometry;
+
+	const uint32_t tlas_num_instances = 1;
+	ZEROED_STRUCT (VkAccelerationStructureBuildSizesInfoKHR, tlas_sizes);
+	tlas_sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	vulkan_globals.vk_get_acceleration_structure_build_sizes (
+		vulkan_globals.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tlas_geometry_info, &tlas_num_instances, &tlas_sizes);
+
+	const size_t		 indices_size = (size_t)num_triangles * 3 * sizeof (uint32_t);
+	buffer_create_info_t buffer_create_infos[] = {
+		{&emissive_world_indices_buffer, indices_size, 0,
+		 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT, NULL, &emissive_world_indices_address,
+		 "Emissive world indices"},
+		{&emissive_world_instances_buffer, sizeof (VkAccelerationStructureInstanceKHR), 0,
+		 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT, NULL, &emissive_world_instances_address,
+		 "Emissive world instance"},
+		{&emissive_world_blas_buffer, blas_sizes.accelerationStructureSize, 0, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, NULL,
+		 &emissive_world_blas_buffer_address, "Emissive world BLAS"},
+		{&emissive_world_tlas_buffer, tlas_sizes.accelerationStructureSize, 0, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, NULL, NULL,
+		 "Emissive world TLAS"},
+	};
+	emissive_world_as_bytes = R_CreateBuffers (
+		countof (buffer_create_infos), buffer_create_infos, &emissive_world_as_memory, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations,
+		"Emissive world AS");
+
+	VkResult err;
+	ZEROED_STRUCT (VkAccelerationStructureCreateInfoKHR, acceleration_structure_create_info);
+	acceleration_structure_create_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	acceleration_structure_create_info.buffer = emissive_world_blas_buffer;
+	acceleration_structure_create_info.size = blas_sizes.accelerationStructureSize;
+	acceleration_structure_create_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	err = vulkan_globals.vk_create_acceleration_structure (vulkan_globals.device, &acceleration_structure_create_info, NULL, &emissive_world_blas);
+	if (err != VK_SUCCESS)
+		Sys_Error ("vkCreateAccelerationStructure failed with code %i", (int)err);
+	ZEROED_STRUCT (VkAccelerationStructureDeviceAddressInfoKHR, address_info);
+	address_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	address_info.accelerationStructure = emissive_world_blas;
+	emissive_world_blas_address = vulkan_globals.vk_get_acceleration_structure_device_address (vulkan_globals.device, &address_info);
+
+	acceleration_structure_create_info.buffer = emissive_world_tlas_buffer;
+	acceleration_structure_create_info.size = tlas_sizes.accelerationStructureSize;
+	acceleration_structure_create_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+	err = vulkan_globals.vk_create_acceleration_structure (vulkan_globals.device, &acceleration_structure_create_info, NULL, &emissive_world_tlas);
+	if (err != VK_SUCCESS)
+		Sys_Error ("vkCreateAccelerationStructure failed with code %i", (int)err);
+
+	R_EnsureASScratchBufferSize (q_max (blas_sizes.buildScratchSize, tlas_sizes.buildScratchSize));
+
+	const size_t	staging_instance_offset = q_align (indices_size, 16);
+	const size_t	staging_size = staging_instance_offset + sizeof (VkAccelerationStructureInstanceKHR);
+	VkQueryPool		build_timestamp_query_pool = VK_NULL_HANDLE;
+	if (vulkan_globals.device_properties.limits.timestampComputeAndGraphics && (vulkan_globals.device_properties.limits.timestampPeriod > 0.0f))
+	{
+		ZEROED_STRUCT (VkQueryPoolCreateInfo, query_pool_create_info);
+		query_pool_create_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		query_pool_create_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		query_pool_create_info.queryCount = 2;
+		err = vkCreateQueryPool (vulkan_globals.device, &query_pool_create_info, NULL, &build_timestamp_query_pool);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreateQueryPool failed with code %i", (int)err);
+	}
+	VkCommandBuffer command_buffer;
+	VkBuffer		staging_buffer;
+	int				staging_offset;
+	byte *const		staging_memory = R_StagingAllocate ((int)staging_size, 16, &command_buffer, &staging_buffer, &staging_offset);
+	if (build_timestamp_query_pool != VK_NULL_HANDLE)
+		vkCmdResetQueryPool (command_buffer, build_timestamp_query_pool, 0, 2);
+
+	VkBufferCopy copy_regions[2];
+	copy_regions[0].srcOffset = staging_offset;
+	copy_regions[0].dstOffset = 0;
+	copy_regions[0].size = indices_size;
+	copy_regions[1].srcOffset = staging_offset + staging_instance_offset;
+	copy_regions[1].dstOffset = 0;
+	copy_regions[1].size = sizeof (VkAccelerationStructureInstanceKHR);
+	vkCmdCopyBuffer (command_buffer, staging_buffer, emissive_world_indices_buffer, 1, &copy_regions[0]);
+	vkCmdCopyBuffer (command_buffer, staging_buffer, emissive_world_instances_buffer, 1, &copy_regions[1]);
+
+	ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
+	memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	memory_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	vulkan_globals.vk_cmd_pipeline_barrier (
+		command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+	blas_geometry.geometry.triangles.vertexData.deviceAddress = bmodel_vertex_buffer_device_address;
+	blas_geometry.geometry.triangles.indexData.deviceAddress = emissive_world_indices_address;
+	blas_geometry_info.dstAccelerationStructure = emissive_world_blas;
+	blas_geometry_info.scratchData.deviceAddress = as_scratch_buffer.device_address;
+	ZEROED_STRUCT (VkAccelerationStructureBuildRangeInfoKHR, blas_range);
+	blas_range.primitiveCount = num_triangles;
+	const VkAccelerationStructureBuildRangeInfoKHR *blas_range_ptr = &blas_range;
+	if (build_timestamp_query_pool != VK_NULL_HANDLE)
+		vkCmdWriteTimestamp (command_buffer, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, build_timestamp_query_pool, 0);
+	vulkan_globals.vk_cmd_build_acceleration_structures (command_buffer, 1, &blas_geometry_info, &blas_range_ptr);
+
+	memory_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	memory_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	vulkan_globals.vk_cmd_pipeline_barrier (
+		command_buffer, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &memory_barrier,
+		0, NULL, 0, NULL);
+
+	tlas_geometry.geometry.instances.data.deviceAddress = emissive_world_instances_address;
+	tlas_geometry_info.dstAccelerationStructure = emissive_world_tlas;
+	tlas_geometry_info.scratchData.deviceAddress = as_scratch_buffer.device_address;
+	ZEROED_STRUCT (VkAccelerationStructureBuildRangeInfoKHR, tlas_range);
+	tlas_range.primitiveCount = 1;
+	const VkAccelerationStructureBuildRangeInfoKHR *tlas_range_ptr = &tlas_range;
+	vulkan_globals.vk_cmd_build_acceleration_structures (command_buffer, 1, &tlas_geometry_info, &tlas_range_ptr);
+	if (build_timestamp_query_pool != VK_NULL_HANDLE)
+		vkCmdWriteTimestamp (command_buffer, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, build_timestamp_query_pool, 1);
+
+	memory_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	memory_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	vulkan_globals.vk_cmd_pipeline_barrier (
+		command_buffer, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+	R_StagingBeginCopy ();
+	uint32_t *indices = (uint32_t *)staging_memory;
+	uint32_t  current_index = 0;
+	for (int i = worldmodel->firstmodelsurface; i < worldmodel->firstmodelsurface + worldmodel->nummodelsurfaces; ++i)
+	{
+		const msurface_t *const surface = &worldmodel->surfaces[i];
+		if ((surface->flags & ~SURF_PLANEBACK) != 0)
+			continue;
+		for (int k = 2; k < surface->numedges; ++k)
+		{
+			indices[current_index++] = surface->vbo_firstvert;
+			indices[current_index++] = surface->vbo_firstvert + k - 1;
+			indices[current_index++] = surface->vbo_firstvert + k;
+		}
+	}
+	assert (current_index == num_triangles * 3);
+
+	VkAccelerationStructureInstanceKHR *const instance = (VkAccelerationStructureInstanceKHR *)(staging_memory + staging_instance_offset);
+	memset (instance, 0, sizeof (*instance));
+	instance->transform.matrix[0][0] = 1.0f;
+	instance->transform.matrix[1][1] = 1.0f;
+	instance->transform.matrix[2][2] = 1.0f;
+	instance->mask = 0xFF;
+	instance->flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR | VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+	instance->accelerationStructureReference = emissive_world_blas_address;
+	R_StagingEndCopy ();
+
+	R_SubmitStagingBuffers ();
+	GL_WaitForDeviceIdle ();
+	if (build_timestamp_query_pool != VK_NULL_HANDLE)
+	{
+		uint64_t timestamps[2];
+		if (vkGetQueryPoolResults (
+				vulkan_globals.device, build_timestamp_query_pool, 0, 2, sizeof (timestamps), timestamps, sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+		{
+			emissive_world_as_build_time_us =
+				(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+			emissive_world_as_build_time_valid = true;
+		}
+		vkDestroyQueryPool (vulkan_globals.device, build_timestamp_query_pool, NULL);
+	}
+	if (!r_rtshadows.value)
+		R_FreeASScratchBuffer ();
+	emissive_world_as_triangles = num_triangles;
+	if (emissive_world_as_build_time_valid)
+		Con_DPrintf (
+			"RT emissives: built immutable world AS (%u triangles, %" PRIu64 " bytes, %.3f ms GPU)\n", emissive_world_as_triangles,
+			emissive_world_as_bytes, (double)emissive_world_as_build_time_us / 1000.0);
+	else
+		Con_DPrintf (
+			"RT emissives: built immutable world AS (%u triangles, %" PRIu64 " bytes, GPU timing unavailable)\n", emissive_world_as_triangles,
+			emissive_world_as_bytes);
 }
 
 /*

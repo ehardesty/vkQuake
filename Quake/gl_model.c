@@ -485,6 +485,7 @@ void Mod_ClearAll (void)
 {
 	int		  i;
 	qmodel_t *mod;
+	GL_DeleteEmissiveWorldAccelerationStructure ();
 	GL_DeleteBModelAccelerationStructures ();
 
 	for (i = 0, mod = mod_known; i < mod_numknown; i++, mod++)
@@ -511,6 +512,7 @@ void Mod_ResetAll (void)
 
 	// ericw -- free alias model VBOs
 	GLMesh_DeleteAllMeshBuffers ();
+	GL_DeleteEmissiveWorldAccelerationStructure ();
 	GL_DeleteBModelAccelerationStructures ();
 
 	for (i = 0, mod = mod_known; i < mod_numknown; i++, mod++)

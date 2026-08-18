@@ -332,6 +332,7 @@ GL_Fullbrights_f -- johnfitz
 static void GL_Fullbrights_f (cvar_t *var)
 {
 	TexMgr_ReloadNobrightImages ();
+	R_EmissiveRTChanged_f (&r_emissive_rt);
 }
 
 /*
