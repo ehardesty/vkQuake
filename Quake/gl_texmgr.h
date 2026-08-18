@@ -119,6 +119,7 @@ void		 TexMgr_Init (void);
 void		 TexMgr_DeleteTextureObjects (void);
 void		 TexMgr_CollectGarbage (void);
 void		 TexMgr_LoadPalette (void);
+VkDeviceSize TexMgr_RGBA16FImageMemorySize (int width, int height);
 
 // IMAGE LOADING
 gltexture_t *TexMgr_LoadImage (

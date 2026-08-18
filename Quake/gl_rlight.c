@@ -480,10 +480,10 @@ static void R_ActivateEmissiveWorldSurfaceCache (void)
 {
 	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !num_emissive_world_fixtures || !num_emissive_world_receivers)
 		return;
-	if (!R_EmissiveDetailReady ())
+	R_AllocateEmissiveLightmaps ();
+	if (!R_EmissiveDetailReady () && R_EmissiveDetailAvailable ())
 		GL_BuildEmissiveWorldAccelerationStructure ();
 	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
-	R_AllocateEmissiveLightmaps ();
 	if (!emissive_world_lights_uploaded)
 		R_UploadEmissiveLights ();
 }
@@ -523,6 +523,8 @@ void R_EmissiveRTStats_f (void)
 	int		 detail_lightmaps;
 	uint64_t detail_logical_bytes;
 	uint64_t detail_allocated_bytes;
+	uint64_t detail_budget_bytes;
+	qboolean detail_budget_limited;
 	qboolean detail_pending;
 	qboolean detail_ready;
 	int		 emissive_lights;
@@ -534,7 +536,9 @@ void R_EmissiveRTStats_f (void)
 	qboolean emissive_world_as_build_time_valid;
 	qboolean emissive_world_as_ready;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
-	R_EmissiveDetailLightmapStats (&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_pending, &detail_ready);
+	R_EmissiveDetailLightmapStats (
+		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
+		&detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
@@ -555,8 +559,10 @@ void R_EmissiveRTStats_f (void)
 		coarse_lightmaps, coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s",
 		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
 	Con_Printf (
-		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, last GPU detail %s, %s\n",
-		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_gpu_time, detail_state);
+		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
+		" byte budget, last GPU detail %s, %s%s\n",
+		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, detail_gpu_time,
+		detail_state, detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
 	if (emissive_world_as_build_time_valid)
 		Con_Printf (
 			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, %.3f ms GPU build\n",

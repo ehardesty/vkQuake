@@ -717,9 +717,11 @@ extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 void R_EmissiveDetailLightmapStats (
-	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, qboolean *pending, qboolean *ready);
+	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
+	qboolean *ready);
 void R_EmissiveDetailCompleted (void);
 qboolean R_EmissiveDetailReady (void);
+qboolean R_EmissiveDetailAvailable (void);
 void R_SetEmissiveLights (const emissive_light_t *lights, int count);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void GL_ResetEmissiveCoarseTimestamp (void);

@@ -36,6 +36,7 @@ int gl_lightmap_format;
 
 #define LM_BIN_E 8
 #define LM_BINS	 49
+#define EMISSIVE_DETAIL_MEMORY_BUDGET_MB 512
 
 struct lightmap_s *lightmaps;
 int				   lightmap_count;
@@ -337,6 +338,7 @@ static qboolean			   emissive_coarse_pending;
 static qboolean			   emissive_detail_pending;
 static qboolean			   emissive_detail_building;
 static qboolean			   emissive_detail_ready;
+static qboolean			   emissive_detail_budget_limited;
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -1964,6 +1966,7 @@ void GL_BuildLightmaps (void)
 	lightmaps = NULL;
 	last_lightmap_allocated = 0;
 	lightmap_count = 0;
+	emissive_detail_budget_limited = false;
 	num_surfaces = 0;
 	memset (columns, -1, sizeof (columns));
 	memset (lightmap_idx, 0, sizeof (lightmap_idx));
@@ -2557,6 +2560,7 @@ void R_AllocateEmissiveLightmaps (void)
 	if (!cl.worldmodel || !lightmap_count)
 		return;
 
+	const qboolean admission_was_limited = emissive_detail_budget_limited;
 	qboolean *const world_lightmaps = Mem_Alloc (lightmap_count * sizeof (*world_lightmaps));
 	memset (world_lightmaps, 0, lightmap_count * sizeof (*world_lightmaps));
 	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
@@ -2567,6 +2571,32 @@ void R_AllocateEmissiveLightmaps (void)
 			world_lightmaps[surface->lightmaptexturenum] = true;
 	}
 
+	const uint64_t detail_budget_bytes = (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	uint64_t	   detail_logical_bytes = 0;
+	uint64_t	   detail_required_bytes = 0;
+	if (vulkan_globals.ray_query)
+		for (int i = 0; i < lightmap_count; ++i)
+			if (world_lightmaps[i])
+			{
+				const struct lightmap_s *const lightmap = &lightmaps[i];
+				detail_logical_bytes += (uint64_t)lightmap->surface_indices_texture->width * EMISSIVE_DETAIL_SCALE *
+					lightmap->surface_indices_texture->height * EMISSIVE_DETAIL_SCALE * 8;
+			}
+	if (detail_logical_bytes > detail_budget_bytes)
+		emissive_detail_budget_limited = true;
+	if (vulkan_globals.ray_query && !emissive_detail_budget_limited)
+		for (int i = 0; i < lightmap_count; ++i)
+			if (world_lightmaps[i])
+			{
+				const struct lightmap_s *const lightmap = &lightmaps[i];
+				detail_required_bytes += TexMgr_RGBA16FImageMemorySize (
+					lightmap->surface_indices_texture->width * EMISSIVE_DETAIL_SCALE,
+					lightmap->surface_indices_texture->height * EMISSIVE_DETAIL_SCALE);
+			}
+	if (detail_required_bytes > detail_budget_bytes)
+		emissive_detail_budget_limited = true;
+
+	uint64_t detail_allocated_bytes = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -2581,13 +2611,27 @@ void R_AllocateEmissiveLightmaps (void)
 			lightmap->emissive_texture = TexMgr_LoadImage (
 				cl.worldmodel, name, width, height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
 		}
-		if (vulkan_globals.ray_query && !lightmap->emissive_detail_texture)
+		if (vulkan_globals.ray_query && !emissive_detail_budget_limited && !lightmap->emissive_detail_texture)
 		{
 			q_snprintf (name, sizeof (name), "emissive_detail_%07i", i);
 			lightmap->emissive_detail_texture = TexMgr_LoadImage (
 				cl.worldmodel, name, width * EMISSIVE_DETAIL_SCALE, height * EMISSIVE_DETAIL_SCALE, SRC_RGBA16F, NULL, "", 0,
 				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
 		}
+		if (lightmap->emissive_detail_texture)
+			detail_allocated_bytes += GL_HeapGetAllocationSize (lightmap->emissive_detail_texture->allocation);
+	}
+	assert (detail_allocated_bytes <= detail_budget_bytes);
+	if (emissive_detail_budget_limited && !admission_was_limited)
+	{
+		if (detail_logical_bytes > detail_budget_bytes)
+			Con_DPrintf (
+				"RT emissives: dense detail rejected (%" PRIu64 " logical bytes, %" PRIu64 " byte budget); using coarse fallback\n",
+				detail_logical_bytes, detail_budget_bytes);
+		else
+			Con_DPrintf (
+				"RT emissives: dense detail rejected (%" PRIu64 " required Vulkan bytes, %" PRIu64 " byte budget); using coarse fallback\n",
+				detail_required_bytes, detail_budget_bytes);
 	}
 	Mem_Free (world_lightmaps);
 }
@@ -2597,7 +2641,9 @@ void R_AllocateEmissiveLightmaps (void)
 R_EmissiveDetailLightmapStats
 ==================
 */
-void R_EmissiveDetailLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, qboolean *pending, qboolean *ready)
+void R_EmissiveDetailLightmapStats (
+	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
+	qboolean *ready)
 {
 	*count = 0;
 	*logical_bytes = 0;
@@ -2609,6 +2655,8 @@ void R_EmissiveDetailLightmapStats (int *count, uint64_t *logical_bytes, uint64_
 			*logical_bytes += (uint64_t)lightmaps[i].emissive_detail_texture->width * lightmaps[i].emissive_detail_texture->height * 8;
 			*allocated_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_detail_texture->allocation);
 		}
+	*budget_bytes = (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	*budget_limited = emissive_detail_budget_limited;
 	*pending = emissive_detail_pending || emissive_detail_building;
 	*ready = emissive_detail_ready;
 }
@@ -2632,6 +2680,19 @@ R_EmissiveDetailReady
 qboolean R_EmissiveDetailReady (void)
 {
 	return emissive_detail_ready;
+}
+
+/*
+==================
+R_EmissiveDetailAvailable
+==================
+*/
+qboolean R_EmissiveDetailAvailable (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+		if (lightmaps[i].emissive_detail_texture)
+			return true;
+	return false;
 }
 
 /*
