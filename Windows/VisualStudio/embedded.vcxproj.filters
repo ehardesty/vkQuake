@@ -64,6 +64,9 @@
     <CustomBuild Include="..\..\Shaders\ray_debug.comp">
       <Filter>Shaders</Filter>
     </CustomBuild>
+    <CustomBuild Include="..\..\Shaders\emissive_coarse.comp">
+      <Filter>Shaders</Filter>
+    </CustomBuild>
     <CustomBuild Include="..\..\Shaders\md5.vert">
       <Filter>Shaders\Alias</Filter>
     </CustomBuild>
@@ -130,6 +133,9 @@
       <Filter>Shaders\Screen Effects</Filter>
     </None>
     <None Include="..\..\Shaders\update_lightmap.inc">
+      <Filter>Shaders\Update Lightmap</Filter>
+    </None>
+    <None Include="..\..\Shaders\lightmap_coords.inc">
       <Filter>Shaders\Update Lightmap</Filter>
     </None>
     <None Include="..\..\Shaders\globals.inc">

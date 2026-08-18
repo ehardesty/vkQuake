@@ -27,6 +27,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
+extern cvar_t r_emissive_rt;
 
 int gl_lightmap_format;
 
@@ -310,6 +311,7 @@ static VkBuffer			   lights_buffer;
 static vulkan_memory_t	   emissive_coarse_lights_buffer_memory;
 static VkBuffer			   emissive_coarse_lights_buffer;
 static int				   num_emissive_coarse_lights;
+static qboolean			   emissive_coarse_pending;
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -1887,6 +1889,8 @@ void GL_BuildLightmaps (void)
 	{
 		Mem_Free (lightmaps[i].data);
 		R_FreeDescriptorSet (lightmaps[i].descriptor_set, &vulkan_globals.lightmap_compute_set_layout);
+		if (lightmaps[i].emissive_coarse_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_coarse_descriptor_set, &vulkan_globals.emissive_coarse_set_layout);
 		if (lightmaps[i].workgroup_bounds_buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer (vulkan_globals.device, lightmaps[i].workgroup_bounds_buffer, NULL);
 	}
@@ -2434,19 +2438,74 @@ R_SetEmissiveCoarseLights
 */
 void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count)
 {
+	if (emissive_coarse_lights_buffer != VK_NULL_HANDLE)
+		GL_WaitForDeviceIdle ();
+	for (int i = 0; i < lightmap_count; ++i)
+		if (lightmaps[i].emissive_coarse_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmaps[i].emissive_coarse_descriptor_set, &vulkan_globals.emissive_coarse_set_layout);
+			lightmaps[i].emissive_coarse_descriptor_set = VK_NULL_HANDLE;
+		}
 	R_FreeBuffer (emissive_coarse_lights_buffer, &emissive_coarse_lights_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_coarse_lights_buffer = VK_NULL_HANDLE;
 	num_emissive_coarse_lights = 0;
+	emissive_coarse_pending = false;
 	if (!lights || count <= 0)
 		return;
 
 	const size_t size = count * sizeof (*lights);
 	R_CreateBuffer (
-		&emissive_coarse_lights_buffer, &emissive_coarse_lights_buffer_memory, size,
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
-		"Emissive coarse lights");
+		&emissive_coarse_lights_buffer, &emissive_coarse_lights_buffer_memory, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, "Emissive coarse lights");
 	R_StagingUploadBuffer (emissive_coarse_lights_buffer, size, (const byte *)lights);
 	num_emissive_coarse_lights = count;
+
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!lightmap->emissive_texture)
+			continue;
+
+		lightmap->emissive_coarse_descriptor_set = R_AllocateDescriptorSet (&vulkan_globals.emissive_coarse_set_layout);
+		GL_SetObjectName ((uint64_t)lightmap->emissive_coarse_descriptor_set, VK_OBJECT_TYPE_DESCRIPTOR_SET, va ("emissive coarse %07i desc set", i));
+
+		VkDescriptorImageInfo image_infos[2];
+		memset (image_infos, 0, sizeof (image_infos));
+		image_infos[0].imageView = lightmap->emissive_texture->target_image_view;
+		image_infos[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		image_infos[1].imageView = lightmap->surface_indices_texture->image_view;
+		image_infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkDescriptorBufferInfo buffer_infos[4];
+		memset (buffer_infos, 0, sizeof (buffer_infos));
+		buffer_infos[0].buffer = surface_data_buffer;
+		buffer_infos[0].range = num_surfaces * sizeof (lm_compute_surface_data_t);
+		buffer_infos[1].buffer = bmodel_vertex_buffer;
+		buffer_infos[1].range = VK_WHOLE_SIZE;
+		buffer_infos[2].buffer = surface_submodels_buffer;
+		buffer_infos[2].range = num_surfaces * sizeof (uint32_t);
+		buffer_infos[3].buffer = emissive_coarse_lights_buffer;
+		buffer_infos[3].range = size;
+
+		VkWriteDescriptorSet writes[6];
+		memset (writes, 0, sizeof (writes));
+		for (int binding = 0; binding < countof (writes); ++binding)
+		{
+			writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[binding].dstBinding = binding;
+			writes[binding].descriptorCount = 1;
+			writes[binding].dstSet = lightmap->emissive_coarse_descriptor_set;
+			writes[binding].descriptorType = binding == 0	? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+											 : binding == 1 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+															: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			if (binding < 2)
+				writes[binding].pImageInfo = &image_infos[binding];
+			else
+				writes[binding].pBufferInfo = &buffer_infos[binding - 2];
+		}
+		vkUpdateDescriptorSets (vulkan_globals.device, countof (writes), writes, 0, NULL);
+	}
+	emissive_coarse_pending = true;
 }
 
 /*
@@ -2458,6 +2517,57 @@ void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes)
 {
 	*count = num_emissive_coarse_lights;
 	*allocated_bytes = emissive_coarse_lights_buffer_memory.size;
+}
+
+/*
+==================
+R_UpdateEmissiveCoarseLightmaps
+==================
+*/
+static void R_UpdateEmissiveCoarseLightmaps (cb_context_t *cbx)
+{
+	if (!emissive_coarse_pending || r_emissive_rt.value <= 0.0f)
+		return;
+
+	R_BeginDebugUtilsLabel (cbx, "Update Coarse Emissive Lightmaps");
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_coarse_pipeline);
+	R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (num_emissive_coarse_lights), &num_emissive_coarse_lights);
+
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_coarse_descriptor_set == VK_NULL_HANDLE)
+			continue;
+
+		VkImageMemoryBarrier barrier;
+		memset (&barrier, 0, sizeof (barrier));
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = lightmap->emissive_texture->image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+		vkCmdBindDescriptorSets (
+			cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_coarse_pipeline.layout.handle, 0, 1, &lightmap->emissive_coarse_descriptor_set, 0,
+			NULL);
+		vkCmdDispatch (cbx->cb, (lightmap->emissive_texture->width + 7) / 8, (lightmap->emissive_texture->height + 7) / 8, 1);
+
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+	}
+
+	emissive_coarse_pending = false;
+	R_EndDebugUtilsLabel (cbx);
 }
 
 /*
@@ -3649,6 +3759,7 @@ void R_UpdateLightmapsAndIndirect (void *unused)
 {
 	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_UPDATE_LIGHTMAPS];
 	R_BeginDebugUtilsLabel (cbx, "Update Lightmaps");
+	R_UpdateEmissiveCoarseLightmaps (cbx);
 
 	for (int i = 0; i < MAX_LIGHTSTYLES; ++i)
 	{

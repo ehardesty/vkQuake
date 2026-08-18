@@ -49,6 +49,7 @@ shaders = [
     'Shaders/sky_layer.vert',
     'Shaders/world.vert',
     'Shaders/ray_debug.comp',
+    'Shaders/emissive_coarse.comp',
     'Shaders/mesh_interpolate.comp',
     'Shaders/skinning.comp',
 ]

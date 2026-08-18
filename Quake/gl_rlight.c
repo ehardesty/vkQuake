@@ -348,8 +348,8 @@ static void R_BuildEmissiveWorldSurfaces (void)
 		R_BuildEmissiveWorldFixtures (worldmodel);
 		if (num_emissive_world_fixtures)
 		{
-			R_UploadEmissiveCoarseLights ();
 			R_AllocateEmissiveLightmaps ();
+			R_UploadEmissiveCoarseLights ();
 		}
 	}
 

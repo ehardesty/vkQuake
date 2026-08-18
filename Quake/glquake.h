@@ -455,6 +455,7 @@ typedef struct
 	vulkan_pipeline_t		 md5_debug_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 update_lightmap_pipeline;
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
+	vulkan_pipeline_t		 emissive_coarse_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -479,6 +480,7 @@ typedef struct
 	vulkan_desc_set_layout_t screen_effects_set_layout;
 	vulkan_desc_set_layout_t single_texture_cs_write_set_layout;
 	vulkan_desc_set_layout_t lightmap_compute_set_layout;
+	vulkan_desc_set_layout_t emissive_coarse_set_layout;
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	VkDescriptorSet			 bmodel_instances_desc_set;
@@ -667,6 +669,7 @@ struct lightmap_s
 	gltexture_t	   *surface_indices_texture;
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
+	VkDescriptorSet emissive_coarse_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;

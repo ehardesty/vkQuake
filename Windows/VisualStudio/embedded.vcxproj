@@ -245,8 +245,8 @@ $(VULKAN_SDK)\bin\spirv-opt.exe -Os --canonicalize-ids --strip-debug "$(Solution
     </CustomBuild>
     <CustomBuild Include="..\..\Shaders\update_lightmap.comp">
       <FileType>Document</FileType>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)..\..\Shaders\update_lightmap.inc;%(AdditionalInputs)</AdditionalInputs>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\..\Shaders\update_lightmap.inc;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)..\..\Shaders\update_lightmap.inc;$(SolutionDir)..\..\Shaders\lightmap_coords.inc;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\..\Shaders\update_lightmap.inc;$(SolutionDir)..\..\Shaders\lightmap_coords.inc;%(AdditionalInputs)</AdditionalInputs>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(VULKAN_SDK)\bin\glslangValidator.exe -g -V "%(FullPath)" -o "$(SolutionDir)..\..\Shaders\Compiled\Debug\update_lightmap_8bit.comp.spv"
 "$(SolutionDir)\Build-bintoc\$(PlatformShortName)\$(Configuration)\bintoc.exe" "$(SolutionDir)..\..\Shaders\Compiled\Debug\update_lightmap_8bit.comp.spv" update_lightmap_8bit.comp_spv "$(SolutionDir)..\..\Shaders\Compiled\Debug\update_lightmap_8bit.comp.c"
 $(VULKAN_SDK)\bin\glslangValidator.exe -g -V -DRAY_QUERIES=1 "%(FullPath)" -o "$(SolutionDir)..\..\Shaders\Compiled\Debug\update_lightmap_8bit_rt.comp.spv"
@@ -351,10 +351,23 @@ $(VULKAN_SDK)\bin\spirv-opt.exe -Os --canonicalize-ids --strip-debug "$(Solution
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\..\Shaders\Compiled\Release\skinning.comp.c;$(SolutionDir)..\..\Shaders\Compiled\Release\skinning_8.comp.c</Outputs>
     </CustomBuild>
     <None Include="..\..\Shaders\update_lightmap.inc" />
+    <None Include="..\..\Shaders\lightmap_coords.inc" />
     <None Include="..\..\Shaders\globals.inc" />
     <None Include="..\..\Shaders\world_common.inc" />
     <CustomBuild Include="..\..\Shaders\ray_debug.comp">
       <FileType>Document</FileType>
+    </CustomBuild>
+    <CustomBuild Include="..\..\Shaders\emissive_coarse.comp">
+      <FileType>Document</FileType>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)..\..\Shaders\globals.inc;$(SolutionDir)..\..\Shaders\lightmap_coords.inc;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\..\Shaders\globals.inc;$(SolutionDir)..\..\Shaders\lightmap_coords.inc;%(AdditionalInputs)</AdditionalInputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(VULKAN_SDK)\bin\glslangValidator.exe -g -V "%(FullPath)" -o "$(SolutionDir)..\..\Shaders\Compiled\Debug\emissive_coarse.comp.spv"
+"$(SolutionDir)\Build-bintoc\$(PlatformShortName)\$(Configuration)\bintoc.exe" "$(SolutionDir)..\..\Shaders\Compiled\Debug\emissive_coarse.comp.spv" emissive_coarse_comp_spv "$(SolutionDir)..\..\Shaders\Compiled\Debug\emissive_coarse.comp.c"</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(VULKAN_SDK)\bin\glslangValidator.exe -V "%(FullPath)" -o "$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.spv"
+$(VULKAN_SDK)\bin\spirv-opt.exe -Os --canonicalize-ids --strip-debug "$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.spv" -o "$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.spv"
+"$(SolutionDir)\Build-bintoc\$(PlatformShortName)\$(Configuration)\bintoc.exe" "$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.spv" emissive_coarse_comp_spv "$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.c"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)..\..\Shaders\Compiled\Debug\emissive_coarse.comp.c</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\..\Shaders\Compiled\Release\emissive_coarse.comp.c</Outputs>
     </CustomBuild>
     <CustomBuild Include="..\..\Misc\vq_pak\vq_pak_contents.txt">
       <FileType>Document</FileType>
