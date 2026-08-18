@@ -307,6 +307,9 @@ static uint32_t			   dyn_visibility_offset; // for double-buffering
 static unsigned char	  *dyn_visibility_view;
 static VkBuffer			   lightstyles_scales_buffer;
 static VkBuffer			   lights_buffer;
+static vulkan_memory_t	   emissive_coarse_lights_buffer_memory;
+static VkBuffer			   emissive_coarse_lights_buffer;
+static int				   num_emissive_coarse_lights;
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -2425,6 +2428,39 @@ void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *all
 }
 
 /*
+==================
+R_SetEmissiveCoarseLights
+==================
+*/
+void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count)
+{
+	R_FreeBuffer (emissive_coarse_lights_buffer, &emissive_coarse_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_coarse_lights_buffer = VK_NULL_HANDLE;
+	num_emissive_coarse_lights = 0;
+	if (!lights || count <= 0)
+		return;
+
+	const size_t size = count * sizeof (*lights);
+	R_CreateBuffer (
+		&emissive_coarse_lights_buffer, &emissive_coarse_lights_buffer_memory, size,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+		"Emissive coarse lights");
+	R_StagingUploadBuffer (emissive_coarse_lights_buffer, size, (const byte *)lights);
+	num_emissive_coarse_lights = count;
+}
+
+/*
+==================
+R_EmissiveCoarseLightStats
+==================
+*/
+void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes)
+{
+	*count = num_emissive_coarse_lights;
+	*allocated_bytes = emissive_coarse_lights_buffer_memory.size;
+}
+
+/*
 =============================================================
 
 	VBO support
@@ -2442,6 +2478,7 @@ void GL_DeleteBModelVertexBuffer (void)
 	GL_WaitForDeviceIdle ();
 	R_FreeBuffer (bmodel_vertex_buffer, &bmodel_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (vertex_submodels_buffer, &vertex_submodels_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_SetEmissiveCoarseLights (NULL, 0);
 }
 
 /*

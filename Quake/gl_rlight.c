@@ -80,8 +80,8 @@ typedef struct emissive_world_fixture_s
 } emissive_world_fixture_t;
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 0.2f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
-	{"TLIGHT11", 192.0f, 0.6f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
 };
 
 static emissive_world_surface_t *emissive_world_surfaces;
@@ -293,6 +293,24 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 	Mem_Free (surface_groups);
 }
 
+static void R_UploadEmissiveCoarseLights (void)
+{
+	if (!num_emissive_world_fixtures)
+		return;
+
+	emissive_coarse_light_t *const lights = Mem_Alloc (num_emissive_world_fixtures * sizeof (*lights));
+	for (int i = 0; i < num_emissive_world_fixtures; ++i)
+	{
+		const emissive_world_fixture_t *const fixture = &emissive_world_fixtures[i];
+		VectorCopy (fixture->origin, lights[i].origin);
+		lights[i].radius = fixture->definition->radius;
+		VectorCopy (fixture->color, lights[i].color);
+		lights[i].intensity = fixture->definition->intensity;
+	}
+	R_SetEmissiveCoarseLights (lights, num_emissive_world_fixtures);
+	Mem_Free (lights);
+}
+
 static void R_BuildEmissiveWorldSurfaces (void)
 {
 	if (r_emissive_rt.value <= 0.0f || !cl.worldmodel)
@@ -329,7 +347,10 @@ static void R_BuildEmissiveWorldSurfaces (void)
 		assert (surface_index == num_emissive_world_surfaces);
 		R_BuildEmissiveWorldFixtures (worldmodel);
 		if (num_emissive_world_fixtures)
+		{
+			R_UploadEmissiveCoarseLights ();
 			R_AllocateEmissiveLightmaps ();
+		}
 	}
 
 	emissive_surface_worldmodel = worldmodel;
@@ -356,14 +377,17 @@ void R_EmissiveRTStats_f (void)
 	int		  coarse_lightmaps;
 	uint64_t coarse_logical_bytes;
 	uint64_t coarse_allocated_bytes;
+	int		 coarse_lights;
+	uint64_t coarse_light_bytes;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
+	R_EmissiveCoarseLightStats (&coarse_lights, &coarse_light_bytes);
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64
-		" allocated GPU bytes\n",
+		" allocated GPU bytes, %d uploaded coarse light%s, %" PRIu64 " light-buffer bytes\n",
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled",
 		num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s", num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies",
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures)), coarse_lightmaps,
-		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes);
+		coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, coarse_lights, coarse_lights == 1 ? "" : "s", coarse_light_bytes);
 }
 
 /*

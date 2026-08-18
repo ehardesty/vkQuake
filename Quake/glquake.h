@@ -688,10 +688,22 @@ struct lightmap_s
 	uint32_t					  *surface_indices;	   //[LMBLOCK_WIDTH*LMBLOCK_HEIGHT];
 	lm_compute_workgroup_bounds_t *workgroup_bounds;   //[(LMBLOCK_WIDTH/8)*(LMBLOCK_HEIGHT/8)];
 };
+
+typedef struct emissive_coarse_light_s
+{
+	vec3_t origin;
+	float  radius;
+	vec3_t color;
+	float  intensity;
+} emissive_coarse_light_t;
+COMPILE_TIME_ASSERT (emissive_coarse_light_t, sizeof (emissive_coarse_light_t) == 32);
+
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
+void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count);
+void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 
