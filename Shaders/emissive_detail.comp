@@ -48,13 +48,15 @@ void main ()
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 
-	vec3	   contribution = vec3 (0.0f);
-	const uint surface_index = texelFetch (surface_indices, coords, 0).x;
+	vec3		 contribution = vec3 (0.0f);
+	float		 validity = 0.0f;
+	const ivec2 coarse_coords = coords / 2;
+	const uint surface_index = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
 	{
 		const surface_t surf = surfaces[surface_index];
-		const float		s = float (coords.x - int (surf.packed_light_st & 0xFFFFu)) - 0.5f;
-		const float		t = float (coords.y - int (surf.packed_light_st >> 16)) - 0.5f;
+		const float		s = (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 1.0f;
+		const float		t = (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 1.0f;
 		vec3			tangent;
 		vec3			bitangent;
 		const vec3		world_pos = CalculateWorldPos (surf, s, t, tangent, bitangent);
@@ -63,7 +65,8 @@ void main ()
 			normal = -normal;
 
 		contribution = CalculateEmissiveContribution (world_pos, normal);
+		validity = 1.0f;
 	}
 
-	imageStore (output_image, coords, vec4 (contribution, 0.0f));
+	imageStore (output_image, coords, vec4 (contribution, validity));
 }

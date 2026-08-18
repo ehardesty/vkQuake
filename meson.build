@@ -50,6 +50,7 @@ shaders = [
     'Shaders/world.vert',
     'Shaders/ray_debug.comp',
     'Shaders/emissive_coarse.comp',
+    'Shaders/emissive_detail.comp',
     'Shaders/mesh_interpolate.comp',
     'Shaders/skinning.comp',
 ]

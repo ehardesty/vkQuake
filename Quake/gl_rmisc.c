@@ -1596,15 +1596,15 @@ void R_CreateDescriptorSetLayouts ()
 		descriptor_set_layout_create_info.bindingCount = num_descriptors;
 		descriptor_set_layout_create_info.pBindings = emissive_coarse_layout_bindings;
 
-		memset (&vulkan_globals.emissive_coarse_set_layout, 0, sizeof (vulkan_globals.emissive_coarse_set_layout));
-		vulkan_globals.emissive_coarse_set_layout.num_storage_images = 1;
-		vulkan_globals.emissive_coarse_set_layout.num_sampled_images = 1;
-		vulkan_globals.emissive_coarse_set_layout.num_storage_buffers = 4;
+		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
+		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
+		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 1;
+		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 4;
 
-		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_coarse_set_layout.handle);
+		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
 		if (err != VK_SUCCESS)
 			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
-		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_coarse_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive coarse");
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_compute_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive compute");
 	}
 
 	{
@@ -1725,23 +1725,23 @@ void R_CreateDescriptorPool ()
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	pool_sizes[0].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2) + (MAX_GLTEXTURES + 1);
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 2;
+	pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 3;
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
 	pool_sizes[2].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[3].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[4].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS * 6;
+	pool_sizes[4].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS * 13;
 	pool_sizes[5].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 	pool_sizes[5].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2);
 	pool_sizes[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
 	pool_sizes[6].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[7].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_sizes[7].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (2 + MAXLIGHTMAPS * 3 / 4) * MAX_SANITY_LIGHTMAPS;
+	pool_sizes[7].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (3 + MAXLIGHTMAPS * 3 / 4) * MAX_SANITY_LIGHTMAPS;
 
 	ZEROED_STRUCT (VkDescriptorPoolCreateInfo, descriptor_pool_create_info);
 	descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 2 + 128;
+	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 3 + 128;
 	descriptor_pool_create_info.poolSizeCount = countof (pool_sizes);
 	descriptor_pool_create_info.pPoolSizes = pool_sizes;
 	descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -2072,7 +2072,7 @@ void R_CreatePipelineLayouts ()
 	{
 		// Coarse emissive lightmaps
 		VkDescriptorSetLayout descriptor_set_layouts[1] = {
-			vulkan_globals.emissive_coarse_set_layout.handle,
+			vulkan_globals.emissive_compute_set_layout.handle,
 		};
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
@@ -2092,6 +2092,12 @@ void R_CreatePipelineLayouts ()
 			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_coarse_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_coarse_pipeline_layout");
 		vulkan_globals.emissive_coarse_pipeline.layout.push_constant_range = push_constant_range;
+
+		err = vkCreatePipelineLayout (vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.emissive_detail_pipeline.layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_detail_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_detail_pipeline_layout");
+		vulkan_globals.emissive_detail_pipeline.layout.push_constant_range = push_constant_range;
 	}
 
 	if (vulkan_globals.ray_query)
@@ -2507,6 +2513,7 @@ DECLARE_SHADER_MODULE (update_lightmap_8bit_rt_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
+DECLARE_SHADER_MODULE (emissive_detail_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
 DECLARE_SHADER_MODULE (mesh_interpolate_comp);
 DECLARE_SHADER_MODULE (skinning_comp);
@@ -3949,6 +3956,7 @@ static void R_CreateUpdateLightmapPipelines ()
 			&specialization_info, "update_lightmap_rt");
 
 	R_CreateComputePipeline (&vulkan_globals.emissive_coarse_pipeline, emissive_coarse_comp_module, 0, NULL, "emissive_coarse");
+	R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
 }
 
 /*
@@ -4029,6 +4037,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_8bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
+	CREATE_SHADER_MODULE (emissive_detail_comp);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
 #endif
@@ -4104,6 +4113,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_comp);
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
+	DESTROY_SHADER_MODULE (emissive_detail_comp);
 	DESTROY_SHADER_MODULE (ray_debug_comp);
 	DESTROY_SHADER_MODULE (mesh_interpolate_comp);
 	DESTROY_SHADER_MODULE (skinning_comp);
@@ -4335,6 +4345,8 @@ void R_DestroyPipelines (void)
 	vulkan_globals.update_lightmap_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_coarse_pipeline.handle, NULL);
 	vulkan_globals.emissive_coarse_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
+	vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
 	if (vulkan_globals.update_lightmap_rt_pipeline.handle != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.update_lightmap_rt_pipeline.handle, NULL);
@@ -4500,7 +4512,9 @@ VkDescriptorSet R_AllocateDescriptorSet (vulkan_desc_set_layout_t *layout)
 	descriptor_set_allocate_info.pSetLayouts = &layout->handle;
 
 	VkDescriptorSet handle;
-	vkAllocateDescriptorSets (vulkan_globals.device, &descriptor_set_allocate_info, &handle);
+	VkResult		err = vkAllocateDescriptorSets (vulkan_globals.device, &descriptor_set_allocate_info, &handle);
+	if (err != VK_SUCCESS)
+		Sys_Error ("vkAllocateDescriptorSets failed with code %i", (int)err);
 
 	Atomic_AddUInt32 (&num_vulkan_combined_image_samplers, layout->num_combined_image_samplers);
 	Atomic_AddUInt32 (&num_vulkan_ubos_dynamic, layout->num_ubos_dynamic);

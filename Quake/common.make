@@ -202,6 +202,7 @@ SHADER_OBJS = \
 	update_lightmap_10bit_rt_comp.o \
 	ray_debug_comp.o \
 	emissive_coarse_comp.o \
+	emissive_detail_comp.o \
 	mesh_interpolate_comp.o \
 	skinning_comp.o \
 	skinning_8_comp.o

@@ -458,6 +458,7 @@ typedef struct
 	vulkan_pipeline_t		 update_lightmap_pipeline;
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
 	vulkan_pipeline_t		 emissive_coarse_pipeline;
+	vulkan_pipeline_t		 emissive_detail_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -482,7 +483,7 @@ typedef struct
 	vulkan_desc_set_layout_t screen_effects_set_layout;
 	vulkan_desc_set_layout_t single_texture_cs_write_set_layout;
 	vulkan_desc_set_layout_t lightmap_compute_set_layout;
-	vulkan_desc_set_layout_t emissive_coarse_set_layout;
+	vulkan_desc_set_layout_t emissive_compute_set_layout;
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	VkDescriptorSet			 bmodel_instances_desc_set;
@@ -596,6 +597,8 @@ extern uint32_t		   rs_gpuwaittime_us; // time the CPU spent blocked on the GPU 
 extern uint32_t		   rs_gpuwaitaccum_us;
 extern uint32_t		   rs_emissive_coarse_gputime_us;
 extern qboolean		   rs_emissive_coarse_gputime_valid;
+extern uint32_t		   rs_emissive_detail_gputime_us;
+extern qboolean		   rs_emissive_detail_gputime_valid;
 extern double		   rs_frame_starttime;
 extern char			   rs_display_lines[3][40]; // scr_speeds on screen overlay, updated from the counters once per frame
 extern int			   rs_display_numlines;
@@ -677,6 +680,7 @@ struct lightmap_s
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
 	VkDescriptorSet emissive_coarse_descriptor_set;
+	VkDescriptorSet emissive_detail_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -699,25 +703,30 @@ struct lightmap_s
 	lm_compute_workgroup_bounds_t *workgroup_bounds;   //[(LMBLOCK_WIDTH/8)*(LMBLOCK_HEIGHT/8)];
 };
 
-typedef struct emissive_coarse_light_s
+typedef struct emissive_light_s
 {
 	vec3_t origin;
 	float  radius;
 	vec3_t color;
 	float  intensity;
-} emissive_coarse_light_t;
-COMPILE_TIME_ASSERT (emissive_coarse_light_t, sizeof (emissive_coarse_light_t) == 32);
+} emissive_light_t;
+COMPILE_TIME_ASSERT (emissive_light_t, sizeof (emissive_light_t) == 32);
 
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
-void R_EmissiveDetailLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
-void R_SetEmissiveCoarseLights (const emissive_coarse_light_t *lights, int count);
-void R_EmissiveCoarseLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
+void R_EmissiveDetailLightmapStats (
+	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, qboolean *pending, qboolean *ready);
+void R_EmissiveDetailCompleted (void);
+void R_SetEmissiveLights (const emissive_light_t *lights, int count);
+void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void GL_ResetEmissiveCoarseTimestamp (void);
 void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);
+void GL_ResetEmissiveDetailTimestamp (void);
+void GL_BeginEmissiveDetailTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 
