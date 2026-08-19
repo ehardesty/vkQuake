@@ -1163,6 +1163,7 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 	{
 		R_BuildEmissiveWorldSurfaceCache ();
 		R_ActivateEmissiveWorldSurfaceCache ();
+		R_EmissiveBounceDebugChanged_f (&r_emissive_rt_debug);
 	}
 	else if (cl.worldmodel)
 		GL_RebuildIndirectDraws (false);
@@ -1245,7 +1246,7 @@ void R_EmissiveRTStats_f (void)
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
 	const char *live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
-	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected"};
+	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32"};
 	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
 	const uint64_t		 max_source_evaluations = (uint64_t)tile_source_links * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE;

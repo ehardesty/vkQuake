@@ -7,6 +7,7 @@
 
 #define BOUNCE_TAP_INVALID 0xFFFFFFFFu
 #define BOUNCE_TAPS 8u
+#define BOUNCE_DEBUG_EXPOSURE 32.0f
 
 layout (push_constant) uniform PushConsts
 {
@@ -198,12 +199,26 @@ void CombineBounce ()
 	const ivec2 coarse_coords = coords / int (push_constants.detail_scale);
 	const uint surface = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
+	{
+		if (push_constants.mode == 5u)
+			imageStore (emissive_image, coords, vec4 (0.0f));
 		return;
+	}
 	const uint logical = LogicalIndex (surface, coarse_coords);
 	if (logical == BOUNCE_TAP_INVALID)
+	{
+		if (push_constants.mode == 5u)
+			imageStore (emissive_image, coords, vec4 (0.0f));
 		return;
-	const vec4 direct = imageLoad (emissive_image, coords);
-	imageStore (emissive_image, coords, vec4 (direct.rgb + filtered_values[logical].rgb, direct.a));
+	}
+	const vec3 bounce = filtered_values[logical].rgb;
+	if (push_constants.mode == 5u)
+		imageStore (emissive_image, coords, vec4 (bounce * BOUNCE_DEBUG_EXPOSURE, 1.0f));
+	else
+	{
+		const vec4 direct = imageLoad (emissive_image, coords);
+		imageStore (emissive_image, coords, vec4 (direct.rgb + bounce, direct.a));
+	}
 }
 
 layout (local_size_x = 8, local_size_y = 8) in;

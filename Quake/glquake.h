@@ -189,7 +189,7 @@ typedef struct vulkan_memory_s
 } vulkan_memory_t;
 
 #define WORLD_PIPELINE_COUNT			   64
-#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 16
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 20
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -691,6 +691,7 @@ struct lightmap_s
 	gltexture_t	   *texture;
 	gltexture_t	   *emissive_texture;
 	gltexture_t	   *emissive_detail_texture; // resolved RGB detail; alpha is publication validity
+	gltexture_t	   *emissive_bounce_debug_texture; // coarse bounce-only diagnostic
 	gltexture_t	   *emissive_transient_texture; // cacheable + current transient coarse field
 	gltexture_t	   *emissive_transient_detail_texture; // cacheable + current transient detail field
 	gltexture_t	   *surface_indices_texture;
@@ -706,6 +707,7 @@ struct lightmap_s
 	VkDescriptorSet emissive_radiance_detail_descriptor_set;
 	VkDescriptorSet emissive_bounce_descriptor_set;
 	VkDescriptorSet emissive_bounce_detail_descriptor_set;
+	VkDescriptorSet emissive_bounce_debug_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -761,6 +763,8 @@ void R_EmissiveDetailLightmapStats (
 	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
 void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us, uint32_t filter_time_us, uint32_t combine_time_us, qboolean valid);
+void R_EmissiveBounceDebugChanged_f (cvar_t *var);
+qboolean R_EmissiveBounceDebugReady (void);
 void R_EmissiveBounceStats (
 	uint32_t *direct_texels, uint32_t *samples, uint32_t *rays, uint32_t *valid_taps, uint32_t *invalid_taps, uint64_t *logical_bytes,
 	uint64_t *allocated_bytes, uint64_t *budget_bytes, uint32_t *prepare_time_us, uint32_t *build_time_us, uint32_t *resolve_time_us,

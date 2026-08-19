@@ -16,6 +16,8 @@ vec4 WorldFragmentColor ()
 #ifdef EMISSIVE_COARSE
 	const vec2 emissive_uv_scale = vec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT) / vec2 (textureSize (emissive_coarse_tex, 0));
 	vec3	   emissive_selected;
+	if (emissive_debug_mode == 5)
+		return vec4 (texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb, 1.0);
 #ifdef EMISSIVE_DETAIL
 	if (emissive_detail_enabled)
 	{

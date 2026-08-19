@@ -3686,11 +3686,11 @@ static void R_CreateWorldPipelines ()
 
 								if (emissive_detail && !fullbright_enabled)
 								{
-									for (int debug_mode = 1; debug_mode <= 4; ++debug_mode)
+									for (int debug_mode = 1; debug_mode <= 5; ++debug_mode)
 									{
 										const int debug_pipeline_index = alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4);
 										specialization_data[5] = debug_mode;
-										specialization_data[6] = debug_mode > 1;
+										specialization_data[6] = debug_mode > 1 && debug_mode < 5;
 										R_CreateGraphicsPipeline (
 											&vulkan_globals.world_emissive_debug_pipelines[variant][debug_pipeline_index], &infos,
 											vulkan_globals.world_pipeline_layout,
@@ -4621,6 +4621,7 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_emissive_rt);
 	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
+	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);
