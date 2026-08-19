@@ -61,6 +61,7 @@ typedef struct emissive_texture_def_s
 	qboolean		 shadows;
 	qboolean		 two_sided;
 	qboolean		 derive_color;
+	vec3_t			 emission_direction;
 	vec3_t			 color;
 } emissive_texture_def_t;
 
@@ -100,6 +101,9 @@ typedef struct emissive_entity_fixture_def_s
 	int								 frame;
 	int								 skin;
 	emissive_entity_fixture_family_t family;
+	float							 radius;
+	float							 intensity;
+	vec3_t							 color;
 } emissive_entity_fixture_def_t;
 
 typedef struct emissive_entity_candidate_s
@@ -117,6 +121,8 @@ typedef struct emissive_entity_candidate_s
 	int									 spawnflags;
 	qboolean							 has_angles;
 	qboolean							 has_color;
+	qboolean							 has_light;
+	qboolean							 has_style;
 	qboolean							 has_frame;
 	qboolean							 has_skin;
 } emissive_entity_candidate_t;
@@ -129,6 +135,7 @@ typedef struct emissive_entity_source_s
 	int									 static_entity;
 	int									 candidate;
 	int									 style;
+	emissive_light_t					 light;
 } emissive_entity_source_t;
 
 #define EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION 1
@@ -136,23 +143,24 @@ typedef struct emissive_entity_source_s
 #define EMISSIVE_ENTITY_ANGLE_TOLERANCE		  1.0f
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
-	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
 };
 
 static const emissive_entity_fixture_def_t emissive_entity_fixture_defs[] = {
-	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH},
-	{"light_flame_large_yellow", "progs/flame2.mdl", 1, 0, EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME},
-	{"light_flame_small_yellow", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME},
-	{"light_flame_small_white", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME},
-	{NULL, "progs/braztall.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER},
-	{NULL, "progs/brazshrt.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER},
-	{NULL, "progs/longtrch.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_LONG_TORCH},
-	{NULL, "progs/flame_pyre.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_PYRE},
+	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH, 144.0f, 3.6f, {1.0f, 0.48f, 0.18f}},
+	{"light_flame_large_yellow", "progs/flame2.mdl", 1, 0, EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
+	{"light_flame_small_yellow", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
+	{"light_flame_small_white", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME, 160.0f, 4.4f, {1.0f, 1.0f, 1.0f}},
+	{NULL, "progs/braztall.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER, 152.0f, 4.0f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/brazshrt.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER, 144.0f, 3.6f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/longtrch.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_LONG_TORCH, 152.0f, 4.0f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/flame_pyre.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_PYRE, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
 };
 
 static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area);
 static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex);
+static void			 R_ActivateEmissiveWorldSurfaceCache (void);
 
 static emissive_world_surface_t *emissive_world_surfaces;
 static int						 num_emissive_world_surfaces;
@@ -173,6 +181,7 @@ static int							num_emissive_entity_candidates_matched;
 static int							num_emissive_entity_candidates_ambiguous;
 static int							num_emissive_entity_candidates_unmatched;
 static int							num_emissive_entity_fallback_sources;
+static int							num_emissive_entity_ambiguous_fallbacks;
 static int							num_emissive_entity_rejected_sources;
 static uint32_t						emissive_entity_lump_hash;
 static uint32_t						emissive_entity_discovery_time_us;
@@ -189,6 +198,7 @@ static void R_ClearEmissiveEntitySources (void)
 	num_emissive_entity_candidates_ambiguous = 0;
 	num_emissive_entity_candidates_unmatched = 0;
 	num_emissive_entity_fallback_sources = 0;
+	num_emissive_entity_ambiguous_fallbacks = 0;
 	num_emissive_entity_rejected_sources = 0;
 	emissive_entity_lump_hash = 0;
 	emissive_entity_discovery_time_us = 0;
@@ -214,16 +224,22 @@ static qboolean R_EmissiveEntityFixtureDefMatchesVisual (const emissive_entity_f
 	return true;
 }
 
-static const emissive_entity_fixture_def_t *R_EmissiveEntityFallbackDef (const entity_t *entity)
+static const emissive_entity_fixture_def_t *R_EmissiveEntityFallbackDef (const entity_t *entity, qboolean *ambiguous)
 {
+	if (ambiguous)
+		*ambiguous = false;
 	const emissive_entity_fixture_def_t *match = NULL;
 	for (int i = 0; i < countof (emissive_entity_fixture_defs); ++i)
 	{
 		const emissive_entity_fixture_def_t *const definition = &emissive_entity_fixture_defs[i];
 		if (!R_EmissiveEntityFixtureDefMatchesVisual (definition, entity))
 			continue;
-		if (match && match->family != definition->family)
+		if (match)
+		{
+			if (ambiguous)
+				*ambiguous = true;
 			return NULL;
+		}
 		match = definition;
 	}
 	return match;
@@ -312,9 +328,15 @@ static void R_ParseEmissiveEntityCandidates (void)
 			else if (!strcmp (key, "_color"))
 				candidate.has_color = sscanf (com_token, "%f %f %f", &candidate.color[0], &candidate.color[1], &candidate.color[2]) == 3;
 			else if (!strcmp (key, "light"))
+			{
 				candidate.authored_light = atof (com_token);
+				candidate.has_light = true;
+			}
 			else if (!strcmp (key, "style"))
+			{
 				candidate.style = atoi (com_token);
+				candidate.has_style = true;
+			}
 			else if (!strcmp (key, "spawnflags"))
 				candidate.spawnflags = atoi (com_token);
 			else if (!strcmp (key, "frame"))
@@ -337,7 +359,7 @@ static void R_ParseEmissiveEntityCandidates (void)
 			continue;
 		}
 		++num_emissive_entity_candidates_parsed;
-		if (malformed || !has_origin || candidate.style < 0 || candidate.style >= MAX_LIGHTSTYLES ||
+		if (malformed || !has_origin || candidate.style < 0 || candidate.style >= MAX_LIGHTSTYLES || (candidate.has_light && candidate.authored_light < 0.0f) ||
 			(model[0] && q_strcasecmp (model, candidate.definition->model)) ||
 			(candidate.has_frame && candidate.definition->frame >= 0 && candidate.frame != candidate.definition->frame) ||
 			(candidate.has_skin && candidate.definition->skin >= 0 && candidate.skin != candidate.definition->skin))
@@ -358,6 +380,67 @@ static void R_ParseEmissiveEntityCandidates (void)
 static float R_EmissiveEntityAngleDifference (float a, float b)
 {
 	return fabsf (anglemod (a - b + 180.0f) - 180.0f);
+}
+
+static void R_EmissiveEntityProxyOrigin (const entity_t *entity, const emissive_entity_fixture_def_t *definition, vec3_t origin)
+{
+	vec3_t center, forward, right, up;
+	vec3_t entity_origin, entity_angles;
+	VectorAdd (entity->model->mins, entity->model->maxs, center);
+	VectorScale (center, 0.5f * ENTSCALE_DECODE (entity->netstate.scale), center);
+	VectorCopy (entity->origin, entity_origin);
+	VectorCopy (entity->angles, entity_angles);
+	AngleVectors (entity_angles, forward, right, up);
+	VectorCopy (entity_origin, origin);
+	VectorMA (origin, center[0], forward, origin);
+	VectorMA (origin, -center[1], right, origin);
+	VectorMA (origin, center[2], up, origin);
+
+	if (definition->family != EMISSIVE_ENTITY_FIXTURE_WALL_TORCH || !cl.worldmodel)
+		return;
+
+	static const vec3_t directions[] = {{1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f}};
+	float				best_distance = FLT_MAX;
+	trace_t				best_trace;
+	memset (&best_trace, 0, sizeof (best_trace));
+	for (int i = 0; i < countof (directions); ++i)
+	{
+		vec3_t end;
+		VectorMA (entity_origin, 32.0f, directions[i], end);
+		trace_t trace;
+		memset (&trace, 0, sizeof (trace));
+		trace.fraction = 1.0f;
+		SV_RecursiveHullCheck (cl.worldmodel->hulls, entity_origin, end, &trace, CONTENTMASK_ANYSOLID);
+		const float distance = trace.fraction * 32.0f;
+		if (!trace.allsolid && trace.fraction < 1.0f && fabsf (trace.plane.normal[2]) < 0.7f && distance < best_distance)
+		{
+			best_distance = distance;
+			best_trace = trace;
+		}
+	}
+	if (best_distance < FLT_MAX)
+	{
+		vec3_t from_wall;
+		VectorSubtract (origin, best_trace.endpos, from_wall);
+		const float gap = DotProduct (from_wall, best_trace.plane.normal);
+		if (gap < 4.0f)
+			VectorMA (origin, 4.0f - gap, best_trace.plane.normal, origin);
+	}
+}
+
+static void R_BuildEmissiveEntitySourceLight (emissive_entity_source_t *source, const entity_t *entity, const emissive_entity_candidate_t *candidate)
+{
+	const emissive_entity_fixture_def_t *const definition = source->definition;
+	R_EmissiveEntityProxyOrigin (entity, definition, source->light.origin);
+	source->light.radius = definition->radius;
+	VectorCopy (candidate && candidate->has_color ? candidate->color : definition->color, source->light.color);
+	for (int channel = 0; channel < 3; ++channel)
+		source->light.color[channel] = q_max (0.0f, source->light.color[channel]);
+	const float max_color = q_max (source->light.color[0], q_max (source->light.color[1], source->light.color[2]));
+	if (max_color > 0.0f)
+		VectorScale (source->light.color, 1.0f / max_color, source->light.color);
+	const float authored_scale = candidate && candidate->has_light ? candidate->authored_light / 300.0f : 1.0f;
+	source->light.intensity = definition->intensity * q_max (0.0f, authored_scale);
 }
 
 static qboolean R_EmissiveEntityCandidateLocationMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
@@ -412,7 +495,15 @@ static void R_MatchEmissiveEntitySources (void)
 
 		if (match_count == 1 && !claimed[match])
 		{
-			emissive_entity_source_t source = {candidate->definition, candidate->lump_hash, candidate->lump_ordinal, match, candidate_index, candidate->style};
+			emissive_entity_source_t source;
+			memset (&source, 0, sizeof (source));
+			source.definition = candidate->definition;
+			source.lump_hash = candidate->lump_hash;
+			source.lump_ordinal = candidate->lump_ordinal;
+			source.static_entity = match;
+			source.candidate = candidate_index;
+			source.style = candidate->has_style ? candidate->style : 255;
+			R_BuildEmissiveEntitySourceLight (&source, cl.static_entities[match], candidate);
 			R_AppendEmissiveEntitySource (&source, &capacity);
 			claimed[match] = true;
 			++num_emissive_entity_candidates_matched;
@@ -427,10 +518,23 @@ static void R_MatchEmissiveEntitySources (void)
 	{
 		if (claimed[static_index] || authored_association[static_index])
 			continue;
-		const emissive_entity_fixture_def_t *const definition = R_EmissiveEntityFallbackDef (cl.static_entities[static_index]);
+		qboolean								   ambiguous = false;
+		const emissive_entity_fixture_def_t *const definition = R_EmissiveEntityFallbackDef (cl.static_entities[static_index], &ambiguous);
 		if (!definition)
+		{
+			if (ambiguous)
+				++num_emissive_entity_ambiguous_fallbacks;
 			continue;
-		emissive_entity_source_t source = {definition, emissive_entity_lump_hash, -1, static_index, -1, 0};
+		}
+		emissive_entity_source_t source;
+		memset (&source, 0, sizeof (source));
+		source.definition = definition;
+		source.lump_hash = emissive_entity_lump_hash;
+		source.lump_ordinal = -1;
+		source.static_entity = static_index;
+		source.candidate = -1;
+		source.style = 255;
+		R_BuildEmissiveEntitySourceLight (&source, cl.static_entities[static_index], NULL);
 		R_AppendEmissiveEntitySource (&source, &capacity);
 		claimed[static_index] = true;
 		++num_emissive_entity_fallback_sources;
@@ -443,10 +547,11 @@ static void R_MatchEmissiveEntitySources (void)
 	emissive_entity_sources_matched = true;
 	emissive_entity_discovery_time_us += (uint32_t)((Sys_DoubleTime () - match_start) * 1000000.0);
 	Con_DPrintf (
-		"RT emissives: entity fixtures %d parsed, %d matched, %d ambiguous, %d unmatched, %d fallback, %d rejected (%d sources, %.3f ms)\n",
+		"RT emissives: entity fixtures %d parsed, %d matched, %d ambiguous, %d unmatched, %d fallback, %d ambiguous fallback, %d rejected "
+		"(%d sources, %.3f ms)\n",
 		num_emissive_entity_candidates_parsed, num_emissive_entity_candidates_matched, num_emissive_entity_candidates_ambiguous,
-		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_rejected_sources, num_emissive_entity_sources,
-		(double)emissive_entity_discovery_time_us / 1000.0);
+		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_ambiguous_fallbacks,
+		num_emissive_entity_rejected_sources, num_emissive_entity_sources, (double)emissive_entity_discovery_time_us / 1000.0);
 }
 
 static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
@@ -533,7 +638,10 @@ void R_UpdateTransientEmissiveSources (void)
 		R_InvalidateTransientEmissiveLights ();
 		return;
 	}
+	const qboolean sources_were_matched = emissive_entity_sources_matched;
 	R_MatchEmissiveEntitySources ();
+	if (!sources_were_matched && emissive_entity_sources_matched)
+		R_ActivateEmissiveWorldSurfaceCache ();
 	emissive_light_t *lights = NULL;
 	int				 count = 0;
 	int				 capacity = 0;
@@ -584,6 +692,8 @@ void R_UpdateTransientEmissiveSources (void)
 					continue;
 				VectorScale (weighted_origin, 1.0f / total_weight, weighted_origin);
 				VectorScale (color, 1.0f / total_weight, color);
+				if (VectorLength (definition->emission_direction) > 0.0f)
+					VectorCopy (definition->emission_direction, weighted_normal);
 				if (VectorNormalize (weighted_normal) == 0.0f)
 				{
 					weighted_normal[0] = 0.0f;
@@ -611,6 +721,24 @@ void R_UpdateTransientEmissiveSources (void)
 				light.intensity = definition->intensity;
 				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
 			}
+		}
+
+		const int light_effects = EF_MUZZLEFLASH | EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_QEX_QUADLIGHT | EF_QEX_PENTALIGHT;
+		for (int entity_index = 1; entity_index < cl.num_entities; ++entity_index)
+		{
+			entity_t *const entity = &cl.entities[entity_index];
+			if (!entity->model || entity->model->needload || entity->model->type != mod_alias || (entity->effects & light_effects) ||
+				(entity->alpha != ENTALPHA_DEFAULT && ENTALPHA_DECODE (entity->alpha) < 1.0f))
+				continue;
+			const emissive_entity_fixture_def_t *const definition = R_EmissiveEntityFallbackDef (entity, NULL);
+			if (!definition)
+				continue;
+			emissive_entity_source_t source;
+			memset (&source, 0, sizeof (source));
+			source.definition = definition;
+			R_BuildEmissiveEntitySourceLight (&source, entity, NULL);
+			if (source.light.intensity > 0.0f)
+				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &source.light);
 		}
 	}
 	R_SetTransientEmissiveLights (lights, count);
@@ -763,7 +891,9 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			VectorScale (weighted_origin, 1.0f / fixture->luminous_area, fixture->origin);
 		else
 			VectorCopy (fallback_origin, fixture->origin);
-		if (VectorNormalize (weighted_normal) > 0.0f)
+		if (VectorLength (fixture->definition->emission_direction) > 0.0f)
+			VectorCopy (fixture->definition->emission_direction, fixture->normal);
+		else if (VectorNormalize (weighted_normal) > 0.0f)
 			VectorCopy (weighted_normal, fixture->normal);
 		else
 			VectorCopy (fallback_normal, fixture->normal);
@@ -854,7 +984,7 @@ static float R_PointTriangleDistanceSquared (const vec3_t point, const vec3_t a,
 	return DotProduct (delta, delta);
 }
 
-static qboolean R_EmissiveWorldFixtureInfluencesSurface (const qmodel_t *worldmodel, const emissive_world_fixture_t *fixture, const msurface_t *surface)
+static qboolean R_EmissiveLightInfluencesSurface (const qmodel_t *worldmodel, const emissive_light_t *light, const msurface_t *surface)
 {
 	vec3_t normal;
 	VectorCopy (surface->plane->normal, normal);
@@ -864,23 +994,26 @@ static qboolean R_EmissiveWorldFixtureInfluencesSurface (const qmodel_t *worldmo
 		VectorScale (normal, -1.0f, normal);
 		plane_dist = -plane_dist;
 	}
-	if (DotProduct (fixture->origin, normal) <= plane_dist)
+	if (DotProduct (light->origin, normal) <= plane_dist)
 		return false;
 
-	const float	  radius_squared = fixture->definition->radius * fixture->definition->radius;
+	const float	  radius_squared = light->radius * light->radius;
 	const vec3_t *first = R_EmissiveWorldSurfaceVertex (worldmodel, surface, 0);
 	for (int vertex = 1; vertex < surface->numedges - 1; ++vertex)
 	{
 		const vec3_t *second = R_EmissiveWorldSurfaceVertex (worldmodel, surface, vertex);
 		const vec3_t *third = R_EmissiveWorldSurfaceVertex (worldmodel, surface, vertex + 1);
-		if (R_PointTriangleDistanceSquared (fixture->origin, *first, *second, *third) < radius_squared)
+		if (R_PointTriangleDistanceSquared (light->origin, *first, *second, *third) < radius_squared)
 			return true;
 	}
 	return false;
 }
 
-static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
+static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel, const emissive_light_t *lights, int num_lights)
 {
+	SAFE_FREE (emissive_world_surface_lights);
+	num_emissive_world_surface_lights = 0;
+	num_emissive_world_receivers = 0;
 	int surface_light_capacity = 0;
 	msurface_t *const first_surface = &worldmodel->surfaces[worldmodel->firstmodelsurface];
 	for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
@@ -890,8 +1023,8 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 		surface->emissive_influence = false;
 		if (surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
 			continue;
-		for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
-			if (R_EmissiveWorldFixtureInfluencesSurface (worldmodel, &emissive_world_fixtures[fixture], surface))
+		for (int light = 0; light < num_lights; ++light)
+			if (lights[light].intensity > 0.0f && R_EmissiveLightInfluencesSurface (worldmodel, &lights[light], surface))
 			{
 				if (!surface->cacheable_emissive_influence)
 				{
@@ -906,7 +1039,7 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 						Mem_Realloc (emissive_world_surface_lights, surface_light_capacity * sizeof (*emissive_world_surface_lights));
 				}
 				emissive_world_surface_lights[num_emissive_world_surface_lights].surface = i;
-				emissive_world_surface_lights[num_emissive_world_surface_lights].light = fixture;
+				emissive_world_surface_lights[num_emissive_world_surface_lights].light = light;
 				++num_emissive_world_surface_lights;
 			}
 	}
@@ -917,10 +1050,12 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 
 static void R_UploadEmissiveLights (void)
 {
-	if (!num_emissive_world_fixtures)
+	const int num_lights = num_emissive_world_fixtures + num_emissive_entity_sources;
+	if (!num_lights)
 		return;
 
-	emissive_light_t *const lights = Mem_Alloc (num_emissive_world_fixtures * sizeof (*lights));
+	emissive_light_t *const lights = Mem_Alloc (num_lights * sizeof (*lights));
+	byte *const				styles = Mem_Alloc (num_lights * sizeof (*styles));
 	for (int i = 0; i < num_emissive_world_fixtures; ++i)
 	{
 		const emissive_world_fixture_t *const fixture = &emissive_world_fixtures[i];
@@ -928,9 +1063,21 @@ static void R_UploadEmissiveLights (void)
 		lights[i].radius = fixture->definition->radius;
 		VectorCopy (fixture->color, lights[i].color);
 		lights[i].intensity = fixture->definition->intensity;
+		styles[i] = 255;
 	}
-	R_SetEmissiveLights (lights, num_emissive_world_fixtures, emissive_world_surface_lights, num_emissive_world_surface_lights);
+	for (int i = 0; i < num_emissive_entity_sources; ++i)
+	{
+		lights[num_emissive_world_fixtures + i] = emissive_entity_sources[i].light;
+		styles[num_emissive_world_fixtures + i] = emissive_entity_sources[i].style;
+	}
+	R_ClassifyEmissiveWorldReceivers (cl.worldmodel, lights, num_lights);
+	if (num_emissive_world_receivers)
+	{
+		R_AllocateEmissiveLightmaps ();
+		R_SetEmissiveLights (lights, styles, num_lights, emissive_world_surface_lights, num_emissive_world_surface_lights);
+	}
 	Mem_Free (lights);
+	Mem_Free (styles);
 	emissive_world_lights_uploaded = true;
 }
 
@@ -967,7 +1114,6 @@ static void R_BuildEmissiveWorldSurfaceCache (void)
 		assert (surface_index == num_emissive_world_surfaces);
 		R_BuildEmissiveWorldFixtures (worldmodel);
 	}
-	R_ClassifyEmissiveWorldReceivers (worldmodel);
 	R_ParseEmissiveEntityCandidates ();
 
 	emissive_surface_worldmodel = worldmodel;
@@ -983,27 +1129,29 @@ static void R_BuildEmissiveWorldSurfaceCache (void)
 
 static void R_ActivateEmissiveWorldSurfaceCache (void)
 {
-	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !num_emissive_world_fixtures || !num_emissive_world_receivers)
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !emissive_entity_sources_matched ||
+		(!num_emissive_world_fixtures && !num_emissive_entity_sources))
 		return;
-	R_AllocateEmissiveLightmaps ();
+	if (!emissive_world_lights_uploaded)
+		R_UploadEmissiveLights ();
+	if (!num_emissive_world_receivers)
+		return;
 	if (!R_EmissiveDetailReady () && R_EmissiveDetailAvailable ())
 		GL_RequestAccelerationStructure (RT_AS_CONSUMER_CACHEABLE_EMISSIVES);
 	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
-	if (!emissive_world_lights_uploaded)
-		R_UploadEmissiveLights ();
 }
 
 void R_EmissiveRTPrepareNewMap (void)
 {
 	R_ClearEmissiveWorldSurfaces ();
-	if (r_emissive_rt.value <= 0.0f)
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
 	R_BuildEmissiveWorldSurfaceCache ();
 }
 
 void R_EmissiveRTNewMap (void)
 {
-	if (r_emissive_rt.value <= 0.0f)
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
 	R_BuildEmissiveWorldSurfaceCache ();
 	R_ActivateEmissiveWorldSurfaceCache ();
@@ -1048,6 +1196,16 @@ void R_EmissiveRTStats_f (void)
 	uint32_t transient_rejected_publications;
 	qboolean transient_pending;
 	qboolean transient_detail_ready;
+	int		 radiance_groups;
+	int		 radiance_tiles;
+	int		 radiance_source_links;
+	int		 radiance_tile_groups;
+	int		 radiance_max_groups_per_tile;
+	uint64_t radiance_cpu_bytes;
+	uint64_t radiance_gpu_bytes;
+	uint32_t radiance_cpu_time_us;
+	qboolean radiance_visibility_available;
+	qboolean radiance_pending;
 	int		 emissive_lights;
 	uint64_t emissive_light_bytes;
 	qboolean coarse_pending;
@@ -1067,6 +1225,9 @@ void R_EmissiveRTStats_f (void)
 	R_TransientEmissiveStats (
 		&transient_lights, &transient_tiles, &transient_source_links, &transient_cpu_bytes, &transient_gpu_bytes, &transient_cpu_time_us,
 		&transient_rejected_publications, &transient_pending, &transient_detail_ready);
+	R_EmissiveRadianceStats (
+		&radiance_groups, &radiance_tiles, &radiance_source_links, &radiance_tile_groups, &radiance_max_groups_per_tile, &radiance_cpu_bytes,
+		&radiance_gpu_bytes, &radiance_cpu_time_us, &radiance_visibility_available, &radiance_pending);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -1127,12 +1288,21 @@ void R_EmissiveRTStats_f (void)
 		transient_detail_ready ? "ready" : "coarse-only", transient_pending ? ", pending" : "", transient_rejected_publications,
 		transient_rejected_publications == 1 ? "" : "s");
 	Con_Printf (
+		"RT emissive radiance: %d modulation group%s, %d dirty 8x8 tile%s, %d tile-source link%s, %.2f average/%d maximum group%s per "
+		"dirty tile, %" PRIu64 " CPU bytes, %" PRIu64 " GPU bytes, retained visibility %s, last %.3f ms CPU / %s GPU%s\n",
+		radiance_groups, radiance_groups == 1 ? "" : "s", radiance_tiles, radiance_tiles == 1 ? "" : "s", radiance_source_links,
+		radiance_source_links == 1 ? "" : "s", radiance_tiles ? (double)radiance_tile_groups / radiance_tiles : 0.0, radiance_max_groups_per_tile,
+		radiance_max_groups_per_tile == 1 ? "" : "s", radiance_cpu_bytes, radiance_gpu_bytes, radiance_visibility_available ? "ready" : "unavailable",
+		(double)radiance_cpu_time_us / 1000.0,
+		rs_emissive_radiance_gputime_valid ? va ("%.3f ms", (double)rs_emissive_radiance_gputime_us / 1000.0) : "unavailable",
+		radiance_pending ? ", pending" : "");
+	Con_Printf (
 		"RT emissive entity fixtures: table v%d, lump %08x, %d parsed candidate%s, %d matched, %d ambiguous, %d unmatched, %d fallback, "
-		"%d rejected, %d retained source%s, %u CPU bytes, %.3f ms CPU, %s\n",
+		"%d ambiguous fallback, %d rejected, %d retained source%s, %u CPU bytes, %.3f ms CPU, %s\n",
 		EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION, emissive_entity_lump_hash, num_emissive_entity_candidates_parsed,
 		num_emissive_entity_candidates_parsed == 1 ? "" : "s", num_emissive_entity_candidates_matched, num_emissive_entity_candidates_ambiguous,
-		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_rejected_sources, num_emissive_entity_sources,
-		num_emissive_entity_sources == 1 ? "" : "s",
+		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_ambiguous_fallbacks,
+		num_emissive_entity_rejected_sources, num_emissive_entity_sources, num_emissive_entity_sources == 1 ? "" : "s",
 		(unsigned)(num_emissive_entity_candidates * sizeof (*emissive_entity_candidates) + num_emissive_entity_sources * sizeof (*emissive_entity_sources)),
 		(double)emissive_entity_discovery_time_us / 1000.0, emissive_entity_sources_matched ? "ready" : "awaiting static entities");
 }

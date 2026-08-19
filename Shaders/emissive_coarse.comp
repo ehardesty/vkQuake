@@ -14,6 +14,12 @@ layout (push_constant) uniform PushConsts
 push_constants;
 
 layout (constant_id = 0) const bool transient_overlay = false;
+layout (constant_id = 1) const bool retained_visibility = false;
+layout (constant_id = 2) const bool radiance_update = false;
+layout (constant_id = 3) const bool modulated_sources = true;
+layout (constant_id = 4) const bool preserve_overlay = false;
+const bool indexed_sources = transient_overlay || radiance_update;
+const bool cache_visibility = false;
 
 struct emissive_light_t
 {
@@ -23,7 +29,7 @@ struct emissive_light_t
 	float intensity;
 };
 
-layout (set = 0, binding = 0, rgba16f) uniform writeonly image2D output_image;
+layout (set = 0, binding = 0, rgba16f) uniform image2D output_image;
 layout (set = 0, binding = 1) uniform utexture2D surface_indices;
 layout (std430, set = 0, binding = 2) readonly restrict buffer surfaces_buffer
 {
@@ -56,27 +62,43 @@ layout (std430, set = 0, binding = 7) readonly restrict buffer emissive_source_i
 	uint emissive_source_indices[];
 };
 layout (set = 0, binding = 8) uniform texture2D cacheable_image;
+layout (std430, set = 0, binding = 9) readonly restrict buffer emissive_modulations_buffer
+{
+	float emissive_modulations[];
+};
+layout (std430, set = 0, binding = 10) readonly restrict buffer emissive_visibility_buffer
+{
+	uint emissive_visibility[];
+};
 
 #include "lightmap_coords.inc"
 #define EMISSIVE_OPTIONAL_SOURCE_INDICES
+#define EMISSIVE_RETAINED_VISIBILITY
 #include "emissive_lighting.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
-	const emissive_tile_t tile = transient_overlay ? emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z] : emissive_tile_t (0, push_constants.num_lights, 0);
+	const bool use_tile = transient_overlay || radiance_update;
+	const emissive_tile_t tile = use_tile ? emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z] : emissive_tile_t (0, push_constants.num_lights, 0);
 	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
-	const ivec2 coords = transient_overlay ? tile_coords * 8 + ivec2 (gl_GlobalInvocationID.xy) : ivec2 (gl_GlobalInvocationID.xy);
+	const int tile_scale = retained_visibility ? 16 : 8;
+	const ivec2 coords = use_tile ? tile_coords * tile_scale + ivec2 (gl_GlobalInvocationID.xy) : ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 
 	vec3	   contribution = vec3 (0.0f);
-	const uint surface_index = texelFetch (surface_indices, coords, 0).x;
+	const ivec2 coarse_coords = retained_visibility ? coords / 2 : coords;
+	const uint surface_index = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
 	{
 		const surface_t surf = surfaces[surface_index];
-		const float		s = float (coords.x - int (surf.packed_light_st & 0xFFFFu)) - 0.5f;
-		const float		t = float (coords.y - int (surf.packed_light_st >> 16)) - 0.5f;
+		const float		s = retained_visibility
+			? (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 1.0f
+			: float (coords.x - int (surf.packed_light_st & 0xFFFFu)) - 0.5f;
+		const float		t = retained_visibility
+			? (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 1.0f
+			: float (coords.y - int (surf.packed_light_st >> 16)) - 0.5f;
 		vec3			tangent;
 		vec3			bitangent;
 		const vec3		world_pos = CalculateWorldPos (surf, s, t, tangent, bitangent);
@@ -84,10 +106,16 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources);
+		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
 	}
 	if (transient_overlay)
 		contribution += texelFetch (cacheable_image, coords, 0).rgb;
+	else if (preserve_overlay)
+	{
+		const vec3 previous_overlay = imageLoad (output_image, coords).rgb - texelFetch (cacheable_image, coords, 0).rgb;
+		contribution += max (previous_overlay, 0.0f);
+	}
 
-	imageStore (output_image, coords, vec4 (contribution, 0.0f));
+	imageStore (output_image, coords, vec4 (contribution, retained_visibility ? 1.0f : 0.0f));
 }

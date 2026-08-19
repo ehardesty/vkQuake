@@ -1597,7 +1597,7 @@ void R_CreateDescriptorSetLayouts ()
 
 	{
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 9);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 11);
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1617,6 +1617,13 @@ void R_CreateDescriptorSetLayouts ()
 		emissive_coarse_layout_bindings[8].descriptorCount = 1;
 		emissive_coarse_layout_bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		emissive_coarse_layout_bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		for (int i = 9; i < 11; ++i)
+		{
+			emissive_coarse_layout_bindings[i].binding = num_descriptors++;
+			emissive_coarse_layout_bindings[i].descriptorCount = 1;
+			emissive_coarse_layout_bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			emissive_coarse_layout_bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		}
 
 		descriptor_set_layout_create_info.bindingCount = num_descriptors;
 		descriptor_set_layout_create_info.pBindings = emissive_coarse_layout_bindings;
@@ -1624,7 +1631,7 @@ void R_CreateDescriptorSetLayouts ()
 		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
 		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
 		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 2;
-		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 6;
+		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 8;
 
 		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
 		if (err != VK_SUCCESS)
@@ -4018,19 +4025,50 @@ static void R_CreateUpdateLightmapPipelines ()
 			&specialization_info, "update_lightmap_rt");
 
 	R_CreateComputePipeline (&vulkan_globals.emissive_coarse_pipeline, emissive_coarse_comp_module, 0, NULL, "emissive_coarse");
-	VkSpecializationMapEntry emissive_specialization_entry = {0, 0, sizeof (uint32_t)};
-	uint32_t			 transient_overlay = true;
-	VkSpecializationInfo emissive_specialization = {1, &emissive_specialization_entry, sizeof (transient_overlay), &transient_overlay};
+	const VkSpecializationMapEntry transient_specialization_entries[] = {{0, 0, sizeof (uint32_t)}, {3, sizeof (uint32_t), sizeof (uint32_t)}};
+	const uint32_t				   transient_specialization_data[] = {true, false};
+	const VkSpecializationInfo	   transient_specialization = {
+		countof (transient_specialization_entries), transient_specialization_entries, sizeof (transient_specialization_data), transient_specialization_data};
 	vulkan_globals.emissive_transient_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+	R_CreateComputePipeline (&vulkan_globals.emissive_transient_pipeline, emissive_coarse_comp_module, 0, &transient_specialization, "emissive_transient");
+	const VkSpecializationMapEntry radiance_specialization_entry = {2, 0, sizeof (uint32_t)};
+	const uint32_t				   radiance_update = true;
+	const VkSpecializationInfo	   radiance_specialization = {1, &radiance_specialization_entry, sizeof (radiance_update), &radiance_update};
+	vulkan_globals.emissive_radiance_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+	R_CreateComputePipeline (&vulkan_globals.emissive_radiance_pipeline, emissive_coarse_comp_module, 0, &radiance_specialization, "emissive_radiance");
+	const VkSpecializationMapEntry radiance_detail_entries[] = {{1, 0, sizeof (uint32_t)}, {2, sizeof (uint32_t), sizeof (uint32_t)}};
+	const uint32_t				   radiance_detail_data[] = {true, true};
+	const VkSpecializationInfo	   radiance_detail_specialization = {
+		countof (radiance_detail_entries), radiance_detail_entries, sizeof (radiance_detail_data), radiance_detail_data};
+	vulkan_globals.emissive_radiance_detail_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
 	R_CreateComputePipeline (
-		&vulkan_globals.emissive_transient_pipeline, emissive_coarse_comp_module, 0, &emissive_specialization, "emissive_transient");
+		&vulkan_globals.emissive_radiance_detail_pipeline, emissive_coarse_comp_module, 0, &radiance_detail_specialization, "emissive_radiance_detail");
+	const VkSpecializationMapEntry radiance_overlay_entries[] = {{2, 0, sizeof (uint32_t)}, {4, sizeof (uint32_t), sizeof (uint32_t)}};
+	const uint32_t				   radiance_overlay_data[] = {true, true};
+	const VkSpecializationInfo	   radiance_overlay_specialization = {
+		countof (radiance_overlay_entries), radiance_overlay_entries, sizeof (radiance_overlay_data), radiance_overlay_data};
+	vulkan_globals.emissive_radiance_overlay_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+	R_CreateComputePipeline (
+		&vulkan_globals.emissive_radiance_overlay_pipeline, emissive_coarse_comp_module, 0, &radiance_overlay_specialization, "emissive_radiance_overlay");
+	const VkSpecializationMapEntry radiance_overlay_detail_entries[] = {
+		{1, 0, sizeof (uint32_t)}, {2, sizeof (uint32_t), sizeof (uint32_t)}, {4, 2 * sizeof (uint32_t), sizeof (uint32_t)}};
+	const uint32_t			   radiance_overlay_detail_data[] = {true, true, true};
+	const VkSpecializationInfo radiance_overlay_detail_specialization = {
+		countof (radiance_overlay_detail_entries), radiance_overlay_detail_entries, sizeof (radiance_overlay_detail_data), radiance_overlay_detail_data};
+	vulkan_globals.emissive_radiance_overlay_detail_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+	R_CreateComputePipeline (
+		&vulkan_globals.emissive_radiance_overlay_detail_pipeline, emissive_coarse_comp_module, 0, &radiance_overlay_detail_specialization,
+		"emissive_radiance_overlay_detail");
 	if (vulkan_globals.ray_query)
 	{
 		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
+		const VkSpecializationMapEntry transient_detail_entries[] = {{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}};
+		const uint32_t				   transient_detail_data[] = {true, false};
+		const VkSpecializationInfo	   transient_detail_specialization = {
+			countof (transient_detail_entries), transient_detail_entries, sizeof (transient_detail_data), transient_detail_data};
 		vulkan_globals.emissive_transient_detail_pipeline.layout = vulkan_globals.emissive_detail_pipeline.layout;
 		R_CreateComputePipeline (
-			&vulkan_globals.emissive_transient_detail_pipeline, emissive_detail_comp_module, 0, &emissive_specialization,
-			"emissive_transient_detail");
+			&vulkan_globals.emissive_transient_detail_pipeline, emissive_detail_comp_module, 0, &transient_detail_specialization, "emissive_transient_detail");
 	}
 }
 
@@ -4420,6 +4458,14 @@ void R_DestroyPipelines (void)
 	vulkan_globals.update_lightmap_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_coarse_pipeline.handle, NULL);
 	vulkan_globals.emissive_coarse_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_radiance_pipeline.handle, NULL);
+	vulkan_globals.emissive_radiance_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_radiance_detail_pipeline.handle, NULL);
+	vulkan_globals.emissive_radiance_detail_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_radiance_overlay_pipeline.handle, NULL);
+	vulkan_globals.emissive_radiance_overlay_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_radiance_overlay_detail_pipeline.handle, NULL);
+	vulkan_globals.emissive_radiance_overlay_detail_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_transient_pipeline.handle, NULL);
 	vulkan_globals.emissive_transient_pipeline.handle = VK_NULL_HANDLE;
 	if (vulkan_globals.emissive_detail_pipeline.handle != VK_NULL_HANDLE)

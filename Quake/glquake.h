@@ -459,6 +459,10 @@ typedef struct
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
 	vulkan_pipeline_t		 emissive_coarse_pipeline;
 	vulkan_pipeline_t		 emissive_detail_pipeline;
+	vulkan_pipeline_t		 emissive_radiance_pipeline;
+	vulkan_pipeline_t		 emissive_radiance_detail_pipeline;
+	vulkan_pipeline_t		 emissive_radiance_overlay_pipeline;
+	vulkan_pipeline_t		 emissive_radiance_overlay_detail_pipeline;
 	vulkan_pipeline_t		 emissive_transient_pipeline;
 	vulkan_pipeline_t		 emissive_transient_detail_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
@@ -603,6 +607,8 @@ extern uint32_t		   rs_emissive_detail_gputime_us;
 extern qboolean		   rs_emissive_detail_gputime_valid;
 extern uint32_t		   rs_emissive_transient_gputime_us;
 extern qboolean		   rs_emissive_transient_gputime_valid;
+extern uint32_t		   rs_emissive_radiance_gputime_us;
+extern qboolean		   rs_emissive_radiance_gputime_valid;
 extern uint32_t		   rs_live_as_cputime_us;
 extern uint32_t		   rs_live_as_gputime_us;
 extern qboolean		   rs_live_as_gputime_valid;
@@ -692,6 +698,10 @@ struct lightmap_s
 	VkDescriptorSet emissive_detail_descriptor_set;
 	VkDescriptorSet emissive_transient_descriptor_set;
 	VkDescriptorSet emissive_transient_detail_descriptor_set;
+	VkDescriptorSet emissive_radiance_overlay_descriptor_set;
+	VkDescriptorSet emissive_radiance_overlay_detail_descriptor_set;
+	VkDescriptorSet emissive_radiance_descriptor_set;
+	VkDescriptorSet emissive_radiance_detail_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -749,9 +759,13 @@ void R_EmissiveDetailCompleted (void);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_TransientEmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
-void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
+void	 R_SetEmissiveLights (
+	const emissive_light_t *lights, const byte *styles, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
+void R_EmissiveRadianceStats (
+	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,
+	uint32_t *cpu_time_us, qboolean *visibility_available, qboolean *pending);
 void R_TransientEmissiveStats (
 	int *lights, int *tiles, int *source_links, uint64_t *cpu_bytes, uint64_t *gpu_bytes, uint32_t *cpu_time_us,
 	uint32_t *rejected_publications, qboolean *pending, qboolean *detail_ready);
@@ -764,6 +778,9 @@ void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveTransientTimestamp (void);
 void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_generation);
+void GL_ResetEmissiveRadianceTimestamp (void);
+void GL_BeginEmissiveRadianceTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveRadianceTimestamp (cb_context_t *cbx);
 void R_TransientEmissiveDetailCompleted (uint32_t generation);
 void GL_ResetLiveASTimestamp (void);
 void GL_BeginLiveASTimestamp (cb_context_t *cbx);
@@ -803,6 +820,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
 void R_UpdateTransientEmissiveSources (void);
+void		  R_UpdateEmissiveLightstyles (void);
 void R_InvalidateTransientEmissiveLights (void);
 void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count);
 void R_UpdateLightmapsAndIndirect (void *unused);

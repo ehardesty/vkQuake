@@ -15,8 +15,12 @@ layout (push_constant) uniform PushConsts
 push_constants;
 
 layout (constant_id = 0) const bool transient_overlay = false;
+layout (constant_id = 1) const bool modulated_sources = true;
+const bool indexed_sources = true;
+bool cache_visibility;
 
 #define EMISSIVE_PUBLICATION_INVALIDATE 1u
+#define EMISSIVE_PUBLICATION_NO_VISIBILITY 2u
 
 struct emissive_light_t
 {
@@ -60,6 +64,14 @@ layout (std430, set = 0, binding = 7) readonly restrict buffer emissive_source_i
 	uint emissive_source_indices[];
 };
 layout (set = 0, binding = 8) uniform texture2D cacheable_image;
+layout (std430, set = 0, binding = 9) readonly restrict buffer emissive_modulations_buffer
+{
+	float emissive_modulations[];
+};
+layout (std430, set = 0, binding = 10) restrict buffer emissive_visibility_buffer
+{
+	uint emissive_visibility[];
+};
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
@@ -86,6 +98,7 @@ bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 lig
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
+	cache_visibility = !transient_overlay && push_constants.publication_mode != EMISSIVE_PUBLICATION_NO_VISIBILITY;
 	const emissive_tile_t tile = emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z];
 	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
 	const ivec2 coords = tile_coords * 16 + ivec2 (gl_GlobalInvocationID.xy);
@@ -113,7 +126,8 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources);
+		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
 		validity = 1.0f;
 	}
 	if (transient_overlay)

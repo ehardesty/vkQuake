@@ -37,11 +37,13 @@ int gl_lightmap_format;
 #define LM_BIN_E 8
 #define LM_BINS	 49
 #define EMISSIVE_DETAIL_MEMORY_BUDGET_MB 512
+#define EMISSIVE_VISIBILITY_MEMORY_BUDGET_MB 128
 
 enum
 {
 	EMISSIVE_PUBLICATION_UPDATE,
-	EMISSIVE_PUBLICATION_INVALIDATE
+	EMISSIVE_PUBLICATION_INVALIDATE,
+	EMISSIVE_PUBLICATION_NO_VISIBILITY
 };
 
 struct lightmap_s *lightmaps;
@@ -346,6 +348,26 @@ static VkBuffer			   emissive_tiles_buffer;
 static vulkan_memory_t	   emissive_tile_sources_buffer_memory;
 static VkBuffer			   emissive_tile_sources_buffer;
 static int				   num_emissive_lights;
+static byte				  *emissive_light_styles;
+static float			  *emissive_light_modulations;
+static VkBuffer			   emissive_modulations_buffer;
+static vulkan_memory_t	   emissive_modulations_buffer_memory;
+static VkBuffer			   emissive_visibility_buffer;
+static vulkan_memory_t	   emissive_visibility_buffer_memory;
+static VkBuffer			   emissive_radiance_tiles_buffer;
+static vulkan_memory_t	   emissive_radiance_tiles_buffer_memory;
+static qboolean			   emissive_visibility_available;
+static int				   num_emissive_radiance_tiles;
+static int				   num_emissive_radiance_source_links;
+static int				   num_emissive_radiance_tile_groups;
+static int				   max_emissive_radiance_groups_per_tile;
+static int				   num_emissive_modulation_groups;
+static qboolean			   emissive_radiance_coarse_pending;
+static qboolean			   emissive_radiance_detail_pending;
+static qboolean			   emissive_radiance_force_all_styled_tiles;
+static qboolean			   emissive_modulations_pending;
+static qboolean			   emissive_radiance_logged;
+static uint32_t			   emissive_radiance_cpu_time_us;
 static qboolean			   emissive_coarse_pending;
 static qboolean			   emissive_detail_pending;
 static qboolean			   emissive_detail_building;
@@ -361,6 +383,7 @@ typedef struct emissive_logical_tile_s
 } emissive_logical_tile_t;
 COMPILE_TIME_ASSERT (emissive_logical_tile_t, sizeof (emissive_logical_tile_t) == 12);
 static emissive_logical_tile_t *emissive_logical_tiles;
+static emissive_logical_tile_t *emissive_radiance_tiles;
 static uint32_t				*emissive_logical_tile_sources;
 static int					 num_emissive_logical_tiles;
 static int					 num_emissive_logical_tiles_total;
@@ -408,6 +431,7 @@ static int					 num_transient_emissive_total_tiles;
 static qmodel_t				*transient_emissive_tile_surface_worldmodel;
 static void R_EnsureTransientEmissiveResources (void);
 static qboolean R_TransientEmissiveDetailAvailable (void);
+static void						R_UpdateTransientEmissiveBuffer (VkCommandBuffer cb, VkBuffer buffer, const void *data, size_t size);
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -2035,6 +2059,14 @@ void GL_BuildLightmaps (void)
 			R_FreeDescriptorSet (lightmaps[i].emissive_transient_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].emissive_transient_detail_descriptor_set != VK_NULL_HANDLE)
 			R_FreeDescriptorSet (lightmaps[i].emissive_transient_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_radiance_overlay_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_radiance_overlay_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_radiance_overlay_detail_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_radiance_overlay_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_radiance_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_radiance_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_radiance_detail_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_radiance_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].workgroup_bounds_buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer (vulkan_globals.device, lightmaps[i].workgroup_bounds_buffer, NULL);
 	}
@@ -2046,10 +2078,32 @@ void GL_BuildLightmaps (void)
 	emissive_detail_budget_limited = false;
 	SAFE_FREE (emissive_logical_tiles);
 	SAFE_FREE (emissive_logical_tile_sources);
+	SAFE_FREE (emissive_light_styles);
+	SAFE_FREE (emissive_light_modulations);
+	SAFE_FREE (emissive_radiance_tiles);
 	num_emissive_logical_tiles = 0;
 	num_emissive_logical_tiles_total = 0;
 	num_emissive_logical_tile_sources = 0;
 	emissive_logical_tiles_built = false;
+	num_emissive_radiance_tiles = 0;
+	num_emissive_radiance_source_links = 0;
+	num_emissive_radiance_tile_groups = 0;
+	max_emissive_radiance_groups_per_tile = 0;
+	num_emissive_modulation_groups = 0;
+	emissive_radiance_coarse_pending = false;
+	emissive_radiance_detail_pending = false;
+	emissive_radiance_force_all_styled_tiles = false;
+	emissive_modulations_pending = false;
+	emissive_radiance_logged = false;
+	emissive_visibility_available = false;
+	emissive_radiance_cpu_time_us = 0;
+	GL_ResetEmissiveRadianceTimestamp ();
+	R_FreeBuffer (emissive_modulations_buffer, &emissive_modulations_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_FreeBuffer (emissive_visibility_buffer, &emissive_visibility_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_FreeBuffer (emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_modulations_buffer = VK_NULL_HANDLE;
+	emissive_visibility_buffer = VK_NULL_HANDLE;
+	emissive_radiance_tiles_buffer = VK_NULL_HANDLE;
 	SAFE_FREE (transient_emissive_lights);
 	SAFE_FREE (previous_transient_emissive_lights);
 	SAFE_FREE (transient_emissive_tiles);
@@ -3530,6 +3584,8 @@ R_EmissiveDetailAvailable
 */
 qboolean R_EmissiveDetailAvailable (void)
 {
+	if (num_emissive_modulation_groups && !emissive_visibility_available)
+		return false;
 	for (int i = 0; i < lightmap_count; ++i)
 		if (lightmaps[i].emissive_detail_texture)
 			return true;
@@ -3619,8 +3675,8 @@ R_AllocateEmissiveComputeDescriptorSet
 ==================
 */
 static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
-	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const gltexture_t *cacheable_texture,
-	const VkDescriptorBufferInfo source_buffers[3], const char *kind, int lightmap_index)
+	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const gltexture_t *cacheable_texture, const VkDescriptorBufferInfo source_buffers[5],
+	const char *kind, int lightmap_index)
 {
 	VkDescriptorSet descriptor_set = R_AllocateDescriptorSet (&vulkan_globals.emissive_compute_set_layout);
 	GL_SetObjectName ((uint64_t)descriptor_set, VK_OBJECT_TYPE_DESCRIPTOR_SET, va ("emissive %s %07i desc set", kind, lightmap_index));
@@ -3634,7 +3690,7 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	image_infos[2].imageView = (cacheable_texture ? cacheable_texture : output_texture)->image_view;
 	image_infos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-	VkDescriptorBufferInfo buffer_infos[6];
+	VkDescriptorBufferInfo buffer_infos[8];
 	memset (buffer_infos, 0, sizeof (buffer_infos));
 	buffer_infos[0].buffer = surface_data_buffer;
 	buffer_infos[0].range = num_surfaces * sizeof (lm_compute_surface_data_t);
@@ -3645,8 +3701,10 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	buffer_infos[3] = source_buffers[0];
 	buffer_infos[4] = source_buffers[1];
 	buffer_infos[5] = source_buffers[2];
+	buffer_infos[6] = source_buffers[3];
+	buffer_infos[7] = source_buffers[4];
 
-	VkWriteDescriptorSet writes[9];
+	VkWriteDescriptorSet writes[11];
 	memset (writes, 0, sizeof (writes));
 	for (int binding = 0; binding < countof (writes); ++binding)
 	{
@@ -3660,7 +3718,7 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 		if (binding < 2 || binding == 8)
 			writes[binding].pImageInfo = &image_infos[binding == 8 ? 2 : binding];
 		else
-			writes[binding].pBufferInfo = &buffer_infos[binding - 2];
+			writes[binding].pBufferInfo = &buffer_infos[binding < 8 ? binding - 2 : binding - 3];
 	}
 	vkUpdateDescriptorSets (vulkan_globals.device, countof (writes), writes, 0, NULL);
 	return descriptor_set;
@@ -3682,6 +3740,81 @@ static void R_FreeTransientEmissiveDescriptorSets (void)
 			lightmap->emissive_transient_detail_descriptor_set = VK_NULL_HANDLE;
 		}
 	}
+}
+
+static void R_FreeEmissiveRadianceOverlayDescriptorSets (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_radiance_overlay_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_radiance_overlay_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_radiance_overlay_descriptor_set = VK_NULL_HANDLE;
+		}
+		if (lightmap->emissive_radiance_overlay_detail_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_radiance_overlay_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_radiance_overlay_detail_descriptor_set = VK_NULL_HANDLE;
+		}
+		if (lightmap->emissive_radiance_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_radiance_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_radiance_descriptor_set = VK_NULL_HANDLE;
+		}
+		if (lightmap->emissive_radiance_detail_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_radiance_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_radiance_detail_descriptor_set = VK_NULL_HANDLE;
+		}
+	}
+}
+
+static void R_CreateEmissiveRadianceOverlayDescriptorSets (void)
+{
+	R_FreeEmissiveRadianceOverlayDescriptorSets ();
+	if (emissive_radiance_tiles_buffer == VK_NULL_HANDLE || emissive_lights_buffer == VK_NULL_HANDLE)
+		return;
+	const VkDescriptorBufferInfo source_buffers[5] = {
+		{emissive_lights_buffer, 0, VK_WHOLE_SIZE},
+		{emissive_radiance_tiles_buffer, 0, VK_WHOLE_SIZE},
+		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer, 0,
+		 emissive_tile_sources_buffer != VK_NULL_HANDLE ? VK_WHOLE_SIZE : sizeof (uint32_t)},
+		{emissive_modulations_buffer, 0, VK_WHOLE_SIZE},
+		{emissive_visibility_available ? emissive_visibility_buffer : emissive_modulations_buffer, 0, VK_WHOLE_SIZE},
+	};
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_texture)
+			lightmap->emissive_radiance_descriptor_set =
+				R_AllocateEmissiveComputeDescriptorSet (lightmap, lightmap->emissive_texture, NULL, source_buffers, "radiance", i);
+		if (emissive_visibility_available && lightmap->emissive_detail_texture)
+			lightmap->emissive_radiance_detail_descriptor_set =
+				R_AllocateEmissiveComputeDescriptorSet (lightmap, lightmap->emissive_detail_texture, NULL, source_buffers, "radiance detail", i);
+		if (lightmap->emissive_transient_texture && lightmap->emissive_texture)
+			lightmap->emissive_radiance_overlay_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_transient_texture, lightmap->emissive_texture, source_buffers, "radiance overlay", i);
+		if (emissive_visibility_available && lightmap->emissive_transient_detail_texture && lightmap->emissive_detail_texture)
+			lightmap->emissive_radiance_overlay_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_detail_texture, source_buffers, "radiance overlay detail", i);
+	}
+}
+
+static VkDeviceSize R_EmissiveBufferMemorySize (VkDeviceSize size, VkBufferUsageFlags usage)
+{
+	ZEROED_STRUCT (VkBufferCreateInfo, create_info);
+	create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	create_info.size = size;
+	create_info.usage = usage;
+	VkBuffer	   buffer;
+	const VkResult result = vkCreateBuffer (vulkan_globals.device, &create_info, NULL, &buffer);
+	if (result != VK_SUCCESS)
+		Sys_Error ("vkCreateBuffer failed with code %i", (int)result);
+	VkMemoryRequirements requirements;
+	vkGetBufferMemoryRequirements (vulkan_globals.device, buffer, &requirements);
+	vkDestroyBuffer (vulkan_globals.device, buffer, NULL);
+	return requirements.size;
 }
 
 static size_t R_TransientEmissiveCapacity (size_t required)
@@ -3768,10 +3901,12 @@ static void R_EnsureTransientEmissiveResources (void)
 	}
 	if (grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
 	{
-		const VkDescriptorBufferInfo source_buffers[3] = {
+		const VkDescriptorBufferInfo source_buffers[5] = {
 			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
 			{transient_emissive_tiles_buffer, 0, transient_emissive_tiles_capacity},
 			{transient_emissive_tile_sources_buffer, 0, transient_emissive_tile_sources_capacity},
+			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
+			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
 		};
 		R_FreeTransientEmissiveDescriptorSets ();
 		for (int i = 0; i < lightmap_count; ++i)
@@ -3784,6 +3919,7 @@ static void R_EnsureTransientEmissiveResources (void)
 				lightmap->emissive_transient_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 					lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_detail_texture, source_buffers, "transient detail", i);
 		}
+		R_CreateEmissiveRadianceOverlayDescriptorSets ();
 	}
 }
 
@@ -3792,10 +3928,12 @@ static void R_EnsureTransientEmissiveResources (void)
 R_SetEmissiveLights
 ==================
 */
-void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights)
+void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights)
 {
-	if (emissive_lights_buffer != VK_NULL_HANDLE || emissive_tiles_buffer != VK_NULL_HANDLE || emissive_tile_sources_buffer != VK_NULL_HANDLE)
+	if (emissive_lights_buffer != VK_NULL_HANDLE || emissive_tiles_buffer != VK_NULL_HANDLE || emissive_tile_sources_buffer != VK_NULL_HANDLE ||
+		emissive_modulations_buffer != VK_NULL_HANDLE || emissive_visibility_buffer != VK_NULL_HANDLE || emissive_radiance_tiles_buffer != VK_NULL_HANDLE)
 		GL_WaitForDeviceIdle ();
+	R_FreeEmissiveRadianceOverlayDescriptorSets ();
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		if (lightmaps[i].emissive_coarse_descriptor_set != VK_NULL_HANDLE)
@@ -3815,22 +3953,64 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emiss
 	emissive_tiles_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_tile_sources_buffer, &emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_tile_sources_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (emissive_modulations_buffer, &emissive_modulations_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_modulations_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (emissive_visibility_buffer, &emissive_visibility_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_visibility_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_radiance_tiles_buffer = VK_NULL_HANDLE;
+	SAFE_FREE (emissive_light_styles);
+	SAFE_FREE (emissive_light_modulations);
+	SAFE_FREE (emissive_radiance_tiles);
 	num_emissive_lights = 0;
+	num_emissive_radiance_tiles = 0;
+	num_emissive_radiance_source_links = 0;
+	num_emissive_radiance_tile_groups = 0;
+	max_emissive_radiance_groups_per_tile = 0;
+	num_emissive_modulation_groups = 0;
+	emissive_radiance_coarse_pending = false;
+	emissive_radiance_detail_pending = false;
+	emissive_radiance_force_all_styled_tiles = false;
+	emissive_modulations_pending = false;
+	emissive_radiance_logged = false;
+	emissive_visibility_available = false;
 	emissive_coarse_pending = false;
 	emissive_detail_pending = false;
 	emissive_detail_building = false;
 	emissive_detail_ready = false;
 	GL_ResetEmissiveCoarseTimestamp ();
 	GL_ResetEmissiveDetailTimestamp ();
+	GL_ResetEmissiveRadianceTimestamp ();
 	R_BuildEmissiveLogicalTileSources (lights, count, surface_lights, num_surface_lights);
 	if (!lights || count <= 0)
 		return;
+	assert (styles);
 
 	const size_t size = count * sizeof (*lights);
 	R_CreateBuffer (
 		&emissive_lights_buffer, &emissive_lights_buffer_memory, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, "Emissive source lights");
 	R_StagingUploadBuffer (emissive_lights_buffer, size, (const byte *)lights);
+	emissive_light_styles = Mem_Alloc (count * sizeof (*emissive_light_styles));
+	emissive_light_modulations = Mem_Alloc (count * sizeof (*emissive_light_modulations));
+	qboolean used_styles[MAX_LIGHTSTYLES];
+	memset (used_styles, 0, sizeof (used_styles));
+	for (int i = 0; i < count; ++i)
+	{
+		emissive_light_styles[i] = styles[i];
+		emissive_light_modulations[i] = styles[i] == 255 ? 1.0f : (float)d_lightstylevalue[styles[i]] / 256.0f;
+		if (styles[i] != 255)
+			used_styles[styles[i]] = true;
+	}
+	for (int style = 0; style < MAX_LIGHTSTYLES; ++style)
+		if (used_styles[style])
+			++num_emissive_modulation_groups;
+	const size_t modulations_size = count * sizeof (*emissive_light_modulations);
+	R_CreateBuffer (
+		&emissive_modulations_buffer, &emissive_modulations_buffer_memory, modulations_size,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+		"Emissive source modulations");
+	R_StagingUploadBuffer (emissive_modulations_buffer, modulations_size, (const byte *)emissive_light_modulations);
 	const size_t tiles_size = num_emissive_logical_tiles * sizeof (*emissive_logical_tiles);
 	if (tiles_size)
 	{
@@ -3839,6 +4019,11 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emiss
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
 			&num_vulkan_bmodel_allocations, NULL, "Emissive logical tiles");
 		R_StagingUploadBuffer (emissive_tiles_buffer, tiles_size, (const byte *)emissive_logical_tiles);
+		emissive_radiance_tiles = Mem_Alloc (tiles_size);
+		R_CreateBuffer (
+			&emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, tiles_size,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+			"Emissive radiance logical tiles");
 	}
 	const size_t tile_sources_size = num_emissive_logical_tile_sources * sizeof (*emissive_logical_tile_sources);
 	if (tile_sources_size)
@@ -3849,13 +4034,31 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emiss
 			&num_vulkan_bmodel_allocations, NULL, "Emissive tile source indices");
 		R_StagingUploadBuffer (emissive_tile_sources_buffer, tile_sources_size, (const byte *)emissive_logical_tile_sources);
 	}
+	const uint64_t visibility_budget = (uint64_t)EMISSIVE_VISIBILITY_MEMORY_BUDGET_MB * 1024 * 1024;
+	const uint64_t visibility_size = (uint64_t)num_emissive_logical_tile_sources * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE * sizeof (uint32_t);
+	const VkDeviceSize visibility_required_size =
+		visibility_size ? R_EmissiveBufferMemorySize (visibility_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : 0;
+	if (visibility_required_size && visibility_required_size <= visibility_budget)
+	{
+		R_CreateBuffer (
+			&emissive_visibility_buffer, &emissive_visibility_buffer_memory, visibility_size,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+			"Emissive retained visibility");
+		emissive_visibility_available = true;
+	}
+	else if (visibility_size)
+		Con_DPrintf (
+			"RT emissives: retained visibility rejected (%" PRIu64 " bytes, %" PRIu64 " byte budget); styled detail uses coarse fallback\n",
+			visibility_required_size, visibility_budget);
 	num_emissive_lights = count;
-	const VkDescriptorBufferInfo source_buffers[3] = {
+	const VkDescriptorBufferInfo source_buffers[5] = {
 		{emissive_lights_buffer, 0, size},
-		{emissive_tiles_buffer != VK_NULL_HANDLE ? emissive_tiles_buffer : emissive_lights_buffer,
-			0, tiles_size ? tiles_size : sizeof (uint32_t)},
-		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer,
-			0, tile_sources_size ? tile_sources_size : sizeof (uint32_t)},
+		{emissive_tiles_buffer != VK_NULL_HANDLE ? emissive_tiles_buffer : emissive_lights_buffer, 0, tiles_size ? tiles_size : sizeof (uint32_t)},
+		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer, 0,
+		 tile_sources_size ? tile_sources_size : sizeof (uint32_t)},
+		{emissive_modulations_buffer, 0, modulations_size},
+		{emissive_visibility_available ? emissive_visibility_buffer : emissive_modulations_buffer, 0,
+		 emissive_visibility_available ? VK_WHOLE_SIZE : modulations_size},
 	};
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -3867,9 +4070,10 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emiss
 		{
 			lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 				lightmap, lightmap->emissive_detail_texture, NULL, source_buffers, "detail", i);
-			emissive_detail_pending = num_emissive_logical_tiles > 0;
+			emissive_detail_pending = num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ();
 		}
 	}
+	R_CreateEmissiveRadianceOverlayDescriptorSets ();
 	emissive_coarse_pending = true;
 }
 
@@ -3883,6 +4087,111 @@ void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pend
 	*count = num_emissive_lights;
 	*allocated_bytes = emissive_lights_buffer_memory.size;
 	*pending = emissive_coarse_pending;
+}
+
+void R_EmissiveRadianceStats (
+	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,
+	uint32_t *cpu_time_us, qboolean *visibility_available, qboolean *pending)
+{
+	*groups = num_emissive_modulation_groups;
+	*dirty_tiles = num_emissive_radiance_tiles;
+	*source_links = num_emissive_radiance_source_links;
+	*tile_groups = num_emissive_radiance_tile_groups;
+	*max_groups_per_tile = max_emissive_radiance_groups_per_tile;
+	*cpu_bytes = (uint64_t)num_emissive_lights * (sizeof (*emissive_light_styles) + sizeof (*emissive_light_modulations)) +
+				 (uint64_t)num_emissive_logical_tiles * sizeof (*emissive_radiance_tiles);
+	*gpu_bytes = emissive_modulations_buffer_memory.size + emissive_visibility_buffer_memory.size + emissive_radiance_tiles_buffer_memory.size;
+	*cpu_time_us = emissive_radiance_cpu_time_us;
+	*visibility_available = emissive_visibility_available;
+	*pending = emissive_radiance_coarse_pending || emissive_radiance_detail_pending || emissive_modulations_pending;
+}
+
+void R_UpdateEmissiveLightstyles (void)
+{
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !num_emissive_lights || !emissive_light_styles)
+		return;
+	const double start_time = Sys_DoubleTime ();
+	qboolean	 changed_styles[MAX_LIGHTSTYLES];
+	memset (changed_styles, 0, sizeof (changed_styles));
+	qboolean changed = false;
+	for (int i = 0; i < num_emissive_lights; ++i)
+	{
+		const byte style = emissive_light_styles[i];
+		if (style == 255)
+			continue;
+		const float modulation = (float)d_lightstylevalue[style] / 256.0f;
+		if (modulation == emissive_light_modulations[i])
+			continue;
+		emissive_light_modulations[i] = modulation;
+		changed_styles[style] = true;
+		changed = true;
+	}
+	if (!changed && !emissive_radiance_force_all_styled_tiles)
+	{
+		emissive_radiance_cpu_time_us = 0;
+		return;
+	}
+	if (!changed && !emissive_detail_ready)
+	{
+		emissive_radiance_cpu_time_us = 0;
+		return;
+	}
+
+	num_emissive_radiance_tiles = 0;
+	num_emissive_radiance_source_links = 0;
+	num_emissive_radiance_tile_groups = 0;
+	max_emissive_radiance_groups_per_tile = 0;
+	for (int tile_index = 0; tile_index < num_emissive_logical_tiles; ++tile_index)
+	{
+		const emissive_logical_tile_t *const tile = &emissive_logical_tiles[tile_index];
+		qboolean							 dirty = false;
+		for (uint32_t source = 0; source < tile->num_sources; ++source)
+		{
+			const uint32_t light_index = emissive_logical_tile_sources[tile->first_source + source];
+			const byte	   style = emissive_light_styles[light_index];
+			if (style != 255 && (emissive_radiance_force_all_styled_tiles || changed_styles[style]))
+			{
+				dirty = true;
+				break;
+			}
+		}
+		if (!dirty)
+			continue;
+		qboolean tile_styles[MAX_LIGHTSTYLES];
+		memset (tile_styles, 0, sizeof (tile_styles));
+		int tile_groups = 0;
+		for (uint32_t source = 0; source < tile->num_sources; ++source)
+		{
+			const uint32_t light_index = emissive_logical_tile_sources[tile->first_source + source];
+			const byte	   style = emissive_light_styles[light_index];
+			if (style != 255 && !tile_styles[style])
+			{
+				tile_styles[style] = true;
+				++tile_groups;
+			}
+		}
+		emissive_radiance_tiles[num_emissive_radiance_tiles++] = *tile;
+		num_emissive_radiance_source_links += tile->num_sources;
+		num_emissive_radiance_tile_groups += tile_groups;
+		max_emissive_radiance_groups_per_tile = q_max (max_emissive_radiance_groups_per_tile, tile_groups);
+	}
+
+	emissive_modulations_pending |= changed;
+	emissive_radiance_coarse_pending = changed && num_emissive_radiance_tiles > 0;
+	if (num_emissive_radiance_tiles > 0 && emissive_visibility_available && emissive_detail_ready)
+	{
+		emissive_radiance_detail_pending = true;
+		emissive_radiance_force_all_styled_tiles = false;
+	}
+	else if (num_emissive_radiance_tiles > 0 && emissive_visibility_available)
+		emissive_radiance_force_all_styled_tiles = true;
+	else if (changed && num_emissive_radiance_tiles > 0)
+	{
+		/* Styled detail is not admitted without retained visibility; the coarse atlas remains authoritative. */
+		emissive_radiance_detail_pending = false;
+		emissive_radiance_force_all_styled_tiles = false;
+	}
+	emissive_radiance_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 }
 
 static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
@@ -3915,8 +4224,18 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
 		vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
+		if (emissive_visibility_available)
+		{
+			vkCmdFillBuffer (cbx->cb, emissive_visibility_buffer, 0, VK_WHOLE_SIZE, 0);
+			ZEROED_STRUCT (VkMemoryBarrier, visibility_barrier);
+			visibility_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			visibility_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			visibility_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &visibility_barrier, 0, NULL, 0, NULL);
+		}
 	}
-	emissive_compute_push_constants_t push_constants = {num_emissive_lights, 0};
+	emissive_compute_push_constants_t push_constants = {
+		num_emissive_lights, 0, detail && !emissive_visibility_available ? EMISSIVE_PUBLICATION_NO_VISIBILITY : EMISSIVE_PUBLICATION_UPDATE};
 	if (!detail)
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
 
@@ -4008,6 +4327,106 @@ static void R_UpdateTransientEmissiveBuffer (VkCommandBuffer cb, VkBuffer buffer
 		offset += chunk;
 		size -= chunk;
 	}
+}
+
+static void R_DispatchEmissiveRadianceTiles (cb_context_t *cbx, qboolean detail, qboolean overlay)
+{
+	const vulkan_pipeline_t *const pipeline =
+		detail ? (overlay ? &vulkan_globals.emissive_radiance_overlay_detail_pipeline : &vulkan_globals.emissive_radiance_detail_pipeline)
+			   : (overlay ? &vulkan_globals.emissive_radiance_overlay_pipeline : &vulkan_globals.emissive_radiance_pipeline);
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+	emissive_compute_push_constants_t push_constants = {num_emissive_lights, 0, EMISSIVE_PUBLICATION_UPDATE};
+	int								  logical_tile = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		while (logical_tile < num_emissive_radiance_tiles && emissive_radiance_tiles[logical_tile].lightmap < i)
+			++logical_tile;
+		const int first_tile = logical_tile;
+		while (logical_tile < num_emissive_radiance_tiles && emissive_radiance_tiles[logical_tile].lightmap == i)
+			++logical_tile;
+		const int num_tiles = logical_tile - first_tile;
+		if (!num_tiles)
+			continue;
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		const VkDescriptorSet	 descriptor_set =
+			detail ? (overlay ? lightmap->emissive_radiance_overlay_detail_descriptor_set : lightmap->emissive_radiance_detail_descriptor_set)
+				   : (overlay ? lightmap->emissive_radiance_overlay_descriptor_set : lightmap->emissive_radiance_descriptor_set);
+		gltexture_t *const texture = detail ? (overlay ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture)
+											: (overlay ? lightmap->emissive_transient_texture : lightmap->emissive_texture);
+		if (descriptor_set == VK_NULL_HANDLE || !texture)
+			continue;
+
+		ZEROED_STRUCT (VkImageMemoryBarrier, barrier);
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = texture->image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &descriptor_set, 0, NULL);
+		push_constants.first_tile = first_tile;
+		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
+		vkCmdDispatch (cbx->cb, detail ? EMISSIVE_DETAIL_SCALE : 1, detail ? EMISSIVE_DETAIL_SCALE : 1, num_tiles);
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+	}
+}
+
+static void R_UpdateEmissiveRadiance (cb_context_t *cbx)
+{
+	if ((!emissive_modulations_pending && !emissive_radiance_coarse_pending && !emissive_radiance_detail_pending) || r_emissive_rt.value <= 0.0f ||
+		gl_fullbrights.value <= 0.0f)
+		return;
+	R_BeginDebugUtilsLabel (cbx, "Update Emissive Radiance");
+	if (emissive_modulations_pending)
+		R_UpdateTransientEmissiveBuffer (
+			cbx->cb, emissive_modulations_buffer, emissive_light_modulations, num_emissive_lights * sizeof (*emissive_light_modulations));
+	if (num_emissive_radiance_tiles)
+		R_UpdateTransientEmissiveBuffer (
+			cbx->cb, emissive_radiance_tiles_buffer, emissive_radiance_tiles, num_emissive_radiance_tiles * sizeof (*emissive_radiance_tiles));
+	ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
+	memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+	emissive_modulations_pending = false;
+
+	if (emissive_radiance_coarse_pending || emissive_radiance_detail_pending)
+	{
+		GL_BeginEmissiveRadianceTimestamp (cbx);
+		if (emissive_radiance_coarse_pending)
+		{
+			if (transient_emissive_initialized)
+				R_DispatchEmissiveRadianceTiles (cbx, false, true);
+			R_DispatchEmissiveRadianceTiles (cbx, false, false);
+			emissive_radiance_coarse_pending = false;
+		}
+		if (emissive_radiance_detail_pending && emissive_detail_ready)
+		{
+			if (transient_emissive_initialized && transient_emissive_detail_cache_copied)
+				R_DispatchEmissiveRadianceTiles (cbx, true, true);
+			R_DispatchEmissiveRadianceTiles (cbx, true, false);
+			emissive_radiance_detail_pending = false;
+		}
+		GL_EndEmissiveRadianceTimestamp (cbx);
+		if (!emissive_radiance_logged)
+		{
+			Con_DPrintf (
+				"RT emissives: scheduled no-ray radiance resolve for %d tile%s and %d source link%s\n", num_emissive_radiance_tiles,
+				num_emissive_radiance_tiles == 1 ? "" : "s", num_emissive_radiance_source_links, num_emissive_radiance_source_links == 1 ? "" : "s");
+			emissive_radiance_logged = true;
+		}
+	}
+	R_EndDebugUtilsLabel (cbx);
 }
 
 static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean detail_only)
@@ -4211,7 +4630,7 @@ void GL_DeleteBModelVertexBuffer (void)
 	GL_WaitForDeviceIdle ();
 	R_FreeBuffer (bmodel_vertex_buffer, &bmodel_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (vertex_submodels_buffer, &vertex_submodels_buffer_memory, &num_vulkan_bmodel_allocations);
-	R_SetEmissiveLights (NULL, 0, NULL, 0);
+	R_SetEmissiveLights (NULL, NULL, 0, NULL, 0);
 }
 
 /*
@@ -5712,6 +6131,7 @@ void R_UpdateEmissiveLightmapsOnly (void)
 	R_BeginDebugUtilsLabel (cbx, "Update Emissive Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
 	R_UpdateEmissiveLightmaps (cbx, true);
+	R_UpdateEmissiveRadiance (cbx);
 	R_UpdateTransientEmissiveLightmaps (cbx);
 	R_EndDebugUtilsLabel (cbx);
 }
@@ -5727,6 +6147,7 @@ void R_UpdateLightmapsAndIndirect (void *unused)
 	R_BeginDebugUtilsLabel (cbx, "Update Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
 	R_UpdateEmissiveLightmaps (cbx, true);
+	R_UpdateEmissiveRadiance (cbx);
 	R_UpdateTransientEmissiveLightmaps (cbx);
 
 	for (int i = 0; i < MAX_LIGHTSTYLES; ++i)

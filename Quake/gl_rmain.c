@@ -388,6 +388,7 @@ static void R_SetupViewBeforeMark (void *unused)
 	if (!r_gpulightmapupdate.value)
 		R_PushDlights ();
 	R_AnimateLight ();
+	R_UpdateEmissiveLightstyles ();
 
 	// build the transformation matrix for the given view angles
 	VectorCopy (r_refdef.vieworg, r_origin);
