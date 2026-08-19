@@ -6,7 +6,6 @@
 #include "globals.inc"
 
 #define BOUNCE_TAP_INVALID 0xFFFFFFFFu
-#define BOUNCE_TAPS 8u
 #define BOUNCE_DEBUG_EXPOSURE 32.0f
 
 layout (push_constant) uniform PushConsts
@@ -14,7 +13,7 @@ layout (push_constant) uniform PushConsts
 	uint mode;
 	uint count;
 	uint detail_scale;
-	uint unused;
+	uint rays_per_sample;
 	float strength;
 	float max_distance;
 }
@@ -108,9 +107,9 @@ void BuildTransfer ()
 		normal = -normal;
 	const vec3 basis_x = normalize (tangent);
 	const vec3 basis_y = normalize (cross (normal, basis_x));
-	for (uint tap = 0u; tap < BOUNCE_TAPS; ++tap)
+	for (uint tap = 0u; tap < push_constants.rays_per_sample; ++tap)
 	{
-		const vec2 random = Random2 (sample_index * BOUNCE_TAPS + tap);
+		const vec2 random = Random2 (sample_index * push_constants.rays_per_sample + tap);
 		const float radius = sqrt (random.x);
 		const float phi = 6.28318530718f * random.y;
 		const vec3 direction = normalize (basis_x * (radius * cos (phi)) + basis_y * (radius * sin (phi)) + normal * sqrt (1.0f - random.x));
@@ -140,7 +139,7 @@ void BuildTransfer ()
 				}
 			}
 		}
-		bounce_taps[sample_index * BOUNCE_TAPS + tap] = logical;
+		bounce_taps[sample_index * push_constants.rays_per_sample + tap] = logical;
 		atomicAdd (counters[logical == BOUNCE_TAP_INVALID ? 1u : 0u], 1u);
 	}
 }
@@ -151,13 +150,13 @@ void ResolveBounce ()
 	if (sample_index >= push_constants.count)
 		return;
 	vec3 sum = vec3 (0.0f);
-	for (uint tap = 0u; tap < BOUNCE_TAPS; ++tap)
+	for (uint tap = 0u; tap < push_constants.rays_per_sample; ++tap)
 	{
-		const uint logical = bounce_taps[sample_index * BOUNCE_TAPS + tap];
+		const uint logical = bounce_taps[sample_index * push_constants.rays_per_sample + tap];
 		if (logical != BOUNCE_TAP_INVALID)
 			sum += reflectance_values[logical].rgb * direct_values[logical].rgb;
 	}
-	bounce_values[sample_index] = vec4 (sum * (push_constants.strength / float (BOUNCE_TAPS)), 0.0f);
+	bounce_values[sample_index] = vec4 (sum / float (push_constants.rays_per_sample), 0.0f);
 }
 
 void FilterBounce ()
@@ -211,7 +210,7 @@ void CombineBounce ()
 			imageStore (emissive_image, coords, vec4 (0.0f));
 		return;
 	}
-	const vec3 bounce = filtered_values[logical].rgb;
+	const vec3 bounce = filtered_values[logical].rgb * push_constants.strength;
 	if (push_constants.mode == 5u)
 		imageStore (emissive_image, coords, vec4 (bounce * BOUNCE_DEBUG_EXPOSURE, 1.0f));
 	else

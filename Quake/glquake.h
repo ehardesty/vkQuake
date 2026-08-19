@@ -763,6 +763,7 @@ void R_EmissiveDetailLightmapStats (
 	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
 void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us, uint32_t filter_time_us, uint32_t combine_time_us, qboolean valid);
+void R_EmissiveBounceChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
 void R_EmissiveBounceStats (

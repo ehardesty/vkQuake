@@ -37,6 +37,9 @@ extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
+cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
+cvar_t r_emissive_rt_bounce_strength = {"r_emissive_rt_bounce_strength", "0.65", CVAR_NONE};
+cvar_t r_emissive_rt_bounce_rays = {"r_emissive_rt_bounce_rays", "8", CVAR_NONE};
 
 /*
 =============================================================================
@@ -1162,6 +1165,7 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 	if (var->value > 0.0f && gl_fullbrights.value > 0.0f)
 	{
 		R_BuildEmissiveWorldSurfaceCache ();
+		R_EmissiveBounceChanged_f (&r_emissive_rt_bounce);
 		R_ActivateEmissiveWorldSurfaceCache ();
 		R_EmissiveBounceDebugChanged_f (&r_emissive_rt_debug);
 	}
@@ -1306,9 +1310,12 @@ void R_EmissiveRTStats_f (void)
 		rs_emissive_radiance_gputime_valid ? va ("%.3f ms", (double)rs_emissive_radiance_gputime_us / 1000.0) : "unavailable",
 		radiance_pending ? ", pending" : "");
 	Con_Printf (
-		"RT emissive bounce: %s, %u direct texel%s, %u half-resolution sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
+		"RT emissive bounce: %s, strength %.3f, %d ray%s/sample, %u direct texel%s, %u half-resolution sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
 		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s%s\n",
-		bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable", bounce_direct_texels,
+		r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f ? "disabled" :
+			bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable",
+		CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64),
+		CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64) == 1 ? "" : "s", bounce_direct_texels,
 		bounce_direct_texels == 1 ? "" : "s", bounce_samples, bounce_samples == 1 ? "" : "s", bounce_rays, bounce_rays == 1 ? "" : "s",
 		bounce_valid_taps, bounce_invalid_taps, bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes,
 		(double)bounce_prepare_time_us / 1000.0,
