@@ -10,8 +10,13 @@ layout (push_constant) uniform PushConsts
 {
 	uint num_lights;
 	uint first_tile;
+	uint publication_mode;
 }
 push_constants;
+
+layout (constant_id = 0) const bool transient_overlay = false;
+
+#define EMISSIVE_PUBLICATION_INVALIDATE 1u
 
 struct emissive_light_t
 {
@@ -54,6 +59,7 @@ layout (std430, set = 0, binding = 7) readonly restrict buffer emissive_source_i
 {
 	uint emissive_source_indices[];
 };
+layout (set = 0, binding = 8) uniform texture2D cacheable_image;
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
@@ -85,6 +91,11 @@ void main ()
 	const ivec2 coords = tile_coords * 16 + ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
+	if (transient_overlay && push_constants.publication_mode == EMISSIVE_PUBLICATION_INVALIDATE)
+	{
+		imageStore (output_image, coords, vec4 (0.0f));
+		return;
+	}
 
 	vec3		 contribution = vec3 (0.0f);
 	float		 validity = 0.0f;
@@ -104,6 +115,11 @@ void main ()
 
 		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources);
 		validity = 1.0f;
+	}
+	if (transient_overlay)
+	{
+		const vec4 cacheable = texelFetch (cacheable_image, coords, 0);
+		contribution += cacheable.rgb;
 	}
 
 	imageStore (output_image, coords, vec4 (contribution, validity));

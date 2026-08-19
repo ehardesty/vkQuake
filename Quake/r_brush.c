@@ -38,6 +38,12 @@ int gl_lightmap_format;
 #define LM_BINS	 49
 #define EMISSIVE_DETAIL_MEMORY_BUDGET_MB 512
 
+enum
+{
+	EMISSIVE_PUBLICATION_UPDATE,
+	EMISSIVE_PUBLICATION_INVALIDATE
+};
+
 struct lightmap_s *lightmaps;
 int				   lightmap_count;
 int				   last_lightmap_allocated;
@@ -360,6 +366,48 @@ static int					 num_emissive_logical_tiles;
 static int					 num_emissive_logical_tiles_total;
 static int					 num_emissive_logical_tile_sources;
 static qboolean				 emissive_logical_tiles_built;
+static emissive_light_t		*transient_emissive_lights;
+static emissive_light_t		*previous_transient_emissive_lights;
+static int					 num_transient_emissive_lights;
+static int					 num_previous_transient_emissive_lights;
+static emissive_logical_tile_t *transient_emissive_tiles;
+static uint32_t				*transient_emissive_tile_sources;
+static int					 num_transient_emissive_tiles;
+static int					 num_transient_emissive_tile_sources;
+static qboolean				 transient_emissive_pending;
+static qboolean				 transient_emissive_detail_pending;
+static qboolean				 transient_emissive_detail_ready;
+static uint32_t				 transient_emissive_generation;
+static uint32_t				 transient_emissive_rejected_publications;
+static qboolean				 transient_emissive_initialized;
+static qboolean				 transient_emissive_detail_cache_copied;
+static qboolean				 transient_emissive_force_refresh;
+static VkBuffer				 transient_emissive_lights_buffer;
+static vulkan_memory_t		 transient_emissive_lights_buffer_memory;
+static VkBuffer				 transient_emissive_tiles_buffer;
+static vulkan_memory_t		 transient_emissive_tiles_buffer_memory;
+static VkBuffer				 transient_emissive_tile_sources_buffer;
+static vulkan_memory_t		 transient_emissive_tile_sources_buffer_memory;
+static size_t				 transient_emissive_lights_capacity;
+static size_t				 transient_emissive_tiles_capacity;
+static size_t				 transient_emissive_tile_sources_capacity;
+static uint32_t				 transient_emissive_cpu_time_us;
+static uint32_t				*transient_emissive_tile_surface_offsets;
+static uint32_t				*transient_emissive_tile_surfaces;
+static uint32_t				*transient_emissive_tile_generations;
+static int					*transient_emissive_tile_indices;
+static uint32_t				 transient_emissive_tile_generation;
+static int					*transient_emissive_surface_influence_counts;
+static int					*transient_emissive_surface_deltas;
+static uint32_t				*transient_emissive_surface_delta_generations;
+static int					*transient_emissive_touched_surfaces;
+static int					 num_transient_emissive_touched_surfaces;
+static uint32_t				 transient_emissive_surface_delta_generation;
+static int					 num_transient_emissive_tile_surfaces;
+static int					 num_transient_emissive_total_tiles;
+static qmodel_t				*transient_emissive_tile_surface_worldmodel;
+static void R_EnsureTransientEmissiveResources (void);
+static qboolean R_TransientEmissiveDetailAvailable (void);
 static VkBuffer			   submodel_transforms_buffer;
 static float			  *lightstyles_scales_buffer_mapped;
 static lm_compute_light_t *lights_buffer_mapped;
@@ -1035,13 +1083,17 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			const qboolean	  alpha_test = texture->type == TEXTYPE_CUTOUT;
 			const qboolean	  alpha_blend = alpha < 1.0f;
 			const int		  lm_idx = indirect_draws[i].lightmap_idx;
-			gltexture_t		 *emissive_texture =
-				!draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0 ? lightmaps[lm_idx].emissive_texture : NULL;
-			gltexture_t *emissive_detail_texture =
-				!draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0 ? lightmaps[lm_idx].emissive_detail_texture : NULL;
+			gltexture_t *emissive_texture = !draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0
+				? (lightmaps[lm_idx].emissive_transient_texture ? lightmaps[lm_idx].emissive_transient_texture : lightmaps[lm_idx].emissive_texture)
+				: NULL;
+			gltexture_t *emissive_detail_texture = !draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0
+				? (lightmaps[lm_idx].emissive_transient_texture ? lightmaps[lm_idx].emissive_transient_detail_texture
+																 : lightmaps[lm_idx].emissive_detail_texture)
+				: NULL;
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
-			const qboolean	  detail_enabled = emissive_enabled && emissive_detail_texture && detail_ready;
+			const qboolean detail_enabled = emissive_enabled && emissive_detail_texture &&
+				(lightmaps[lm_idx].emissive_transient_detail_texture ? R_TransientEmissiveDetailReady () : detail_ready);
 			const qboolean	  emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || detail_enabled);
 			int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) +
@@ -1979,6 +2031,10 @@ void GL_BuildLightmaps (void)
 			R_FreeDescriptorSet (lightmaps[i].emissive_coarse_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].emissive_detail_descriptor_set != VK_NULL_HANDLE)
 			R_FreeDescriptorSet (lightmaps[i].emissive_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_transient_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_transient_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		if (lightmaps[i].emissive_transient_detail_descriptor_set != VK_NULL_HANDLE)
+			R_FreeDescriptorSet (lightmaps[i].emissive_transient_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].workgroup_bounds_buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer (vulkan_globals.device, lightmaps[i].workgroup_bounds_buffer, NULL);
 	}
@@ -1994,6 +2050,46 @@ void GL_BuildLightmaps (void)
 	num_emissive_logical_tiles_total = 0;
 	num_emissive_logical_tile_sources = 0;
 	emissive_logical_tiles_built = false;
+	SAFE_FREE (transient_emissive_lights);
+	SAFE_FREE (previous_transient_emissive_lights);
+	SAFE_FREE (transient_emissive_tiles);
+	SAFE_FREE (transient_emissive_tile_sources);
+	SAFE_FREE (transient_emissive_tile_surface_offsets);
+	SAFE_FREE (transient_emissive_tile_surfaces);
+	SAFE_FREE (transient_emissive_tile_generations);
+	SAFE_FREE (transient_emissive_tile_indices);
+	SAFE_FREE (transient_emissive_surface_influence_counts);
+	SAFE_FREE (transient_emissive_surface_deltas);
+	SAFE_FREE (transient_emissive_surface_delta_generations);
+	SAFE_FREE (transient_emissive_touched_surfaces);
+	num_transient_emissive_lights = 0;
+	num_previous_transient_emissive_lights = 0;
+	num_transient_emissive_tiles = 0;
+	num_transient_emissive_tile_sources = 0;
+	num_transient_emissive_tile_surfaces = 0;
+	num_transient_emissive_total_tiles = 0;
+	transient_emissive_tile_generation = 0;
+	num_transient_emissive_touched_surfaces = 0;
+	transient_emissive_surface_delta_generation = 0;
+	transient_emissive_tile_surface_worldmodel = NULL;
+	transient_emissive_pending = false;
+	transient_emissive_detail_pending = false;
+	transient_emissive_detail_ready = false;
+	transient_emissive_generation = 0;
+	transient_emissive_rejected_publications = 0;
+	transient_emissive_initialized = false;
+	transient_emissive_detail_cache_copied = false;
+	transient_emissive_force_refresh = false;
+	GL_ResetEmissiveTransientTimestamp ();
+	R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
+	transient_emissive_lights_buffer = VK_NULL_HANDLE;
+	transient_emissive_tiles_buffer = VK_NULL_HANDLE;
+	transient_emissive_tile_sources_buffer = VK_NULL_HANDLE;
+	transient_emissive_lights_capacity = 0;
+	transient_emissive_tiles_capacity = 0;
+	transient_emissive_tile_sources_capacity = 0;
 	num_surfaces = 0;
 	memset (columns, -1, sizeof (columns));
 	memset (lightmap_idx, 0, sizeof (lightmap_idx));
@@ -2797,6 +2893,368 @@ static int R_CompareEmissiveTileSourcePairs (const void *lhs_ptr, const void *rh
 	return 0;
 }
 
+static int R_TransientEmissiveLightmapTileOffsets (int *offsets)
+{
+	int total = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		offsets[i] = total;
+		const gltexture_t *const texture = lightmaps[i].surface_indices_texture;
+		total += ((texture->width + 7) / 8) * ((texture->height + 7) / 8);
+	}
+	return total;
+}
+
+static qboolean R_TransientEmissiveSurfaceTileRect (const msurface_t *surface, emissive_surface_tile_rect_t *rect)
+{
+	rect->lightmap = surface->lightmaptexturenum;
+	if (surface->numedges < 3 || (surface->flags & SURF_DRAWTILED) || rect->lightmap < 0 || rect->lightmap >= lightmap_count)
+		return false;
+	const gltexture_t *const texture = lightmaps[rect->lightmap].surface_indices_texture;
+	rect->tiles_wide = (texture->width + 7) / 8;
+	const int tiles_high = (texture->height + 7) / 8;
+	const int surface_width = (surface->extents[0] >> 4) + 1;
+	const int surface_height = (surface->extents[1] >> 4) + 1;
+	rect->first_x = CLAMP (0, surface->light_s / 8, rect->tiles_wide - 1);
+	rect->first_y = CLAMP (0, surface->light_t / 8, tiles_high - 1);
+	rect->last_x = CLAMP (0, (surface->light_s + surface_width - 1) / 8, rect->tiles_wide - 1);
+	rect->last_y = CLAMP (0, (surface->light_t + surface_height - 1) / 8, tiles_high - 1);
+	return true;
+}
+
+static qboolean R_TransientEmissiveLightsEqual (const emissive_light_t *a, const emissive_light_t *b)
+{
+	return !memcmp (a, b, sizeof (*a));
+}
+
+static int R_CompareTransientEmissiveTiles (const void *a_, const void *b_)
+{
+	const int a = *(const int *)a_;
+	const int b = *(const int *)b_;
+	return a < b ? -1 : a > b;
+}
+
+static void R_BuildTransientEmissiveTileSurfaces (const int *lightmap_offsets, int total_tiles)
+{
+	if (transient_emissive_tile_surface_worldmodel == cl.worldmodel)
+		return;
+	SAFE_FREE (transient_emissive_tile_surface_offsets);
+	SAFE_FREE (transient_emissive_tile_surfaces);
+	SAFE_FREE (transient_emissive_tile_generations);
+	SAFE_FREE (transient_emissive_tile_indices);
+	SAFE_FREE (transient_emissive_surface_influence_counts);
+	SAFE_FREE (transient_emissive_surface_deltas);
+	SAFE_FREE (transient_emissive_surface_delta_generations);
+	SAFE_FREE (transient_emissive_touched_surfaces);
+	transient_emissive_tile_surface_offsets = Mem_Alloc ((total_tiles + 1) * sizeof (*transient_emissive_tile_surface_offsets));
+	memset (transient_emissive_tile_surface_offsets, 0, (total_tiles + 1) * sizeof (*transient_emissive_tile_surface_offsets));
+	transient_emissive_tile_generations = Mem_Alloc (total_tiles * sizeof (*transient_emissive_tile_generations));
+	transient_emissive_tile_indices = Mem_Alloc (total_tiles * sizeof (*transient_emissive_tile_indices));
+	memset (transient_emissive_tile_generations, 0, total_tiles * sizeof (*transient_emissive_tile_generations));
+	transient_emissive_tile_generation = 0;
+	transient_emissive_surface_influence_counts = Mem_Alloc (cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_influence_counts));
+	transient_emissive_surface_deltas = Mem_Alloc (cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_deltas));
+	transient_emissive_surface_delta_generations = Mem_Alloc (cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_delta_generations));
+	transient_emissive_touched_surfaces = Mem_Alloc (cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_touched_surfaces));
+	memset (transient_emissive_surface_influence_counts, 0,
+		cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_influence_counts));
+	memset (transient_emissive_surface_delta_generations, 0,
+		cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_delta_generations));
+	num_transient_emissive_touched_surfaces = 0;
+	transient_emissive_surface_delta_generation = 0;
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int surface_index = 0; surface_index < cl.worldmodel->nummodelsurfaces; ++surface_index)
+	{
+		emissive_surface_tile_rect_t rect;
+		if (!R_TransientEmissiveSurfaceTileRect (&first_surface[surface_index], &rect))
+			continue;
+		for (int y = rect.first_y; y <= rect.last_y; ++y)
+			for (int x = rect.first_x; x <= rect.last_x; ++x)
+				++transient_emissive_tile_surface_offsets[lightmap_offsets[rect.lightmap] + y * rect.tiles_wide + x + 1];
+	}
+	for (int tile = 1; tile <= total_tiles; ++tile)
+		transient_emissive_tile_surface_offsets[tile] += transient_emissive_tile_surface_offsets[tile - 1];
+	num_transient_emissive_tile_surfaces = transient_emissive_tile_surface_offsets[total_tiles];
+	num_transient_emissive_total_tiles = total_tiles;
+	if (num_transient_emissive_tile_surfaces)
+		transient_emissive_tile_surfaces = Mem_Alloc (num_transient_emissive_tile_surfaces * sizeof (*transient_emissive_tile_surfaces));
+	uint32_t *const cursors = Mem_Alloc (total_tiles * sizeof (*cursors));
+	memcpy (cursors, transient_emissive_tile_surface_offsets, total_tiles * sizeof (*cursors));
+	for (int surface_index = 0; surface_index < cl.worldmodel->nummodelsurfaces; ++surface_index)
+	{
+		emissive_surface_tile_rect_t rect;
+		if (!R_TransientEmissiveSurfaceTileRect (&first_surface[surface_index], &rect))
+			continue;
+		for (int y = rect.first_y; y <= rect.last_y; ++y)
+			for (int x = rect.first_x; x <= rect.last_x; ++x)
+			{
+				const int tile = lightmap_offsets[rect.lightmap] + y * rect.tiles_wide + x;
+				transient_emissive_tile_surfaces[cursors[tile]++] = surface_index;
+			}
+	}
+	Mem_Free (cursors);
+	transient_emissive_tile_surface_worldmodel = cl.worldmodel;
+}
+
+typedef struct transient_emissive_invalidation_s
+{
+	const emissive_light_t *light;
+	const int				 *lightmap_offsets;
+	int					**dirty_tiles;
+	int					 *num_dirty_tiles;
+	int					 *dirty_tile_capacity;
+	int					  surface_influence_delta;
+} transient_emissive_invalidation_t;
+
+static void R_AddTransientEmissiveSurfaceDelta (int surface, int delta)
+{
+	if (!delta)
+		return;
+	if (transient_emissive_surface_delta_generations[surface] != transient_emissive_surface_delta_generation)
+	{
+		transient_emissive_surface_delta_generations[surface] = transient_emissive_surface_delta_generation;
+		transient_emissive_surface_deltas[surface] = 0;
+		transient_emissive_touched_surfaces[num_transient_emissive_touched_surfaces++] = surface;
+	}
+	transient_emissive_surface_deltas[surface] += delta;
+}
+
+static void R_MarkTransientEmissiveTileDirty (transient_emissive_invalidation_t *invalidation, int tile)
+{
+	if (!invalidation->dirty_tiles || transient_emissive_tile_generations[tile] == transient_emissive_tile_generation)
+		return;
+	transient_emissive_tile_generations[tile] = transient_emissive_tile_generation;
+	if (*invalidation->num_dirty_tiles == *invalidation->dirty_tile_capacity)
+	{
+		*invalidation->dirty_tile_capacity = *invalidation->dirty_tile_capacity ? *invalidation->dirty_tile_capacity * 2 : 256;
+		*invalidation->dirty_tiles = Mem_Realloc (
+			*invalidation->dirty_tiles, *invalidation->dirty_tile_capacity * sizeof (**invalidation->dirty_tiles));
+	}
+	(*invalidation->dirty_tiles)[(*invalidation->num_dirty_tiles)++] = tile;
+}
+
+static void R_InvalidateTransientEmissiveNode (mnode_t *node, transient_emissive_invalidation_t *invalidation)
+{
+	if (node->contents < 0)
+		return;
+	const float distance = node->plane->type < 3 ? invalidation->light->origin[node->plane->type] - node->plane->dist
+											 : DotProduct (invalidation->light->origin, node->plane->normal) - node->plane->dist;
+	if (distance > invalidation->light->radius)
+	{
+		R_InvalidateTransientEmissiveNode (node->children[0], invalidation);
+		return;
+	}
+	if (distance < -invalidation->light->radius)
+	{
+		R_InvalidateTransientEmissiveNode (node->children[1], invalidation);
+		return;
+	}
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int i = 0; i < node->numsurfaces; ++i)
+	{
+		msurface_t *const surface = &cl.worldmodel->surfaces[node->firstsurface + i];
+		if (surface < first_surface || surface >= first_surface + cl.worldmodel->nummodelsurfaces)
+			continue;
+		emissive_surface_tile_rect_t rect;
+		if (!R_TransientEmissiveSurfaceTileRect (surface, &rect))
+			continue;
+		qboolean affected = false;
+		for (int y = rect.first_y; y <= rect.last_y; ++y)
+			for (int x = rect.first_x; x <= rect.last_x; ++x)
+				if (R_EmissiveLightInfluencesTile (surface, x, y, invalidation->light))
+				{
+					R_MarkTransientEmissiveTileDirty (
+						invalidation, invalidation->lightmap_offsets[rect.lightmap] + y * rect.tiles_wide + x);
+					affected = true;
+				}
+		if (affected)
+			R_AddTransientEmissiveSurfaceDelta (surface - first_surface, invalidation->surface_influence_delta);
+	}
+	R_InvalidateTransientEmissiveNode (node->children[0], invalidation);
+	R_InvalidateTransientEmissiveNode (node->children[1], invalidation);
+}
+
+void R_InvalidateTransientEmissiveLights (void)
+{
+	transient_emissive_force_refresh = true;
+}
+
+void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
+{
+	const double start_time = Sys_DoubleTime ();
+	if (!cl.worldmodel || count < 0)
+		return;
+	if (!transient_emissive_force_refresh && count == num_transient_emissive_lights &&
+		(!count || !memcmp (lights, transient_emissive_lights, count * sizeof (*lights))))
+		return;
+	const qboolean force_refresh = transient_emissive_force_refresh;
+	transient_emissive_force_refresh = false;
+
+	SAFE_FREE (previous_transient_emissive_lights);
+	previous_transient_emissive_lights = transient_emissive_lights;
+	num_previous_transient_emissive_lights = num_transient_emissive_lights;
+	transient_emissive_lights = NULL;
+	num_transient_emissive_lights = count;
+	if (count)
+	{
+		transient_emissive_lights = Mem_Alloc (count * sizeof (*lights));
+		memcpy (transient_emissive_lights, lights, count * sizeof (*lights));
+	}
+
+	R_AllocateEmissiveLightmaps ();
+	int *const lightmap_offsets = Mem_Alloc (lightmap_count * sizeof (*lightmap_offsets));
+	const int total_tiles = R_TransientEmissiveLightmapTileOffsets (lightmap_offsets);
+	R_BuildTransientEmissiveTileSurfaces (lightmap_offsets, total_tiles);
+	++transient_emissive_tile_generation;
+	if (!transient_emissive_tile_generation)
+	{
+		memset (transient_emissive_tile_generations, 0, total_tiles * sizeof (*transient_emissive_tile_generations));
+		++transient_emissive_tile_generation;
+	}
+	int *dirty_tiles = NULL;
+	int num_dirty_tiles = 0;
+	int dirty_tile_capacity = 0;
+	num_transient_emissive_touched_surfaces = 0;
+	++transient_emissive_surface_delta_generation;
+	if (!transient_emissive_surface_delta_generation)
+	{
+		memset (transient_emissive_surface_delta_generations, 0,
+			cl.worldmodel->nummodelsurfaces * sizeof (*transient_emissive_surface_delta_generations));
+		++transient_emissive_surface_delta_generation;
+	}
+	qboolean regroup = false;
+	const int compared_lights = q_max (count, num_previous_transient_emissive_lights);
+	int num_changed_sources = 0;
+	for (int light_index = 0; light_index < compared_lights; ++light_index)
+	{
+		const emissive_light_t *const old_light = light_index < num_previous_transient_emissive_lights ? &previous_transient_emissive_lights[light_index] : NULL;
+		const emissive_light_t *const new_light = light_index < count ? &transient_emissive_lights[light_index] : NULL;
+		if (!force_refresh && old_light && new_light && R_TransientEmissiveLightsEqual (old_light, new_light))
+			continue;
+		++num_changed_sources;
+		transient_emissive_invalidation_t invalidation = {
+			NULL, lightmap_offsets, &dirty_tiles, &num_dirty_tiles, &dirty_tile_capacity, 0};
+		if (old_light)
+		{
+			invalidation.light = old_light;
+			invalidation.surface_influence_delta = -1;
+			R_InvalidateTransientEmissiveNode (cl.worldmodel->nodes, &invalidation);
+		}
+		if (new_light)
+		{
+			invalidation.light = new_light;
+			invalidation.surface_influence_delta = 1;
+			R_InvalidateTransientEmissiveNode (cl.worldmodel->nodes, &invalidation);
+		}
+	}
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int i = 0; i < num_transient_emissive_touched_surfaces; ++i)
+	{
+		const int surface_index = transient_emissive_touched_surfaces[i];
+		msurface_t *const surface = &first_surface[surface_index];
+		transient_emissive_surface_influence_counts[surface_index] += transient_emissive_surface_deltas[surface_index];
+		assert (transient_emissive_surface_influence_counts[surface_index] >= 0);
+		const qboolean influenced =
+			surface->cacheable_emissive_influence || transient_emissive_surface_influence_counts[surface_index] > 0;
+		if (surface->emissive_influence != influenced)
+		{
+			surface->emissive_influence = influenced;
+			regroup = true;
+		}
+	}
+
+	SAFE_FREE (transient_emissive_tiles);
+	SAFE_FREE (transient_emissive_tile_sources);
+	num_transient_emissive_tiles = 0;
+	num_transient_emissive_tile_sources = 0;
+	if (num_dirty_tiles > 1)
+		qsort (dirty_tiles, num_dirty_tiles, sizeof (*dirty_tiles), R_CompareTransientEmissiveTiles);
+	num_transient_emissive_tiles = num_dirty_tiles;
+	if (num_transient_emissive_tiles)
+		transient_emissive_tiles = Mem_Alloc (num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
+	int lightmap = 0;
+	for (int tile_index = 0; tile_index < num_dirty_tiles; ++tile_index)
+	{
+		const int flat_tile = dirty_tiles[tile_index];
+		while (lightmap + 1 < lightmap_count && flat_tile >= lightmap_offsets[lightmap + 1])
+			++lightmap;
+		const gltexture_t *const texture = lightmaps[lightmap].surface_indices_texture;
+		const int tiles_wide = (texture->width + 7) / 8;
+		const int local_tile = flat_tile - lightmap_offsets[lightmap];
+		transient_emissive_tiles[tile_index].first_source = 0;
+		transient_emissive_tiles[tile_index].num_sources = 0;
+		transient_emissive_tiles[tile_index].lightmap = lightmap;
+		transient_emissive_tiles[tile_index].x = local_tile % tiles_wide;
+		transient_emissive_tiles[tile_index].y = local_tile / tiles_wide;
+		transient_emissive_tile_indices[flat_tile] = tile_index;
+	}
+
+	emissive_tile_source_pair_t *pairs = NULL;
+	int num_pairs = 0;
+	int pair_capacity = 0;
+	for (int dirty_tile = 0; dirty_tile < num_dirty_tiles; ++dirty_tile)
+	{
+		const int flat_tile = dirty_tiles[dirty_tile];
+		const int tile = transient_emissive_tile_indices[flat_tile];
+		const emissive_logical_tile_t *const logical_tile = &transient_emissive_tiles[tile];
+		for (uint32_t surface_link = transient_emissive_tile_surface_offsets[flat_tile];
+			surface_link < transient_emissive_tile_surface_offsets[flat_tile + 1]; ++surface_link)
+		{
+			const msurface_t *const surface = &first_surface[transient_emissive_tile_surfaces[surface_link]];
+			for (int light_index = 0; light_index < count; ++light_index)
+				if (R_EmissiveLightInfluencesTile (surface, logical_tile->x, logical_tile->y, &transient_emissive_lights[light_index]))
+			{
+				if (num_pairs == pair_capacity)
+				{
+					pair_capacity = pair_capacity ? pair_capacity * 2 : 1024;
+					pairs = Mem_Realloc (pairs, pair_capacity * sizeof (*pairs));
+				}
+				pairs[num_pairs].tile = tile;
+				pairs[num_pairs].source = light_index;
+				++num_pairs;
+			}
+		}
+	}
+	if (num_pairs > 1)
+		qsort (pairs, num_pairs, sizeof (*pairs), R_CompareEmissiveTileSourcePairs);
+	for (int i = 0; i < num_pairs; ++i)
+		if (!num_transient_emissive_tile_sources || pairs[i].tile != pairs[num_transient_emissive_tile_sources - 1].tile ||
+			pairs[i].source != pairs[num_transient_emissive_tile_sources - 1].source)
+			pairs[num_transient_emissive_tile_sources++] = pairs[i];
+	if (num_transient_emissive_tile_sources)
+		transient_emissive_tile_sources = Mem_Alloc (num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
+	for (int i = 0; i < num_transient_emissive_tile_sources; ++i)
+	{
+		emissive_logical_tile_t *const tile = &transient_emissive_tiles[pairs[i].tile];
+		if (!tile->num_sources)
+			tile->first_source = i;
+		++tile->num_sources;
+		transient_emissive_tile_sources[i] = pairs[i].source;
+	}
+
+	transient_emissive_pending = num_transient_emissive_tiles > 0;
+	transient_emissive_detail_pending = false;
+	transient_emissive_detail_ready = false;
+	++transient_emissive_generation;
+	if (!transient_emissive_generation)
+		++transient_emissive_generation;
+	R_EnsureTransientEmissiveResources ();
+	if (!transient_emissive_initialized)
+		transient_emissive_pending = true;
+	if (num_transient_emissive_tiles && vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
+		GL_RequestAccelerationStructure (RT_AS_CONSUMER_TRANSIENT_EMISSIVES);
+	if (regroup)
+		GL_RebuildIndirectDraws (true);
+	transient_emissive_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
+	Con_DPrintf (
+		"RT emissives: %d transient source%s, %d changed; updated %d logical tile%s with %d source link%s in %.3f ms CPU\n", count,
+		count == 1 ? "" : "s", num_changed_sources, num_transient_emissive_tiles, num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
+		num_transient_emissive_tile_sources == 1 ? "" : "s", (double)transient_emissive_cpu_time_us / 1000.0);
+	Mem_Free (pairs);
+	Mem_Free (dirty_tiles);
+	Mem_Free (lightmap_offsets);
+}
+
 static void R_BuildEmissiveLogicalTileSources (
 	const emissive_light_t *lights, int num_lights, const emissive_surface_light_t *surface_lights, int num_surface_lights)
 {
@@ -3052,6 +3510,19 @@ qboolean R_EmissiveDetailReady (void)
 	return emissive_detail_ready;
 }
 
+qboolean R_TransientEmissiveDetailReady (void)
+{
+	return transient_emissive_detail_ready;
+}
+
+void R_TransientEmissiveDetailCompleted (uint32_t generation)
+{
+	if (generation == transient_emissive_generation)
+		transient_emissive_detail_ready = true;
+	else
+		++transient_emissive_rejected_publications;
+}
+
 /*
 ==================
 R_EmissiveDetailAvailable
@@ -3061,6 +3532,14 @@ qboolean R_EmissiveDetailAvailable (void)
 {
 	for (int i = 0; i < lightmap_count; ++i)
 		if (lightmaps[i].emissive_detail_texture)
+			return true;
+	return false;
+}
+
+static qboolean R_TransientEmissiveDetailAvailable (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+		if (lightmaps[i].emissive_transient_detail_texture)
 			return true;
 	return false;
 }
@@ -3080,6 +3559,39 @@ void R_EmissiveTileStats (
 	*cpu_bytes = num_emissive_logical_tiles * sizeof (*emissive_logical_tiles) +
 		num_emissive_logical_tile_sources * sizeof (*emissive_logical_tile_sources);
 	*gpu_bytes = emissive_tiles_buffer_memory.size + emissive_tile_sources_buffer_memory.size;
+}
+
+void R_TransientEmissiveStats (
+	int *lights, int *tiles, int *source_links, uint64_t *cpu_bytes, uint64_t *gpu_bytes, uint32_t *cpu_time_us,
+	uint32_t *rejected_publications, qboolean *pending, qboolean *detail_ready)
+{
+	*lights = num_transient_emissive_lights;
+	*tiles = num_transient_emissive_tiles;
+	*source_links = num_transient_emissive_tile_sources;
+	*cpu_bytes = (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights) +
+		(uint64_t)num_previous_transient_emissive_lights * sizeof (*previous_transient_emissive_lights) +
+		(uint64_t)num_transient_emissive_tiles * sizeof (*transient_emissive_tiles) +
+		(uint64_t)num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources) +
+		(uint64_t)(num_transient_emissive_total_tiles + 1) * sizeof (*transient_emissive_tile_surface_offsets) +
+		(uint64_t)num_transient_emissive_tile_surfaces * sizeof (*transient_emissive_tile_surfaces) +
+		(uint64_t)num_transient_emissive_total_tiles *
+			(sizeof (*transient_emissive_tile_generations) + sizeof (*transient_emissive_tile_indices)) +
+		(uint64_t)(cl.worldmodel ? cl.worldmodel->nummodelsurfaces : 0) *
+			(sizeof (*transient_emissive_surface_influence_counts) + sizeof (*transient_emissive_surface_deltas) +
+				sizeof (*transient_emissive_surface_delta_generations) + sizeof (*transient_emissive_touched_surfaces));
+	*gpu_bytes = transient_emissive_lights_buffer_memory.size + transient_emissive_tiles_buffer_memory.size +
+		transient_emissive_tile_sources_buffer_memory.size;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		if (lightmaps[i].emissive_transient_texture)
+			*gpu_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_transient_texture->allocation);
+		if (lightmaps[i].emissive_transient_detail_texture)
+			*gpu_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_transient_detail_texture->allocation);
+	}
+	*cpu_time_us = transient_emissive_cpu_time_us;
+	*rejected_publications = transient_emissive_rejected_publications;
+	*pending = transient_emissive_pending || transient_emissive_detail_pending;
+	*detail_ready = transient_emissive_detail_ready;
 }
 
 /*
@@ -3107,18 +3619,20 @@ R_AllocateEmissiveComputeDescriptorSet
 ==================
 */
 static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
-	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const size_t lights_size, const size_t tiles_size,
-	const size_t tile_sources_size, const char *kind, int lightmap_index)
+	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const gltexture_t *cacheable_texture,
+	const VkDescriptorBufferInfo source_buffers[3], const char *kind, int lightmap_index)
 {
 	VkDescriptorSet descriptor_set = R_AllocateDescriptorSet (&vulkan_globals.emissive_compute_set_layout);
 	GL_SetObjectName ((uint64_t)descriptor_set, VK_OBJECT_TYPE_DESCRIPTOR_SET, va ("emissive %s %07i desc set", kind, lightmap_index));
 
-	VkDescriptorImageInfo image_infos[2];
+	VkDescriptorImageInfo image_infos[3];
 	memset (image_infos, 0, sizeof (image_infos));
 	image_infos[0].imageView = output_texture->target_image_view;
 	image_infos[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	image_infos[1].imageView = lightmap->surface_indices_texture->image_view;
 	image_infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	image_infos[2].imageView = (cacheable_texture ? cacheable_texture : output_texture)->image_view;
+	image_infos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkDescriptorBufferInfo buffer_infos[6];
 	memset (buffer_infos, 0, sizeof (buffer_infos));
@@ -3128,14 +3642,11 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	buffer_infos[1].range = VK_WHOLE_SIZE;
 	buffer_infos[2].buffer = surface_submodels_buffer;
 	buffer_infos[2].range = num_surfaces * sizeof (uint32_t);
-	buffer_infos[3].buffer = emissive_lights_buffer;
-	buffer_infos[3].range = lights_size;
-	buffer_infos[4].buffer = emissive_tiles_buffer != VK_NULL_HANDLE ? emissive_tiles_buffer : emissive_lights_buffer;
-	buffer_infos[4].range = tiles_size ? tiles_size : sizeof (uint32_t);
-	buffer_infos[5].buffer = emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer;
-	buffer_infos[5].range = tile_sources_size ? tile_sources_size : sizeof (uint32_t);
+	buffer_infos[3] = source_buffers[0];
+	buffer_infos[4] = source_buffers[1];
+	buffer_infos[5] = source_buffers[2];
 
-	VkWriteDescriptorSet writes[8];
+	VkWriteDescriptorSet writes[9];
 	memset (writes, 0, sizeof (writes));
 	for (int binding = 0; binding < countof (writes); ++binding)
 	{
@@ -3144,15 +3655,136 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 		writes[binding].descriptorCount = 1;
 		writes[binding].dstSet = descriptor_set;
 		writes[binding].descriptorType = binding == 0	? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-										 : binding == 1 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+										 : binding == 1 || binding == 8 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
 														: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		if (binding < 2)
-			writes[binding].pImageInfo = &image_infos[binding];
+		if (binding < 2 || binding == 8)
+			writes[binding].pImageInfo = &image_infos[binding == 8 ? 2 : binding];
 		else
 			writes[binding].pBufferInfo = &buffer_infos[binding - 2];
 	}
 	vkUpdateDescriptorSets (vulkan_globals.device, countof (writes), writes, 0, NULL);
 	return descriptor_set;
+}
+
+static void R_FreeTransientEmissiveDescriptorSets (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_transient_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_transient_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_transient_descriptor_set = VK_NULL_HANDLE;
+		}
+		if (lightmap->emissive_transient_detail_descriptor_set != VK_NULL_HANDLE)
+		{
+			R_FreeDescriptorSet (lightmap->emissive_transient_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+			lightmap->emissive_transient_detail_descriptor_set = VK_NULL_HANDLE;
+		}
+	}
+}
+
+static size_t R_TransientEmissiveCapacity (size_t required)
+{
+	size_t capacity = 256;
+	while (capacity < required)
+		capacity *= 2;
+	return capacity;
+}
+
+static void R_EnsureTransientEmissiveResources (void)
+{
+	const size_t lights_size = q_max ((size_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights), sizeof (uint32_t));
+	const size_t tiles_size = q_max ((size_t)num_transient_emissive_tiles * sizeof (*transient_emissive_tiles), sizeof (uint32_t));
+	const size_t sources_size = q_max ((size_t)num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources), sizeof (uint32_t));
+	const qboolean grow = lights_size > transient_emissive_lights_capacity || tiles_size > transient_emissive_tiles_capacity ||
+		sources_size > transient_emissive_tile_sources_capacity;
+	if (grow)
+	{
+		if (transient_emissive_lights_buffer != VK_NULL_HANDLE)
+			GL_WaitForDeviceIdle ();
+		R_FreeTransientEmissiveDescriptorSets ();
+		R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+		R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+		R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
+		transient_emissive_lights_capacity = R_TransientEmissiveCapacity (lights_size);
+		transient_emissive_tiles_capacity = R_TransientEmissiveCapacity (tiles_size);
+		transient_emissive_tile_sources_capacity = R_TransientEmissiveCapacity (sources_size);
+		R_CreateBuffer (
+			&transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, transient_emissive_lights_capacity,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+			&num_vulkan_bmodel_allocations, NULL, "Transient emissive source lights");
+		R_CreateBuffer (
+			&transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, transient_emissive_tiles_capacity,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+			&num_vulkan_bmodel_allocations, NULL, "Transient emissive logical tiles");
+		R_CreateBuffer (
+			&transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, transient_emissive_tile_sources_capacity,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+			&num_vulkan_bmodel_allocations, NULL, "Transient emissive tile source indices");
+	}
+
+	qboolean created_texture = false;
+	uint64_t detail_required_bytes = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		const struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_detail_texture)
+			detail_required_bytes += GL_HeapGetAllocationSize (lightmap->emissive_detail_texture->allocation);
+		if (lightmap->emissive_transient_detail_texture)
+			detail_required_bytes += GL_HeapGetAllocationSize (lightmap->emissive_transient_detail_texture->allocation);
+		else if (lightmap->emissive_detail_texture)
+			detail_required_bytes += TexMgr_RGBA16FImageMemorySize (
+				lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height);
+	}
+	const qboolean transient_detail_admitted = detail_required_bytes <= (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!lightmap->emissive_texture)
+			continue;
+		char name[48];
+		if (!lightmap->emissive_transient_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_transient_%07i", i);
+			lightmap->emissive_transient_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, lightmap->emissive_texture->width, lightmap->emissive_texture->height, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+			created_texture = true;
+		}
+		if (transient_detail_admitted && lightmap->emissive_detail_texture && !lightmap->emissive_transient_detail_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_transient_detail_%07i", i);
+			lightmap->emissive_transient_detail_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+			created_texture = true;
+		}
+	}
+	if (created_texture)
+	{
+		transient_emissive_initialized = false;
+		transient_emissive_detail_cache_copied = false;
+	}
+	if (grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
+	{
+		const VkDescriptorBufferInfo source_buffers[3] = {
+			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
+			{transient_emissive_tiles_buffer, 0, transient_emissive_tiles_capacity},
+			{transient_emissive_tile_sources_buffer, 0, transient_emissive_tile_sources_capacity},
+		};
+		R_FreeTransientEmissiveDescriptorSets ();
+		for (int i = 0; i < lightmap_count; ++i)
+		{
+			struct lightmap_s *const lightmap = &lightmaps[i];
+			if (lightmap->emissive_transient_texture)
+				lightmap->emissive_transient_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+					lightmap, lightmap->emissive_transient_texture, lightmap->emissive_texture, source_buffers, "transient coarse", i);
+			if (lightmap->emissive_transient_detail_texture)
+				lightmap->emissive_transient_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+					lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_detail_texture, source_buffers, "transient detail", i);
+		}
+	}
 }
 
 /*
@@ -3218,16 +3850,23 @@ void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emiss
 		R_StagingUploadBuffer (emissive_tile_sources_buffer, tile_sources_size, (const byte *)emissive_logical_tile_sources);
 	}
 	num_emissive_lights = count;
+	const VkDescriptorBufferInfo source_buffers[3] = {
+		{emissive_lights_buffer, 0, size},
+		{emissive_tiles_buffer != VK_NULL_HANDLE ? emissive_tiles_buffer : emissive_lights_buffer,
+			0, tiles_size ? tiles_size : sizeof (uint32_t)},
+		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer,
+			0, tile_sources_size ? tile_sources_size : sizeof (uint32_t)},
+	};
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
 		if (lightmap->emissive_texture)
 			lightmap->emissive_coarse_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
-				lightmap, lightmap->emissive_texture, size, tiles_size, tile_sources_size, "coarse", i);
+				lightmap, lightmap->emissive_texture, NULL, source_buffers, "coarse", i);
 		if (lightmap->emissive_detail_texture)
 		{
 			lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
-				lightmap, lightmap->emissive_detail_texture, size, tiles_size, tile_sources_size, "detail", i);
+				lightmap, lightmap->emissive_detail_texture, NULL, source_buffers, "detail", i);
 			emissive_detail_pending = num_emissive_logical_tiles > 0;
 		}
 	}
@@ -3354,6 +3993,203 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	}
 	else
 		GL_EndEmissiveCoarseTimestamp (cbx);
+	R_EndDebugUtilsLabel (cbx);
+}
+
+static void R_UpdateTransientEmissiveBuffer (VkCommandBuffer cb, VkBuffer buffer, const void *data, size_t size)
+{
+	const byte *bytes = data;
+	VkDeviceSize offset = 0;
+	while (size)
+	{
+		const size_t chunk = q_min (size, 65536u);
+		vkCmdUpdateBuffer (cb, buffer, offset, chunk, bytes);
+		bytes += chunk;
+		offset += chunk;
+		size -= chunk;
+	}
+}
+
+static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean detail_only)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		gltexture_t *outputs[2] = {lightmap->emissive_transient_texture, lightmap->emissive_transient_detail_texture};
+		gltexture_t *inputs[2] = {lightmap->emissive_texture, lightmap->emissive_detail_texture};
+		for (int detail = detail_only ? 1 : 0; detail < 2; ++detail)
+		{
+			gltexture_t *const output = outputs[detail];
+			gltexture_t *const input = inputs[detail];
+			if (!output || !input)
+				continue;
+			VkImageMemoryBarrier barriers[2];
+			memset (barriers, 0, sizeof (barriers));
+			for (int barrier = 0; barrier < 2; ++barrier)
+			{
+				barriers[barrier].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				barriers[barrier].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+				barriers[barrier].dstAccessMask = barrier ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+				barriers[barrier].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				barriers[barrier].newLayout = barrier ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				barriers[barrier].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barriers[barrier].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barriers[barrier].image = barrier ? output->image : input->image;
+				barriers[barrier].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				barriers[barrier].subresourceRange.levelCount = 1;
+				barriers[barrier].subresourceRange.layerCount = 1;
+			}
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, barriers);
+			if ((!detail && num_emissive_lights) || (detail && R_EmissiveDetailReady ()))
+			{
+				VkImageCopy copy;
+				memset (&copy, 0, sizeof (copy));
+				copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				copy.srcSubresource.layerCount = 1;
+				copy.dstSubresource = copy.srcSubresource;
+				copy.extent.width = output->width;
+				copy.extent.height = output->height;
+				copy.extent.depth = 1;
+				vkCmdCopyImage (
+					cbx->cb, input->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, output->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+			}
+			else
+			{
+				ZEROED_STRUCT (VkClearColorValue, clear_color);
+				vkCmdClearColorImage (
+					cbx->cb, output->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &barriers[1].subresourceRange);
+			}
+			for (int barrier = 0; barrier < 2; ++barrier)
+			{
+				barriers[barrier].srcAccessMask = barrier ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+				barriers[barrier].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				barriers[barrier].oldLayout = barrier ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				barriers[barrier].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+				NULL, 2, barriers);
+		}
+	}
+	transient_emissive_initialized = true;
+	transient_emissive_detail_cache_copied = !num_emissive_lights || R_EmissiveDetailReady ();
+}
+
+static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail, qboolean invalidate)
+{
+	const vulkan_pipeline_t *const pipeline = detail ? &vulkan_globals.emissive_transient_detail_pipeline : &vulkan_globals.emissive_transient_pipeline;
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+	if (detail)
+	{
+		if (emissive_world_tlas == VK_NULL_HANDLE)
+			return;
+		ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
+		tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+		tlas_info.accelerationStructureCount = 1;
+		tlas_info.pAccelerationStructures = &emissive_world_tlas;
+		ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
+		tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		tlas_write.pNext = &tlas_info;
+		tlas_write.dstBinding = 0;
+		tlas_write.descriptorCount = 1;
+		tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+		vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
+	}
+
+	emissive_compute_push_constants_t push_constants = {
+		num_transient_emissive_lights, 0, invalidate ? EMISSIVE_PUBLICATION_INVALIDATE : EMISSIVE_PUBLICATION_UPDATE};
+	int logical_tile = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		while (logical_tile < num_transient_emissive_tiles && transient_emissive_tiles[logical_tile].lightmap < i)
+			++logical_tile;
+		const int first_tile = logical_tile;
+		while (logical_tile < num_transient_emissive_tiles && transient_emissive_tiles[logical_tile].lightmap == i)
+			++logical_tile;
+		const int num_tiles = logical_tile - first_tile;
+		if (!num_tiles)
+			continue;
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		const VkDescriptorSet descriptor_set = detail ? lightmap->emissive_transient_detail_descriptor_set : lightmap->emissive_transient_descriptor_set;
+		gltexture_t *const texture = detail ? lightmap->emissive_transient_detail_texture : lightmap->emissive_transient_texture;
+		if (descriptor_set == VK_NULL_HANDLE || !texture)
+			continue;
+		VkImageMemoryBarrier barrier;
+		memset (&barrier, 0, sizeof (barrier));
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = texture->image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier (
+			cbx->cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &descriptor_set, 0, NULL);
+		push_constants.first_tile = first_tile;
+		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
+		vkCmdDispatch (cbx->cb, detail ? EMISSIVE_DETAIL_SCALE : 1, detail ? EMISSIVE_DETAIL_SCALE : 1, num_tiles);
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier (
+			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+	}
+}
+
+static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
+{
+	if ((!transient_emissive_pending && !transient_emissive_detail_pending) || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
+		return;
+	R_BeginDebugUtilsLabel (cbx, "Update Transient Emissive Lightmaps");
+	GL_BeginEmissiveTransientTimestamp (cbx);
+	if (!transient_emissive_initialized)
+		R_InitializeTransientEmissiveImages (cbx, false);
+	else if (!transient_emissive_detail_cache_copied && R_EmissiveDetailReady ())
+		R_InitializeTransientEmissiveImages (cbx, true);
+	const qboolean coarse_publication = transient_emissive_pending;
+	qboolean detail_recorded = false;
+	if (coarse_publication)
+	{
+		if (num_transient_emissive_lights)
+			R_UpdateTransientEmissiveBuffer (
+				cbx->cb, transient_emissive_lights_buffer, transient_emissive_lights,
+				num_transient_emissive_lights * sizeof (*transient_emissive_lights));
+		R_UpdateTransientEmissiveBuffer (
+			cbx->cb, transient_emissive_tiles_buffer, transient_emissive_tiles,
+			num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
+		if (num_transient_emissive_tile_sources)
+			R_UpdateTransientEmissiveBuffer (
+				cbx->cb, transient_emissive_tile_sources_buffer, transient_emissive_tile_sources,
+				num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
+		ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
+		memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier (
+			cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+		R_DispatchTransientEmissiveTiles (cbx, false, false);
+		if (vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
+		{
+			R_DispatchTransientEmissiveTiles (cbx, true, true);
+			transient_emissive_detail_pending = true;
+		}
+		transient_emissive_pending = false;
+	}
+	else if (transient_emissive_detail_pending && emissive_world_tlas != VK_NULL_HANDLE &&
+		(!num_emissive_lights || transient_emissive_detail_cache_copied))
+	{
+		R_DispatchTransientEmissiveTiles (cbx, true, false);
+		transient_emissive_detail_pending = false;
+		detail_recorded = true;
+	}
+	GL_EndEmissiveTransientTimestamp (cbx, detail_recorded ? transient_emissive_generation : 0);
 	R_EndDebugUtilsLabel (cbx);
 }
 
@@ -4077,6 +4913,7 @@ void GL_RequestAccelerationStructure (rt_as_consumer_t consumer)
 	switch (consumer)
 	{
 	case RT_AS_CONSUMER_CACHEABLE_EMISSIVES:
+	case RT_AS_CONSUMER_TRANSIENT_EMISSIVES:
 		GL_BuildEmissiveWorldAccelerationStructure ();
 		break;
 	case RT_AS_CONSUMER_RT_SHADOWS:
@@ -4875,6 +5712,7 @@ void R_UpdateEmissiveLightmapsOnly (void)
 	R_BeginDebugUtilsLabel (cbx, "Update Emissive Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
 	R_UpdateEmissiveLightmaps (cbx, true);
+	R_UpdateTransientEmissiveLightmaps (cbx);
 	R_EndDebugUtilsLabel (cbx);
 }
 
@@ -4889,6 +5727,7 @@ void R_UpdateLightmapsAndIndirect (void *unused)
 	R_BeginDebugUtilsLabel (cbx, "Update Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
 	R_UpdateEmissiveLightmaps (cbx, true);
+	R_UpdateTransientEmissiveLightmaps (cbx);
 
 	for (int i = 0; i < MAX_LIGHTSTYLES; ++i)
 	{

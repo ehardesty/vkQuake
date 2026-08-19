@@ -1597,7 +1597,7 @@ void R_CreateDescriptorSetLayouts ()
 
 	{
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 8);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 9);
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1606,20 +1606,24 @@ void R_CreateDescriptorSetLayouts ()
 		emissive_coarse_layout_bindings[1].descriptorCount = 1;
 		emissive_coarse_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		emissive_coarse_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		for (int i = 2; i < countof (emissive_coarse_layout_bindings); ++i)
+		for (int i = 2; i < 8; ++i)
 		{
 			emissive_coarse_layout_bindings[i].binding = num_descriptors++;
 			emissive_coarse_layout_bindings[i].descriptorCount = 1;
 			emissive_coarse_layout_bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 			emissive_coarse_layout_bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 		}
+		emissive_coarse_layout_bindings[8].binding = num_descriptors++;
+		emissive_coarse_layout_bindings[8].descriptorCount = 1;
+		emissive_coarse_layout_bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		emissive_coarse_layout_bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 		descriptor_set_layout_create_info.bindingCount = num_descriptors;
 		descriptor_set_layout_create_info.pBindings = emissive_coarse_layout_bindings;
 
 		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
 		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
-		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 1;
+		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 2;
 		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 6;
 
 		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
@@ -1746,23 +1750,23 @@ void R_CreateDescriptorPool ()
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	pool_sizes[0].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2) + (MAX_GLTEXTURES + 1);
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 3;
+	pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 5;
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
 	pool_sizes[2].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[3].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[4].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS * 13;
+	pool_sizes[4].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS * 25;
 	pool_sizes[5].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 	pool_sizes[5].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2);
 	pool_sizes[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
 	pool_sizes[6].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
 	pool_sizes[7].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_sizes[7].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (3 + MAXLIGHTMAPS * 3 / 4) * MAX_SANITY_LIGHTMAPS;
+	pool_sizes[7].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (7 + MAXLIGHTMAPS * 3 / 4) * MAX_SANITY_LIGHTMAPS;
 
 	ZEROED_STRUCT (VkDescriptorPoolCreateInfo, descriptor_pool_create_info);
 	descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 3 + 128;
+	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 5 + 128;
 	descriptor_pool_create_info.poolSizeCount = countof (pool_sizes);
 	descriptor_pool_create_info.pPoolSizes = pool_sizes;
 	descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -4014,8 +4018,20 @@ static void R_CreateUpdateLightmapPipelines ()
 			&specialization_info, "update_lightmap_rt");
 
 	R_CreateComputePipeline (&vulkan_globals.emissive_coarse_pipeline, emissive_coarse_comp_module, 0, NULL, "emissive_coarse");
+	VkSpecializationMapEntry emissive_specialization_entry = {0, 0, sizeof (uint32_t)};
+	uint32_t			 transient_overlay = true;
+	VkSpecializationInfo emissive_specialization = {1, &emissive_specialization_entry, sizeof (transient_overlay), &transient_overlay};
+	vulkan_globals.emissive_transient_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+	R_CreateComputePipeline (
+		&vulkan_globals.emissive_transient_pipeline, emissive_coarse_comp_module, 0, &emissive_specialization, "emissive_transient");
 	if (vulkan_globals.ray_query)
+	{
 		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
+		vulkan_globals.emissive_transient_detail_pipeline.layout = vulkan_globals.emissive_detail_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_transient_detail_pipeline, emissive_detail_comp_module, 0, &emissive_specialization,
+			"emissive_transient_detail");
+	}
 }
 
 /*
@@ -4404,10 +4420,17 @@ void R_DestroyPipelines (void)
 	vulkan_globals.update_lightmap_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_coarse_pipeline.handle, NULL);
 	vulkan_globals.emissive_coarse_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_transient_pipeline.handle, NULL);
+	vulkan_globals.emissive_transient_pipeline.handle = VK_NULL_HANDLE;
 	if (vulkan_globals.emissive_detail_pipeline.handle != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
 		vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
+	}
+	if (vulkan_globals.emissive_transient_detail_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_transient_detail_pipeline.handle, NULL);
+		vulkan_globals.emissive_transient_detail_pipeline.handle = VK_NULL_HANDLE;
 	}
 	if (vulkan_globals.update_lightmap_rt_pipeline.handle != VK_NULL_HANDLE)
 	{

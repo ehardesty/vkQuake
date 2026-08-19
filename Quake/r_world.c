@@ -1161,7 +1161,8 @@ static void R_FlushBatch (
 	{
 		const qboolean emissive_enabled =
 			!alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
-		const qboolean detail_enabled = emissive_enabled && emissive_detail_texture && R_EmissiveDetailReady ();
+		const qboolean detail_enabled =
+			emissive_enabled && emissive_detail_texture && (R_EmissiveDetailReady () || R_TransientEmissiveDetailReady ());
 		const int	  debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 4);
 		const qboolean emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || detail_enabled);
 		int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
@@ -1434,8 +1435,15 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 		{
 			const qboolean surface_emissive = model == cl.worldmodel && s->emissive_influence && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											  !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
-			gltexture_t *const surface_emissive_texture = surface_emissive ? lightmaps[s->lightmaptexturenum].emissive_texture : NULL;
-			gltexture_t *const surface_emissive_detail_texture = surface_emissive ? lightmaps[s->lightmaptexturenum].emissive_detail_texture : NULL;
+			gltexture_t *const surface_emissive_texture = surface_emissive
+				? (lightmaps[s->lightmaptexturenum].emissive_transient_texture ? lightmaps[s->lightmaptexturenum].emissive_transient_texture
+																	 : lightmaps[s->lightmaptexturenum].emissive_texture)
+				: NULL;
+			gltexture_t *const surface_emissive_detail_texture = surface_emissive
+				? (lightmaps[s->lightmaptexturenum].emissive_transient_texture
+						? lightmaps[s->lightmaptexturenum].emissive_transient_detail_texture
+						: lightmaps[s->lightmaptexturenum].emissive_detail_texture)
+				: NULL;
 			if (s->lightmaptexturenum != lastlightmap || surface_emissive_texture != emissive_texture)
 			{
 				R_FlushBatch (

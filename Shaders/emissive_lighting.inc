@@ -5,6 +5,8 @@ vec3 CalculateEmissiveContribution (const vec3 world_pos, const vec3 normal, con
 	{
 #ifdef EMISSIVE_SOURCE_INDICES
 		const uint light_index = emissive_source_indices[first_source + i];
+#elif defined(EMISSIVE_OPTIONAL_SOURCE_INDICES)
+		const uint light_index = transient_overlay ? emissive_source_indices[first_source + i] : first_source + i;
 #else
 		const uint light_index = i;
 #endif

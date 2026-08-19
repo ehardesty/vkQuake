@@ -459,6 +459,8 @@ typedef struct
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
 	vulkan_pipeline_t		 emissive_coarse_pipeline;
 	vulkan_pipeline_t		 emissive_detail_pipeline;
+	vulkan_pipeline_t		 emissive_transient_pipeline;
+	vulkan_pipeline_t		 emissive_transient_detail_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -599,6 +601,8 @@ extern uint32_t		   rs_emissive_coarse_gputime_us;
 extern qboolean		   rs_emissive_coarse_gputime_valid;
 extern uint32_t		   rs_emissive_detail_gputime_us;
 extern qboolean		   rs_emissive_detail_gputime_valid;
+extern uint32_t		   rs_emissive_transient_gputime_us;
+extern qboolean		   rs_emissive_transient_gputime_valid;
 extern uint32_t		   rs_live_as_cputime_us;
 extern uint32_t		   rs_live_as_gputime_us;
 extern qboolean		   rs_live_as_gputime_valid;
@@ -679,11 +683,15 @@ struct lightmap_s
 	gltexture_t	   *texture;
 	gltexture_t	   *emissive_texture;
 	gltexture_t	   *emissive_detail_texture; // resolved RGB detail; alpha is publication validity
+	gltexture_t	   *emissive_transient_texture; // cacheable + current transient coarse field
+	gltexture_t	   *emissive_transient_detail_texture; // cacheable + current transient detail field
 	gltexture_t	   *surface_indices_texture;
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
 	VkDescriptorSet emissive_coarse_descriptor_set;
 	VkDescriptorSet emissive_detail_descriptor_set;
+	VkDescriptorSet emissive_transient_descriptor_set;
+	VkDescriptorSet emissive_transient_detail_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -726,8 +734,9 @@ typedef struct emissive_compute_push_constants_s
 {
 	uint32_t num_lights;
 	uint32_t first_tile;
+	uint32_t publication_mode;
 } emissive_compute_push_constants_t;
-COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 8);
+COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 12);
 
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
@@ -738,16 +747,24 @@ void R_EmissiveDetailLightmapStats (
 	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
 qboolean R_EmissiveDetailReady (void);
+qboolean R_TransientEmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
 void R_SetEmissiveLights (const emissive_light_t *lights, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
+void R_TransientEmissiveStats (
+	int *lights, int *tiles, int *source_links, uint64_t *cpu_bytes, uint64_t *gpu_bytes, uint32_t *cpu_time_us,
+	uint32_t *rejected_publications, qboolean *pending, qboolean *detail_ready);
 void GL_ResetEmissiveCoarseTimestamp (void);
 void GL_BeginEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveDetailTimestamp (void);
 void GL_BeginEmissiveDetailTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
+void GL_ResetEmissiveTransientTimestamp (void);
+void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_generation);
+void R_TransientEmissiveDetailCompleted (uint32_t generation);
 void GL_ResetLiveASTimestamp (void);
 void GL_BeginLiveASTimestamp (cb_context_t *cbx);
 void GL_EndLiveASTimestamp (cb_context_t *cbx);
@@ -785,6 +802,9 @@ void R_EmissiveRTStats_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
+void R_UpdateTransientEmissiveSources (void);
+void R_InvalidateTransientEmissiveLights (void);
+void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count);
 void R_UpdateLightmapsAndIndirect (void *unused);
 void R_MarkSurfaces (qboolean use_tasks, task_handle_t before_mark, task_handle_t *store_efrags, task_handle_t *cull_surfaces, task_handle_t *chain_surfaces);
 qboolean	  R_CullBox (vec3_t emins, vec3_t emaxs);
@@ -845,6 +865,7 @@ void GL_RebuildIndirectDraws (qboolean emissive_grouping);
 typedef enum
 {
 	RT_AS_CONSUMER_CACHEABLE_EMISSIVES,
+	RT_AS_CONSUMER_TRANSIENT_EMISSIVES,
 	RT_AS_CONSUMER_RT_SHADOWS,
 } rt_as_consumer_t;
 

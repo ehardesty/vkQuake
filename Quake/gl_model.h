@@ -192,6 +192,7 @@ typedef struct msurface_s
 	// int is 32 bits, need an array for MAX_DLIGHTS > 32
 
 	int		 lightmaptexturenum;
+	qboolean cacheable_emissive_influence;
 	qboolean emissive_influence;
 	byte	 styles[MAXLIGHTMAPS];
 	uint32_t styles_bitmap;				 // bitmap of styles used (16..64 OR-folded into bits 16..31)

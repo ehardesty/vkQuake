@@ -87,6 +87,9 @@ static const emissive_texture_def_t emissive_texture_defs[] = {
 	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
 };
 
+static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area);
+static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex);
+
 static emissive_world_surface_t *emissive_world_surfaces;
 static int						 num_emissive_world_surfaces;
 static emissive_world_fixture_t *emissive_world_fixtures;
@@ -146,6 +149,122 @@ static void R_ClearEmissiveWorldSurfaces (void)
 	emissive_surface_worldmodel = NULL;
 	emissive_prepare_time_us = 0;
 	emissive_world_lights_uploaded = false;
+}
+
+static void R_AppendTransientEmissiveLight (emissive_light_t **lights, int *count, int *capacity, const emissive_light_t *light)
+{
+	if (*count == *capacity)
+	{
+		*capacity = *capacity ? *capacity * 2 : 16;
+		*lights = Mem_Realloc (*lights, *capacity * sizeof (**lights));
+	}
+	(*lights)[(*count)++] = *light;
+}
+
+static void R_TransformEmissivePoint (const float matrix[16], const vec3_t point, vec3_t transformed)
+{
+	for (int row = 0; row < 3; ++row)
+		transformed[row] = matrix[row] * point[0] + matrix[4 + row] * point[1] + matrix[8 + row] * point[2] + matrix[12 + row];
+}
+
+/*
+==================
+R_UpdateTransientEmissiveSources
+
+Collects spatially changing fullbright-derived sources in stable entity/surface
+order. Moving inline-brush emitters with fixed source textures are reduced to
+one proxy per curated texture definition. Fixed animated textures remain
+deferred until radiance modulation can reuse cached transport without rays.
+==================
+*/
+void R_UpdateTransientEmissiveSources (void)
+{
+	if (!cl.worldmodel || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
+	{
+		R_InvalidateTransientEmissiveLights ();
+		return;
+	}
+	emissive_light_t *lights = NULL;
+	int				 count = 0;
+	int				 capacity = 0;
+
+	if (cl.worldmodel)
+	{
+		for (int entity_index = 1; entity_index < cl.num_entities; ++entity_index)
+		{
+			entity_t *const entity = &cl.entities[entity_index];
+			qmodel_t *const model = entity->model;
+			if (!model || model->needload || model->type != mod_brush || model->name[0] != '*' || model->surfaces != cl.worldmodel->surfaces ||
+				(entity->alpha != ENTALPHA_DEFAULT && ENTALPHA_DECODE (entity->alpha) < 1.0f))
+				continue;
+
+			vec3_t angles;
+			VectorCopy (entity->angles, angles);
+			angles[0] = -angles[0];
+			float matrix[16];
+			IdentityMatrix (matrix);
+			R_RotateForEntity (matrix, entity->origin, angles, entity->netstate.scale);
+
+			for (int def_index = 0; def_index < countof (emissive_texture_defs); ++def_index)
+			{
+				const emissive_texture_def_t *definition = NULL;
+				vec3_t weighted_origin = {0.0f, 0.0f, 0.0f};
+				vec3_t weighted_normal = {0.0f, 0.0f, 0.0f};
+				vec3_t color = {0.0f, 0.0f, 0.0f};
+				float total_weight = 0.0f;
+				for (int i = 0; i < model->nummodelsurfaces; ++i)
+				{
+					msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
+					texture_t *const texture = surface->texinfo ? surface->texinfo->texture : NULL;
+					const emissive_texture_def_t *const surface_definition = R_CacheableEmissiveTextureDef (texture);
+					if (surface_definition != &emissive_texture_defs[def_index] || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
+						continue;
+					vec3_t center, normal, surface_color;
+					float area;
+					R_EmissiveWorldSurfaceGeometry (model, surface, center, normal, &area);
+					const float weight = area * texture->fullbright->fullbright_coverage;
+					R_ResolveEmissiveTextureColor (surface_definition, texture->fullbright, surface_color);
+					VectorMA (weighted_origin, weight, center, weighted_origin);
+					VectorMA (weighted_normal, weight, normal, weighted_normal);
+					VectorMA (color, weight, surface_color, color);
+					total_weight += weight;
+					definition = surface_definition;
+				}
+				if (!definition || total_weight <= 0.0f)
+					continue;
+				VectorScale (weighted_origin, 1.0f / total_weight, weighted_origin);
+				VectorScale (color, 1.0f / total_weight, color);
+				if (VectorNormalize (weighted_normal) == 0.0f)
+				{
+					weighted_normal[0] = 0.0f;
+					weighted_normal[1] = 0.0f;
+					weighted_normal[2] = 1.0f;
+				}
+				float support_distance = DotProduct (weighted_origin, weighted_normal);
+				for (int i = 0; i < model->nummodelsurfaces; ++i)
+				{
+					msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
+					const emissive_texture_def_t *const surface_definition =
+						R_CacheableEmissiveTextureDef (surface->texinfo ? surface->texinfo->texture : NULL);
+					if (surface_definition != definition || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
+						continue;
+					for (int vertex = 0; vertex < surface->numedges; ++vertex)
+						support_distance =
+							q_max (support_distance, DotProduct (*R_EmissiveWorldSurfaceVertex (model, surface, vertex), weighted_normal));
+				}
+				VectorMA (weighted_origin, support_distance - DotProduct (weighted_origin, weighted_normal) + definition->normal_offset,
+					weighted_normal, weighted_origin);
+				emissive_light_t light;
+				R_TransformEmissivePoint (matrix, weighted_origin, light.origin);
+				light.radius = definition->radius;
+				VectorCopy (color, light.color);
+				light.intensity = definition->intensity;
+				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
+			}
+		}
+	}
+	R_SetTransientEmissiveLights (lights, count);
+	Mem_Free (lights);
 }
 
 static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex)
@@ -298,7 +417,19 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			VectorCopy (weighted_normal, fixture->normal);
 		else
 			VectorCopy (fallback_normal, fixture->normal);
-		VectorMA (fixture->origin, fixture->definition->normal_offset, fixture->normal, fixture->origin);
+
+		/* A centroid shared by outward-facing fixture sides can lie inside the fixture. Move it beyond the fixture hull before applying the gap. */
+		float support_distance = DotProduct (fixture->origin, fixture->normal);
+		for (int i = group; i < num_emissive_world_surfaces; ++i)
+		{
+			if (surface_groups[i] != group)
+				continue;
+			const msurface_t *const surface = emissive_world_surfaces[i].surface;
+			for (int vertex = 0; vertex < surface->numedges; ++vertex)
+				support_distance = q_max (support_distance, DotProduct (*R_EmissiveWorldSurfaceVertex (worldmodel, surface, vertex), fixture->normal));
+		}
+		VectorMA (fixture->origin,
+			support_distance - DotProduct (fixture->origin, fixture->normal) + fixture->definition->normal_offset, fixture->normal, fixture->origin);
 	}
 	assert (fixture_index == num_emissive_world_fixtures);
 	for (int i = 0; i < num_emissive_world_surfaces; ++i)
@@ -405,14 +536,16 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel)
 	for (int i = 0; i < worldmodel->nummodelsurfaces; ++i)
 	{
 		msurface_t *const surface = &first_surface[i];
+		surface->cacheable_emissive_influence = false;
 		surface->emissive_influence = false;
 		if (surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
 			continue;
 		for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
 			if (R_EmissiveWorldFixtureInfluencesSurface (worldmodel, &emissive_world_fixtures[fixture], surface))
 			{
-				if (!surface->emissive_influence)
+				if (!surface->cacheable_emissive_influence)
 				{
+					surface->cacheable_emissive_influence = true;
 					surface->emissive_influence = true;
 					++num_emissive_world_receivers;
 				}
@@ -555,6 +688,15 @@ void R_EmissiveRTStats_f (void)
 	int		 tile_dispatches;
 	uint64_t tile_cpu_bytes;
 	uint64_t tile_gpu_bytes;
+	int		 transient_lights;
+	int		 transient_tiles;
+	int		 transient_source_links;
+	uint64_t transient_cpu_bytes;
+	uint64_t transient_gpu_bytes;
+	uint32_t transient_cpu_time_us;
+	uint32_t transient_rejected_publications;
+	qboolean transient_pending;
+	qboolean transient_detail_ready;
 	int		 emissive_lights;
 	uint64_t emissive_light_bytes;
 	qboolean coarse_pending;
@@ -571,6 +713,9 @@ void R_EmissiveRTStats_f (void)
 		&detail_as_active, &detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
 	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_source_links, &tile_dispatches, &tile_cpu_bytes, &tile_gpu_bytes);
+	R_TransientEmissiveStats (
+		&transient_lights, &transient_tiles, &transient_source_links, &transient_cpu_bytes, &transient_gpu_bytes, &transient_cpu_time_us,
+		&transient_rejected_publications, &transient_pending, &transient_detail_ready);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -616,11 +761,20 @@ void R_EmissiveRTStats_f (void)
 			emissive_world_as_ready ? "ready" : "unavailable", emissive_world_as_triangles, emissive_world_as_triangles == 1 ? "" : "s",
 			emissive_world_as_bytes);
 	Con_Printf (
-		"RT AS consumers: cacheable emissives %s (immutable world %s), RT shadows %s (live scene %s, %u instance%s, last %.3f ms CPU / %s GPU)\n",
-		detail_as_active ? "active" : "inactive", emissive_world_as_ready ? "resident" : "unavailable",
+		"RT AS consumers: cacheable emissives %s, transient emissives %s (immutable world %s), RT shadows %s (live scene %s, %u instance%s, last %.3f ms CPU / %s GPU)\n",
+		detail_as_active ? "active" : "inactive", transient_pending && transient_tiles && vulkan_globals.ray_query ? "active" : "inactive",
+		emissive_world_as_ready ? "resident" : "unavailable",
 		(vulkan_globals.ray_query && r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f) ? "active" : "inactive",
 		live_as_ready ? "ready" : "unavailable", live_as_instances,
 		live_as_instances == 1 ? "" : "s", (double)rs_live_as_cputime_us / 1000.0, live_as_gpu_time);
+	Con_Printf (
+		"RT emissive transient: %d active source%s, %d changed 8x8 tile%s, %d tile-source link%s, %" PRIu64 " CPU bytes, %" PRIu64
+		" GPU bytes, last %.3f ms CPU / %s GPU, detail %s%s, %u rejected stale publication%s\n",
+		transient_lights, transient_lights == 1 ? "" : "s", transient_tiles, transient_tiles == 1 ? "" : "s", transient_source_links,
+		transient_source_links == 1 ? "" : "s", transient_cpu_bytes, transient_gpu_bytes, (double)transient_cpu_time_us / 1000.0,
+		rs_emissive_transient_gputime_valid ? va ("%.3f ms", (double)rs_emissive_transient_gputime_us / 1000.0) : "unavailable",
+		transient_detail_ready ? "ready" : "coarse-only", transient_pending ? ", pending" : "", transient_rejected_publications,
+		transient_rejected_publications == 1 ? "" : "s");
 }
 
 /*

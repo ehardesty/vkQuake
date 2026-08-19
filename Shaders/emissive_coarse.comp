@@ -9,8 +9,11 @@ layout (push_constant) uniform PushConsts
 {
 	uint num_lights;
 	uint first_tile;
+	uint publication_mode;
 }
 push_constants;
+
+layout (constant_id = 0) const bool transient_overlay = false;
 
 struct emissive_light_t
 {
@@ -38,14 +41,32 @@ layout (std430, set = 0, binding = 5) readonly restrict buffer emissive_lights_b
 {
 	emissive_light_t emissive_lights[];
 };
+struct emissive_tile_t
+{
+	uint first_source;
+	uint num_sources;
+	uint packed_tile;
+};
+layout (std430, set = 0, binding = 6) readonly restrict buffer emissive_tiles_buffer
+{
+	emissive_tile_t emissive_tiles[];
+};
+layout (std430, set = 0, binding = 7) readonly restrict buffer emissive_source_indices_buffer
+{
+	uint emissive_source_indices[];
+};
+layout (set = 0, binding = 8) uniform texture2D cacheable_image;
 
 #include "lightmap_coords.inc"
+#define EMISSIVE_OPTIONAL_SOURCE_INDICES
 #include "emissive_lighting.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
-	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	const emissive_tile_t tile = transient_overlay ? emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z] : emissive_tile_t (0, push_constants.num_lights, 0);
+	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
+	const ivec2 coords = transient_overlay ? tile_coords * 8 + ivec2 (gl_GlobalInvocationID.xy) : ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 
@@ -63,8 +84,10 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		contribution = CalculateEmissiveContribution (world_pos, normal, 0, push_constants.num_lights);
+		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources);
 	}
+	if (transient_overlay)
+		contribution += texelFetch (cacheable_image, coords, 0).rgb;
 
 	imageStore (output_image, coords, vec4 (contribution, 0.0f));
 }
