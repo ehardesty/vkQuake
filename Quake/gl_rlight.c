@@ -82,9 +82,73 @@ typedef struct emissive_world_fixture_s
 	int							  num_surfaces;
 } emissive_world_fixture_t;
 
+typedef enum emissive_entity_fixture_family_e
+{
+	EMISSIVE_ENTITY_FIXTURE_WALL_TORCH,
+	EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME,
+	EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME,
+	EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER,
+	EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER,
+	EMISSIVE_ENTITY_FIXTURE_LONG_TORCH,
+	EMISSIVE_ENTITY_FIXTURE_PYRE
+} emissive_entity_fixture_family_t;
+
+typedef struct emissive_entity_fixture_def_s
+{
+	const char						*classname;
+	const char						*model;
+	int								 frame;
+	int								 skin;
+	emissive_entity_fixture_family_t family;
+} emissive_entity_fixture_def_t;
+
+typedef struct emissive_entity_candidate_s
+{
+	const emissive_entity_fixture_def_t *definition;
+	uint32_t							 lump_hash;
+	int									 lump_ordinal;
+	vec3_t								 origin;
+	vec3_t								 angles;
+	vec3_t								 color;
+	float								 authored_light;
+	int									 frame;
+	int									 skin;
+	int									 style;
+	int									 spawnflags;
+	qboolean							 has_angles;
+	qboolean							 has_color;
+	qboolean							 has_frame;
+	qboolean							 has_skin;
+} emissive_entity_candidate_t;
+
+typedef struct emissive_entity_source_s
+{
+	const emissive_entity_fixture_def_t *definition;
+	uint32_t							 lump_hash;
+	int									 lump_ordinal;
+	int									 static_entity;
+	int									 candidate;
+	int									 style;
+} emissive_entity_source_t;
+
+#define EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION 1
+#define EMISSIVE_ENTITY_ORIGIN_TOLERANCE	  1.0f
+#define EMISSIVE_ENTITY_ANGLE_TOLERANCE		  1.0f
+
 static const emissive_texture_def_t emissive_texture_defs[] = {
 	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
 	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}},
+};
+
+static const emissive_entity_fixture_def_t emissive_entity_fixture_defs[] = {
+	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH},
+	{"light_flame_large_yellow", "progs/flame2.mdl", 1, 0, EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME},
+	{"light_flame_small_yellow", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME},
+	{"light_flame_small_white", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME},
+	{NULL, "progs/braztall.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER},
+	{NULL, "progs/brazshrt.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER},
+	{NULL, "progs/longtrch.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_LONG_TORCH},
+	{NULL, "progs/flame_pyre.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_PYRE},
 };
 
 static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area);
@@ -100,6 +164,290 @@ static int						 num_emissive_world_surface_lights;
 static qmodel_t					*emissive_surface_worldmodel;
 static uint32_t					 emissive_prepare_time_us;
 static qboolean					 emissive_world_lights_uploaded;
+static emissive_entity_candidate_t *emissive_entity_candidates;
+static int							num_emissive_entity_candidates;
+static emissive_entity_source_t	   *emissive_entity_sources;
+static int							num_emissive_entity_sources;
+static int							num_emissive_entity_candidates_parsed;
+static int							num_emissive_entity_candidates_matched;
+static int							num_emissive_entity_candidates_ambiguous;
+static int							num_emissive_entity_candidates_unmatched;
+static int							num_emissive_entity_fallback_sources;
+static int							num_emissive_entity_rejected_sources;
+static uint32_t						emissive_entity_lump_hash;
+static uint32_t						emissive_entity_discovery_time_us;
+static qboolean						emissive_entity_sources_matched;
+
+static void R_ClearEmissiveEntitySources (void)
+{
+	SAFE_FREE (emissive_entity_candidates);
+	SAFE_FREE (emissive_entity_sources);
+	num_emissive_entity_candidates = 0;
+	num_emissive_entity_sources = 0;
+	num_emissive_entity_candidates_parsed = 0;
+	num_emissive_entity_candidates_matched = 0;
+	num_emissive_entity_candidates_ambiguous = 0;
+	num_emissive_entity_candidates_unmatched = 0;
+	num_emissive_entity_fallback_sources = 0;
+	num_emissive_entity_rejected_sources = 0;
+	emissive_entity_lump_hash = 0;
+	emissive_entity_discovery_time_us = 0;
+	emissive_entity_sources_matched = false;
+}
+
+static const emissive_entity_fixture_def_t *R_EmissiveEntityFixtureDefForClassname (const char *classname)
+{
+	for (int i = 0; i < countof (emissive_entity_fixture_defs); ++i)
+		if (emissive_entity_fixture_defs[i].classname && !q_strcasecmp (classname, emissive_entity_fixture_defs[i].classname))
+			return &emissive_entity_fixture_defs[i];
+	return NULL;
+}
+
+static qboolean R_EmissiveEntityFixtureDefMatchesVisual (const emissive_entity_fixture_def_t *definition, const entity_t *entity)
+{
+	if (!entity->model || entity->model->needload || q_strcasecmp (entity->model->name, definition->model))
+		return false;
+	if (definition->frame >= 0 && entity->frame != definition->frame)
+		return false;
+	if (definition->skin >= 0 && entity->skinnum != definition->skin)
+		return false;
+	return true;
+}
+
+static const emissive_entity_fixture_def_t *R_EmissiveEntityFallbackDef (const entity_t *entity)
+{
+	const emissive_entity_fixture_def_t *match = NULL;
+	for (int i = 0; i < countof (emissive_entity_fixture_defs); ++i)
+	{
+		const emissive_entity_fixture_def_t *const definition = &emissive_entity_fixture_defs[i];
+		if (!R_EmissiveEntityFixtureDefMatchesVisual (definition, entity))
+			continue;
+		if (match && match->family != definition->family)
+			return NULL;
+		match = definition;
+	}
+	return match;
+}
+
+static void R_AppendEmissiveEntityCandidate (const emissive_entity_candidate_t *candidate, int *capacity)
+{
+	if (num_emissive_entity_candidates == *capacity)
+	{
+		*capacity = *capacity ? *capacity * 2 : 32;
+		emissive_entity_candidates = Mem_Realloc (emissive_entity_candidates, *capacity * sizeof (*emissive_entity_candidates));
+	}
+	emissive_entity_candidates[num_emissive_entity_candidates++] = *candidate;
+}
+
+static void R_AppendEmissiveEntitySource (const emissive_entity_source_t *source, int *capacity)
+{
+	if (num_emissive_entity_sources == *capacity)
+	{
+		*capacity = *capacity ? *capacity * 2 : 32;
+		emissive_entity_sources = Mem_Realloc (emissive_entity_sources, *capacity * sizeof (*emissive_entity_sources));
+	}
+	emissive_entity_sources[num_emissive_entity_sources++] = *source;
+}
+
+static void R_ParseEmissiveEntityCandidates (void)
+{
+	if (!cl.worldmodel || !cl.worldmodel->entities)
+		return;
+
+	const double parse_start = Sys_DoubleTime ();
+	const char	*data = cl.worldmodel->entities;
+	emissive_entity_lump_hash = COM_HashBlock (data, strlen (data));
+	int ordinal = 0;
+	int capacity = 0;
+
+	while (1)
+	{
+		data = COM_Parse (data);
+		if (!data || com_token[0] != '{')
+			break;
+
+		char						classname[128] = "";
+		char						model[MAX_QPATH] = "";
+		emissive_entity_candidate_t candidate;
+		memset (&candidate, 0, sizeof (candidate));
+		candidate.lump_hash = emissive_entity_lump_hash;
+		candidate.lump_ordinal = ordinal++;
+
+		qboolean has_origin = false;
+		qboolean malformed = false;
+		while (1)
+		{
+			data = COM_Parse (data);
+			if (!data)
+			{
+				malformed = true;
+				break;
+			}
+			if (com_token[0] == '}')
+				break;
+			char key[128];
+			q_strlcpy (key, com_token, sizeof (key));
+			while (key[0] && key[strlen (key) - 1] == ' ')
+				key[strlen (key) - 1] = 0;
+			data = COM_ParseEx (data, CPE_ALLOWTRUNC);
+			if (!data)
+			{
+				malformed = true;
+				break;
+			}
+
+			if (!strcmp (key, "classname"))
+				q_strlcpy (classname, com_token, sizeof (classname));
+			else if (!strcmp (key, "model"))
+				q_strlcpy (model, com_token, sizeof (model));
+			else if (!strcmp (key, "origin"))
+				has_origin = sscanf (com_token, "%f %f %f", &candidate.origin[0], &candidate.origin[1], &candidate.origin[2]) == 3;
+			else if (!strcmp (key, "angles"))
+				candidate.has_angles = sscanf (com_token, "%f %f %f", &candidate.angles[0], &candidate.angles[1], &candidate.angles[2]) == 3;
+			else if (!strcmp (key, "angle"))
+			{
+				candidate.angles[1] = atof (com_token);
+				candidate.has_angles = true;
+			}
+			else if (!strcmp (key, "_color"))
+				candidate.has_color = sscanf (com_token, "%f %f %f", &candidate.color[0], &candidate.color[1], &candidate.color[2]) == 3;
+			else if (!strcmp (key, "light"))
+				candidate.authored_light = atof (com_token);
+			else if (!strcmp (key, "style"))
+				candidate.style = atoi (com_token);
+			else if (!strcmp (key, "spawnflags"))
+				candidate.spawnflags = atoi (com_token);
+			else if (!strcmp (key, "frame"))
+			{
+				candidate.frame = atoi (com_token);
+				candidate.has_frame = true;
+			}
+			else if (!strcmp (key, "skin"))
+			{
+				candidate.skin = atoi (com_token);
+				candidate.has_skin = true;
+			}
+		}
+
+		candidate.definition = R_EmissiveEntityFixtureDefForClassname (classname);
+		if (!candidate.definition)
+		{
+			if (malformed)
+				break;
+			continue;
+		}
+		++num_emissive_entity_candidates_parsed;
+		if (malformed || !has_origin || candidate.style < 0 || candidate.style >= MAX_LIGHTSTYLES ||
+			(model[0] && q_strcasecmp (model, candidate.definition->model)) ||
+			(candidate.has_frame && candidate.definition->frame >= 0 && candidate.frame != candidate.definition->frame) ||
+			(candidate.has_skin && candidate.definition->skin >= 0 && candidate.skin != candidate.definition->skin))
+		{
+			++num_emissive_entity_rejected_sources;
+			if (malformed)
+				break;
+			continue;
+		}
+		R_AppendEmissiveEntityCandidate (&candidate, &capacity);
+	}
+
+	if (num_emissive_entity_candidates)
+		emissive_entity_candidates = Mem_Realloc (emissive_entity_candidates, num_emissive_entity_candidates * sizeof (*emissive_entity_candidates));
+	emissive_entity_discovery_time_us = (uint32_t)((Sys_DoubleTime () - parse_start) * 1000000.0);
+}
+
+static float R_EmissiveEntityAngleDifference (float a, float b)
+{
+	return fabsf (anglemod (a - b + 180.0f) - 180.0f);
+}
+
+static qboolean R_EmissiveEntityCandidateLocationMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
+{
+	vec3_t offset;
+	VectorSubtract (candidate->origin, entity->origin, offset);
+	if (DotProduct (offset, offset) > EMISSIVE_ENTITY_ORIGIN_TOLERANCE * EMISSIVE_ENTITY_ORIGIN_TOLERANCE)
+		return false;
+	if (candidate->has_angles)
+		for (int axis = 0; axis < 3; ++axis)
+			if (R_EmissiveEntityAngleDifference (candidate->angles[axis], entity->angles[axis]) > EMISSIVE_ENTITY_ANGLE_TOLERANCE)
+				return false;
+	return true;
+}
+
+static qboolean R_EmissiveEntityCandidateMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
+{
+	return R_EmissiveEntityFixtureDefMatchesVisual (candidate->definition, entity) &&
+		R_EmissiveEntityCandidateLocationMatchesVisual (candidate, entity);
+}
+
+static void R_MatchEmissiveEntitySources (void)
+{
+	if (emissive_entity_sources_matched || cls.signon < 2)
+		return;
+
+	const double	match_start = Sys_DoubleTime ();
+	qboolean *const claimed = cl.num_statics ? Mem_Alloc (cl.num_statics * sizeof (*claimed)) : NULL;
+	qboolean *const authored_association = cl.num_statics ? Mem_Alloc (cl.num_statics * sizeof (*authored_association)) : NULL;
+	if (claimed)
+	{
+		memset (claimed, 0, cl.num_statics * sizeof (*claimed));
+		memset (authored_association, 0, cl.num_statics * sizeof (*authored_association));
+	}
+	int capacity = 0;
+
+	for (int candidate_index = 0; candidate_index < num_emissive_entity_candidates; ++candidate_index)
+	{
+		const emissive_entity_candidate_t *const candidate = &emissive_entity_candidates[candidate_index];
+		int										 match = -1;
+		int										 match_count = 0;
+		for (int static_index = 0; static_index < cl.num_statics; ++static_index)
+		{
+			if (R_EmissiveEntityCandidateLocationMatchesVisual (candidate, cl.static_entities[static_index]))
+				authored_association[static_index] = true;
+			if (R_EmissiveEntityCandidateMatchesVisual (candidate, cl.static_entities[static_index]))
+			{
+				match = static_index;
+				++match_count;
+			}
+		}
+
+		if (match_count == 1 && !claimed[match])
+		{
+			emissive_entity_source_t source = {candidate->definition, candidate->lump_hash, candidate->lump_ordinal, match, candidate_index, candidate->style};
+			R_AppendEmissiveEntitySource (&source, &capacity);
+			claimed[match] = true;
+			++num_emissive_entity_candidates_matched;
+		}
+		else if (match_count > 1 || (match_count == 1 && claimed[match]))
+			++num_emissive_entity_candidates_ambiguous;
+		else
+			++num_emissive_entity_candidates_unmatched;
+	}
+
+	for (int static_index = 0; static_index < cl.num_statics; ++static_index)
+	{
+		if (claimed[static_index] || authored_association[static_index])
+			continue;
+		const emissive_entity_fixture_def_t *const definition = R_EmissiveEntityFallbackDef (cl.static_entities[static_index]);
+		if (!definition)
+			continue;
+		emissive_entity_source_t source = {definition, emissive_entity_lump_hash, -1, static_index, -1, 0};
+		R_AppendEmissiveEntitySource (&source, &capacity);
+		claimed[static_index] = true;
+		++num_emissive_entity_fallback_sources;
+	}
+
+	if (num_emissive_entity_sources)
+		emissive_entity_sources = Mem_Realloc (emissive_entity_sources, num_emissive_entity_sources * sizeof (*emissive_entity_sources));
+	Mem_Free (claimed);
+	Mem_Free (authored_association);
+	emissive_entity_sources_matched = true;
+	emissive_entity_discovery_time_us += (uint32_t)((Sys_DoubleTime () - match_start) * 1000000.0);
+	Con_DPrintf (
+		"RT emissives: entity fixtures %d parsed, %d matched, %d ambiguous, %d unmatched, %d fallback, %d rejected (%d sources, %.3f ms)\n",
+		num_emissive_entity_candidates_parsed, num_emissive_entity_candidates_matched, num_emissive_entity_candidates_ambiguous,
+		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_rejected_sources, num_emissive_entity_sources,
+		(double)emissive_entity_discovery_time_us / 1000.0);
+}
 
 static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
 {
@@ -139,6 +487,7 @@ static const emissive_texture_def_t *R_CacheableWorldEmissiveSurfaceDef (const m
 
 static void R_ClearEmissiveWorldSurfaces (void)
 {
+	R_ClearEmissiveEntitySources ();
 	SAFE_FREE (emissive_world_surfaces);
 	SAFE_FREE (emissive_world_fixtures);
 	SAFE_FREE (emissive_world_surface_lights);
@@ -184,6 +533,7 @@ void R_UpdateTransientEmissiveSources (void)
 		R_InvalidateTransientEmissiveLights ();
 		return;
 	}
+	R_MatchEmissiveEntitySources ();
 	emissive_light_t *lights = NULL;
 	int				 count = 0;
 	int				 capacity = 0;
@@ -618,6 +968,7 @@ static void R_BuildEmissiveWorldSurfaceCache (void)
 		R_BuildEmissiveWorldFixtures (worldmodel);
 	}
 	R_ClassifyEmissiveWorldReceivers (worldmodel);
+	R_ParseEmissiveEntityCandidates ();
 
 	emissive_surface_worldmodel = worldmodel;
 	emissive_prepare_time_us = (uint32_t)((Sys_DoubleTime () - prepare_start) * 1000000.0);
@@ -775,6 +1126,15 @@ void R_EmissiveRTStats_f (void)
 		rs_emissive_transient_gputime_valid ? va ("%.3f ms", (double)rs_emissive_transient_gputime_us / 1000.0) : "unavailable",
 		transient_detail_ready ? "ready" : "coarse-only", transient_pending ? ", pending" : "", transient_rejected_publications,
 		transient_rejected_publications == 1 ? "" : "s");
+	Con_Printf (
+		"RT emissive entity fixtures: table v%d, lump %08x, %d parsed candidate%s, %d matched, %d ambiguous, %d unmatched, %d fallback, "
+		"%d rejected, %d retained source%s, %u CPU bytes, %.3f ms CPU, %s\n",
+		EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION, emissive_entity_lump_hash, num_emissive_entity_candidates_parsed,
+		num_emissive_entity_candidates_parsed == 1 ? "" : "s", num_emissive_entity_candidates_matched, num_emissive_entity_candidates_ambiguous,
+		num_emissive_entity_candidates_unmatched, num_emissive_entity_fallback_sources, num_emissive_entity_rejected_sources, num_emissive_entity_sources,
+		num_emissive_entity_sources == 1 ? "" : "s",
+		(unsigned)(num_emissive_entity_candidates * sizeof (*emissive_entity_candidates) + num_emissive_entity_sources * sizeof (*emissive_entity_sources)),
+		(double)emissive_entity_discovery_time_us / 1000.0, emissive_entity_sources_matched ? "ready" : "awaiting static entities");
 }
 
 /*
