@@ -93,11 +93,12 @@ void main ()
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
 	{
 		const surface_t surf = surfaces[surface_index];
+		// Retained-visibility coordinates include the raster texel-center offset; remove it exactly once after scaling.
 		const float		s = retained_visibility
-			? (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 1.0f
+			? (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 0.5f
 			: float (coords.x - int (surf.packed_light_st & 0xFFFFu)) - 0.5f;
 		const float		t = retained_visibility
-			? (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 1.0f
+			? (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 0.5f
 			: float (coords.y - int (surf.packed_light_st >> 16)) - 0.5f;
 		vec3			tangent;
 		vec3			bitangent;
