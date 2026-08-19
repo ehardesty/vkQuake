@@ -36,7 +36,8 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays,
+	r_emissive_rt_bounce_resolution;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -4628,6 +4629,8 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_bounce_strength, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce_rays);
 	Cvar_SetCallback (&r_emissive_rt_bounce_rays, R_EmissiveBounceChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_bounce_resolution);
+	Cvar_SetCallback (&r_emissive_rt_bounce_resolution, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);

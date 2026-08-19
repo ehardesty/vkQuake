@@ -27,7 +27,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays,
+	r_emissive_rt_bounce_resolution;
 
 int gl_lightmap_format;
 
@@ -379,7 +380,7 @@ typedef struct emissive_bounce_sample_s
 } emissive_bounce_sample_t;
 typedef struct emissive_bounce_push_constants_s
 {
-	uint32_t mode, count, detail_scale, rays_per_sample;
+	uint32_t mode, count, coordinate_scale, rays_per_sample;
 	float strength, max_distance;
 } emissive_bounce_push_constants_t;
 COMPILE_TIME_ASSERT (emissive_bounce_surface_t, sizeof (emissive_bounce_surface_t) == 16);
@@ -387,7 +388,7 @@ COMPILE_TIME_ASSERT (emissive_bounce_sample_t, sizeof (emissive_bounce_sample_t)
 COMPILE_TIME_ASSERT (emissive_bounce_push_constants_t, sizeof (emissive_bounce_push_constants_t) == 24);
 #define EMISSIVE_BOUNCE_MAX_RAYS 64
 #define EMISSIVE_BOUNCE_MEMORY_BUDGET_MB 256
-#define EMISSIVE_BOUNCE_VERSION 1
+#define EMISSIVE_BOUNCE_VERSION 2
 enum
 {
 	EMISSIVE_BOUNCE_TIMESTAMP_TRANSFER,
@@ -404,6 +405,7 @@ static vulkan_memory_t emissive_bounce_memory, emissive_bounce_counters_memory;
 static uint32_t *emissive_bounce_counters;
 static uint32_t num_emissive_bounce_direct_texels, num_emissive_bounce_samples;
 static uint32_t emissive_bounce_rays_per_sample;
+static uint32_t emissive_bounce_sample_spacing;
 static uint64_t emissive_bounce_logical_bytes, emissive_bounce_required_bytes;
 static uint32_t emissive_bounce_prepare_time_us;
 static uint32_t emissive_bounce_build_time_us, emissive_bounce_resolve_time_us, emissive_bounce_filter_time_us, emissive_bounce_combine_time_us;
@@ -1567,7 +1569,8 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 	static int last;
 	int		   i;
 	const byte world_flags =
-		(is_world_model ? INDIRECT_WORLD_MODEL : 0) | (is_world_model && emissive_grouping && surf->emissive_influence ? INDIRECT_EMISSIVE_INFLUENCE : 0);
+		(is_world_model ? INDIRECT_WORLD_MODEL : 0) |
+		(is_world_model && emissive_grouping && (surf->emissive_influence || surf->emissive_bounce_influence) ? INDIRECT_EMISSIVE_INFLUENCE : 0);
 	if (last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum && indirect_draws[last].texture == surf->texinfo->texture &&
 		indirect_draws[last].is_bmodel == is_bmodel && indirect_draws[last].world_flags == world_flags)
 	{
@@ -2422,13 +2425,14 @@ void GL_SetupIndirectDraws ()
 ==================
 GL_RebuildIndirectDraws
 
-Regroup indirect draws after an RT-emissive runtime toggle without rebuilding
-lightmaps or changing the surface-data buffer referenced by their descriptors.
+Regroup indirect draws after an RT-emissive runtime toggle or receiver
+classification change without rebuilding lightmaps or changing the surface-data
+buffer referenced by their descriptors.
 ==================
 */
-void GL_RebuildIndirectDraws (qboolean emissive_grouping)
+void GL_RebuildIndirectDraws (qboolean emissive_grouping, qboolean receiver_classification_changed)
 {
-	if (!cl.worldmodel || !indirect_ready || indirect_emissive_grouping == emissive_grouping)
+	if (!cl.worldmodel || !indirect_ready || (!receiver_classification_changed && indirect_emissive_grouping == emissive_grouping))
 		return;
 
 	GL_WaitForDeviceIdle ();
@@ -3352,7 +3356,7 @@ void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
 	if (num_transient_emissive_tiles && vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
 		GL_RequestAccelerationStructure (RT_AS_CONSUMER_TRANSIENT_EMISSIVES);
 	if (regroup)
-		GL_RebuildIndirectDraws (true);
+		GL_RebuildIndirectDraws (true, true);
 	transient_emissive_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 	Con_DPrintf (
 		"RT emissives: %d transient source%s, %d changed; updated %d logical tile%s with %d source link%s in %.3f ms CPU\n", count,
@@ -3580,6 +3584,7 @@ static void R_DeleteEmissiveBounceResources (void)
 	emissive_bounce_filtered_buffer = emissive_bounce_counters_buffer = VK_NULL_HANDLE;
 	emissive_bounce_counters = NULL;
 	num_emissive_bounce_direct_texels = num_emissive_bounce_samples = emissive_bounce_rays_per_sample = 0;
+	emissive_bounce_sample_spacing = 0;
 	emissive_bounce_logical_bytes = emissive_bounce_required_bytes = 0;
 	emissive_bounce_prepare_time_us = emissive_bounce_build_time_us = emissive_bounce_resolve_time_us = 0;
 	emissive_bounce_filter_time_us = emissive_bounce_combine_time_us = 0;
@@ -3590,6 +3595,33 @@ static void R_DeleteEmissiveBounceResources (void)
 	GL_ResetEmissiveBounceTimestamp ();
 }
 
+static void R_SetEmissiveBounceInfluence (qboolean active)
+{
+	if (!cl.worldmodel)
+		return;
+
+	qboolean regroup = false;
+	msurface_t *const first = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int i = 0; i < cl.worldmodel->nummodelsurfaces; ++i)
+	{
+		msurface_t *const surface = &first[i];
+		const qboolean influenced =
+			active && surface->lightmaptexturenum >= 0 && R_SurfaceInEmissiveWorldAccelerationStructure (surface);
+		if (surface->emissive_bounce_influence != influenced)
+		{
+			surface->emissive_bounce_influence = influenced;
+			regroup = true;
+		}
+	}
+	if (regroup && indirect_emissive_grouping)
+		GL_RebuildIndirectDraws (true, true);
+}
+
+static uint32_t R_EmissiveBounceSampleSpacing (void)
+{
+	return CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? 1 : 2;
+}
+
 static void R_BuildEmissiveBounceResources (void)
 {
 	if (!vulkan_globals.ray_query || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !cl.worldmodel ||
@@ -3598,6 +3630,7 @@ static void R_BuildEmissiveBounceResources (void)
 		return;
 	emissive_bounce_admission_attempted = true;
 	emissive_bounce_rays_per_sample = CLAMP (1, (int)r_emissive_rt_bounce_rays.value, EMISSIVE_BOUNCE_MAX_RAYS);
+	emissive_bounce_sample_spacing = R_EmissiveBounceSampleSpacing ();
 	const double start = Sys_DoubleTime ();
 	emissive_bounce_surface_t *const surfaces = Mem_Alloc (num_surfaces * sizeof (*surfaces));
 	memset (surfaces, 0xFF, num_surfaces * sizeof (*surfaces));
@@ -3609,7 +3642,8 @@ static void R_BuildEmissiveBounceResources (void)
 			continue;
 		const uint32_t index = (uint32_t)(surface - cl.worldmodel->surfaces);
 		const uint32_t width = (surface->extents[0] >> 4) + 1, height = (surface->extents[1] >> 4) + 1;
-		const uint32_t bounce_width = (width + 1) / 2, bounce_height = (height + 1) / 2;
+		const uint32_t bounce_width = (width + emissive_bounce_sample_spacing - 1) / emissive_bounce_sample_spacing;
+		const uint32_t bounce_height = (height + emissive_bounce_sample_spacing - 1) / emissive_bounce_sample_spacing;
 		surfaces[index].direct_base = num_emissive_bounce_direct_texels;
 		surfaces[index].bounce_base = num_emissive_bounce_samples;
 		surfaces[index].packed_direct_size = width | (height << 16);
@@ -3685,6 +3719,7 @@ static void R_BuildEmissiveBounceResources (void)
 			Sys_Error ("vkMapMemory failed with code %i", (int)err);
 		emissive_bounce_counters[0] = emissive_bounce_counters[1] = 0;
 		emissive_bounce_pending = true;
+		R_SetEmissiveBounceInfluence (true);
 		if (CLAMP (0, (int)r_emissive_rt_debug.value, 5) == 5)
 			R_AllocateEmissiveBounceDebugLightmaps ();
 	}
@@ -4437,8 +4472,9 @@ void R_EmissiveBounceChanged_f (cvar_t *var)
 	if (!cl.worldmodel || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || !num_emissive_lights)
 		return;
 	const uint32_t rays_per_sample = CLAMP (1, (int)r_emissive_rt_bounce_rays.value, EMISSIVE_BOUNCE_MAX_RAYS);
+	const uint32_t sample_spacing = R_EmissiveBounceSampleSpacing ();
 	const qboolean preserve_transfer = emissive_bounce_ready && emissive_bounce_surfaces_buffer != VK_NULL_HANDLE &&
-		rays_per_sample == emissive_bounce_rays_per_sample;
+		rays_per_sample == emissive_bounce_rays_per_sample && sample_spacing == emissive_bounce_sample_spacing;
 	if (!preserve_transfer && (emissive_bounce_surfaces_buffer != VK_NULL_HANDLE || emissive_bounce_counters_buffer != VK_NULL_HANDLE))
 		GL_WaitForDeviceIdle ();
 	if (!preserve_transfer)
@@ -4449,19 +4485,24 @@ void R_EmissiveBounceChanged_f (cvar_t *var)
 	GL_ResetEmissiveDetailTimestamp ();
 	if (r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f)
 	{
+		R_SetEmissiveBounceInfluence (false);
 		emissive_bounce_pending = emissive_bounce_recombine_pending = false;
 		emissive_bounce_recorded = false;
 		emissive_bounce_debug_pending = emissive_bounce_debug_ready = false;
 	}
 	else if (preserve_transfer)
 	{
+		R_SetEmissiveBounceInfluence (true);
 		emissive_bounce_pending = false;
 		emissive_bounce_recombine_pending = true;
 		if (CLAMP (0, (int)r_emissive_rt_debug.value, 5) == 5)
 			emissive_bounce_debug_pending = true;
 	}
 	else
+	{
 		R_BuildEmissiveBounceResources ();
+		R_SetEmissiveBounceInfluence (emissive_bounce_surfaces_buffer != VK_NULL_HANDLE);
+	}
 }
 
 qboolean R_EmissiveBounceDebugReady (void)
@@ -4597,7 +4638,8 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 	tlas_write.descriptorCount = 1;
 	tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 	vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
-	emissive_bounce_push_constants_t constants = {1, num_emissive_bounce_samples, 1, emissive_bounce_rays_per_sample,
+	emissive_bounce_push_constants_t constants = {
+		1, num_emissive_bounce_samples, emissive_bounce_sample_spacing, emissive_bounce_rays_per_sample,
 		CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f};
 	R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 	vkCmdDispatch (cbx->cb, (num_emissive_bounce_samples + 7) / 8, 1, 1);
@@ -4627,7 +4669,7 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			continue;
 		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &lightmap->emissive_bounce_descriptor_set, 0, NULL);
 		constants.mode = 4;
-		constants.detail_scale = 1;
+		constants.coordinate_scale = 1;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (lightmap->emissive_texture->width + 7) / 8, (lightmap->emissive_texture->height + 7) / 8, 1);
 		R_PublishEmissiveBounceImage (cbx, lightmap->emissive_texture);

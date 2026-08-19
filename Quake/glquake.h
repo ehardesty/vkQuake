@@ -897,7 +897,7 @@ void GL_DeleteBModelVertexBuffer (void);
 void GL_DeleteBModelAccelerationStructures (void);
 void GL_DeleteEmissiveWorldAccelerationStructure (void);
 void GL_BuildBModelVertexBuffer (void);
-void GL_RebuildIndirectDraws (qboolean emissive_grouping);
+void GL_RebuildIndirectDraws (qboolean emissive_grouping, qboolean receiver_classification_changed);
 typedef enum
 {
 	RT_AS_CONSUMER_CACHEABLE_EMISSIVES,

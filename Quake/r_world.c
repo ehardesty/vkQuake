@@ -1434,7 +1434,8 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 		for (s = t->texturechains[chain]; s; s = s->texturechains[chain])
 		{
 			const qboolean bounce_debug = CLAMP (0, (int)r_emissive_rt_debug.value, 5) == 5;
-			const qboolean surface_emissive = model == cl.worldmodel && (bounce_debug || s->emissive_influence) && r_emissive_rt.value > 0.0f &&
+			const qboolean surface_emissive = model == cl.worldmodel &&
+				(bounce_debug || s->emissive_influence || s->emissive_bounce_influence) && r_emissive_rt.value > 0.0f &&
 				gl_fullbrights.value > 0.0f && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
 			gltexture_t *surface_emissive_texture = NULL;
 			if (surface_emissive)

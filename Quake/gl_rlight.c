@@ -40,6 +40,7 @@ cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_strength = {"r_emissive_rt_bounce_strength", "0.65", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_rays = {"r_emissive_rt_bounce_rays", "8", CVAR_NONE};
+cvar_t r_emissive_rt_bounce_resolution = {"r_emissive_rt_bounce_resolution", "0", CVAR_NONE};
 
 /*
 =============================================================================
@@ -1024,6 +1025,7 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel, const emissi
 		msurface_t *const surface = &first_surface[i];
 		surface->cacheable_emissive_influence = false;
 		surface->emissive_influence = false;
+		surface->emissive_bounce_influence = false;
 		if (surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
 			continue;
 		for (int light = 0; light < num_lights; ++light)
@@ -1141,7 +1143,7 @@ static void R_ActivateEmissiveWorldSurfaceCache (void)
 		return;
 	if (!R_EmissiveDetailReady () && R_EmissiveDetailAvailable ())
 		GL_RequestAccelerationStructure (RT_AS_CONSUMER_CACHEABLE_EMISSIVES);
-	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
+	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0, false);
 }
 
 void R_EmissiveRTPrepareNewMap (void)
@@ -1170,7 +1172,7 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 		R_EmissiveBounceDebugChanged_f (&r_emissive_rt_debug);
 	}
 	else if (cl.worldmodel)
-		GL_RebuildIndirectDraws (false);
+		GL_RebuildIndirectDraws (false, false);
 }
 
 void R_EmissiveRTStats_f (void)
@@ -1310,10 +1312,12 @@ void R_EmissiveRTStats_f (void)
 		rs_emissive_radiance_gputime_valid ? va ("%.3f ms", (double)rs_emissive_radiance_gputime_us / 1000.0) : "unavailable",
 		radiance_pending ? ", pending" : "");
 	Con_Printf (
-		"RT emissive bounce: %s, strength %.3f, %d ray%s/sample, %u direct texel%s, %u half-resolution sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
+		"RT emissive bounce: %s, %s resolution (%d world units), strength %.3f, %d ray%s/sample, %u direct texel%s, %u receiver sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
 		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s%s\n",
 		r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f ? "disabled" :
 			bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable",
+		CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? "full-coarse" : "half-coarse",
+		CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? 16 : 32,
 		CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64),
 		CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64) == 1 ? "" : "s", bounce_direct_texels,
 		bounce_direct_texels == 1 ? "" : "s", bounce_samples, bounce_samples == 1 ? "" : "s", bounce_rays, bounce_rays == 1 ? "" : "s",
