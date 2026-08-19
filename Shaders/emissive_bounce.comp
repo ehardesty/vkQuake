@@ -1,0 +1,228 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "globals.inc"
+
+#define BOUNCE_TAP_INVALID 0xFFFFFFFFu
+#define BOUNCE_TAPS 8u
+
+layout (push_constant) uniform PushConsts
+{
+	uint mode;
+	uint count;
+	uint detail_scale;
+	uint unused;
+	float strength;
+	float max_distance;
+}
+push_constants;
+
+struct bounce_surface_t
+{
+	uint direct_base;
+	uint bounce_base;
+	uint packed_direct_size;
+	uint packed_bounce_size;
+};
+
+struct bounce_sample_t
+{
+	uint surface;
+	uint packed_st;
+};
+
+layout (set = 0, binding = 0, rgba16f) uniform image2D emissive_image;
+layout (set = 0, binding = 1) uniform utexture2D surface_indices;
+layout (std430, set = 0, binding = 2) readonly restrict buffer surfaces_buffer { surface_t surfaces[]; };
+layout (std430, set = 0, binding = 3) readonly restrict buffer world_verts_buffer { world_vert_t world_verts[]; };
+layout (std430, set = 0, binding = 4) readonly restrict buffer bounce_surfaces_buffer { bounce_surface_t bounce_surfaces[]; };
+layout (std430, set = 0, binding = 5) readonly restrict buffer bounce_samples_buffer { bounce_sample_t bounce_samples[]; };
+layout (std430, set = 0, binding = 6) readonly restrict buffer primitive_surfaces_buffer { uint primitive_surfaces[]; };
+layout (std430, set = 0, binding = 7) restrict buffer bounce_taps_buffer { uint bounce_taps[]; };
+layout (std430, set = 0, binding = 8) restrict buffer direct_buffer { vec4 direct_values[]; };
+layout (std430, set = 0, binding = 9) readonly restrict buffer reflectance_buffer { vec4 reflectance_values[]; };
+layout (std430, set = 0, binding = 10) restrict buffer bounce_buffer { vec4 bounce_values[]; };
+layout (std430, set = 0, binding = 11) restrict buffer filtered_buffer { vec4 filtered_values[]; };
+layout (std430, set = 0, binding = 12) restrict buffer counters_buffer { uint counters[]; };
+layout (set = 1, binding = 0) uniform accelerationStructureEXT world_tlas;
+
+#include "lightmap_coords.inc"
+
+uint Hash (uint value)
+{
+	value ^= value >> 16;
+	value *= 0x7FEB352Du;
+	value ^= value >> 15;
+	value *= 0x846CA68Bu;
+	return value ^ (value >> 16);
+}
+
+vec2 Random2 (uint seed)
+{
+	return vec2 (Hash (seed), Hash (seed ^ 0x9E3779B9u)) * (1.0f / 4294967296.0f);
+}
+
+uint LogicalIndex (uint surface_index, ivec2 atlas_coords)
+{
+	const bounce_surface_t meta = bounce_surfaces[surface_index];
+	if (meta.direct_base == BOUNCE_TAP_INVALID)
+		return BOUNCE_TAP_INVALID;
+	const surface_t surf = surfaces[surface_index];
+	const ivec2 local = atlas_coords - ivec2 (int (surf.packed_light_st & 0xFFFFu), int (surf.packed_light_st >> 16));
+	const ivec2 size = ivec2 (int (meta.packed_direct_size & 0xFFFFu), int (meta.packed_direct_size >> 16));
+	if (any (lessThan (local, ivec2 (0))) || any (greaterThanEqual (local, size)))
+		return BOUNCE_TAP_INVALID;
+	return meta.direct_base + uint (local.y * size.x + local.x);
+}
+
+void CaptureDirect ()
+{
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
+		return;
+	const uint surface = texelFetch (surface_indices, coords, 0).x;
+	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
+		return;
+	const uint logical = LogicalIndex (surface, coords);
+	if (logical != BOUNCE_TAP_INVALID)
+		direct_values[logical] = vec4 (imageLoad (emissive_image, coords).rgb, 0.0f);
+}
+
+void BuildTransfer ()
+{
+	const uint sample_index = gl_GlobalInvocationID.x;
+	if (sample_index >= push_constants.count)
+		return;
+	const bounce_sample_t receiver = bounce_samples[sample_index];
+	const surface_t surf = surfaces[receiver.surface];
+	const float s = float (receiver.packed_st & 0xFFFFu) * 2.0f - 0.5f;
+	const float t = float (receiver.packed_st >> 16) * 2.0f - 0.5f;
+	vec3 tangent;
+	vec3 bitangent;
+	const vec3 origin = CalculateWorldPos (surf, s, t, tangent, bitangent);
+	vec3 normal = vec3 (surf.normal_x, surf.normal_y, surf.normal_z);
+	if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
+		normal = -normal;
+	const vec3 basis_x = normalize (tangent);
+	const vec3 basis_y = normalize (cross (normal, basis_x));
+	for (uint tap = 0u; tap < BOUNCE_TAPS; ++tap)
+	{
+		const vec2 random = Random2 (sample_index * BOUNCE_TAPS + tap);
+		const float radius = sqrt (random.x);
+		const float phi = 6.28318530718f * random.y;
+		const vec3 direction = normalize (basis_x * (radius * cos (phi)) + basis_y * (radius * sin (phi)) + normal * sqrt (1.0f - random.x));
+		rayQueryEXT query;
+		rayQueryInitializeEXT (query, world_tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin + normal * 0.5f, 0.0f,
+			direction, push_constants.max_distance);
+		while (rayQueryProceedEXT (query)) {}
+		uint logical = BOUNCE_TAP_INVALID;
+		if (rayQueryGetIntersectionTypeEXT (query, true) != gl_RayQueryCommittedIntersectionNoneEXT)
+		{
+			const uint hit_surface = primitive_surfaces[rayQueryGetIntersectionPrimitiveIndexEXT (query, true)];
+			const bounce_surface_t hit_meta = bounce_surfaces[hit_surface];
+			if (hit_meta.direct_base != BOUNCE_TAP_INVALID)
+			{
+				const vec3 hit = origin + direction * rayQueryGetIntersectionTEXT (query, true);
+				const surface_t hit_surf = surfaces[hit_surface];
+				vec3 hit_normal = vec3 (hit_surf.normal_x, hit_surf.normal_y, hit_surf.normal_z);
+				if (((hit_surf.packed_tex_edgecount >> 15) & 1u) != 0u)
+					hit_normal = -hit_normal;
+				if (dot (hit_normal, -direction) > 0.0f)
+				{
+					const ivec2 size = ivec2 (int (hit_meta.packed_direct_size & 0xFFFFu), int (hit_meta.packed_direct_size >> 16));
+					const ivec2 local = ivec2 (floor (vec2 (dot (hit, hit_surf.vecs[0].xyz) + hit_surf.vecs[0].w,
+						dot (hit, hit_surf.vecs[1].xyz) + hit_surf.vecs[1].w) / 16.0f + 0.5f));
+					if (all (greaterThanEqual (local, ivec2 (0))) && all (lessThan (local, size)))
+						logical = hit_meta.direct_base + uint (local.y * size.x + local.x);
+				}
+			}
+		}
+		bounce_taps[sample_index * BOUNCE_TAPS + tap] = logical;
+		atomicAdd (counters[logical == BOUNCE_TAP_INVALID ? 1u : 0u], 1u);
+	}
+}
+
+void ResolveBounce ()
+{
+	const uint sample_index = gl_GlobalInvocationID.x;
+	if (sample_index >= push_constants.count)
+		return;
+	vec3 sum = vec3 (0.0f);
+	for (uint tap = 0u; tap < BOUNCE_TAPS; ++tap)
+	{
+		const uint logical = bounce_taps[sample_index * BOUNCE_TAPS + tap];
+		if (logical != BOUNCE_TAP_INVALID)
+			sum += reflectance_values[logical].rgb * direct_values[logical].rgb;
+	}
+	bounce_values[sample_index] = vec4 (sum * (push_constants.strength / float (BOUNCE_TAPS)), 0.0f);
+}
+
+void FilterBounce ()
+{
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	if (any (greaterThanEqual (coords, textureSize (surface_indices, 0))))
+		return;
+	const uint surface = texelFetch (surface_indices, coords, 0).x;
+	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
+		return;
+	const bounce_surface_t meta = bounce_surfaces[surface];
+	if (meta.bounce_base == BOUNCE_TAP_INVALID)
+		return;
+	const surface_t surf = surfaces[surface];
+	const ivec2 local = coords - ivec2 (int (surf.packed_light_st & 0xFFFFu), int (surf.packed_light_st >> 16));
+	const ivec2 direct_size = ivec2 (int (meta.packed_direct_size & 0xFFFFu), int (meta.packed_direct_size >> 16));
+	if (any (lessThan (local, ivec2 (0))) || any (greaterThanEqual (local, direct_size)))
+		return;
+	const ivec2 bounce_size = ivec2 (int (meta.packed_bounce_size & 0xFFFFu), int (meta.packed_bounce_size >> 16));
+	const vec2 sample_coord = vec2 (local) * 0.5f;
+	const ivec2 base = ivec2 (floor (sample_coord));
+	const vec2 fraction = fract (sample_coord);
+	vec3 rows[2];
+	for (int y = 0; y < 2; ++y)
+	{
+		const ivec2 p0 = clamp (base + ivec2 (0, y), ivec2 (0), bounce_size - 1);
+		const ivec2 p1 = clamp (base + ivec2 (1, y), ivec2 (0), bounce_size - 1);
+		rows[y] = mix (bounce_values[meta.bounce_base + uint (p0.y * bounce_size.x + p0.x)].rgb,
+			bounce_values[meta.bounce_base + uint (p1.y * bounce_size.x + p1.x)].rgb, fraction.x);
+	}
+	filtered_values[meta.direct_base + uint (local.y * direct_size.x + local.x)] = vec4 (mix (rows[0], rows[1], fraction.y), 0.0f);
+}
+
+void CombineBounce ()
+{
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
+		return;
+	const ivec2 coarse_coords = coords / int (push_constants.detail_scale);
+	const uint surface = texelFetch (surface_indices, coarse_coords, 0).x;
+	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
+		return;
+	const uint logical = LogicalIndex (surface, coarse_coords);
+	if (logical == BOUNCE_TAP_INVALID)
+		return;
+	const vec4 direct = imageLoad (emissive_image, coords);
+	imageStore (emissive_image, coords, vec4 (direct.rgb + filtered_values[logical].rgb, direct.a));
+}
+
+layout (local_size_x = 8, local_size_y = 8) in;
+void main ()
+{
+	if (push_constants.mode == 0u)
+		CaptureDirect ();
+	else if (push_constants.mode == 1u)
+	{
+		if (gl_LocalInvocationID.y == 0u)
+			BuildTransfer ();
+	}
+	else if (push_constants.mode == 2u)
+	{
+		if (gl_LocalInvocationID.y == 0u)
+			ResolveBounce ();
+	}
+	else if (push_constants.mode == 3u)
+		FilterBounce ();
+	else
+		CombineBounce ();
+}

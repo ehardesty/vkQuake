@@ -1216,6 +1216,10 @@ void R_EmissiveRTStats_f (void)
 	qboolean emissive_world_as_ready;
 	qboolean live_as_ready;
 	uint32_t live_as_instances;
+	uint32_t bounce_direct_texels, bounce_samples, bounce_rays, bounce_valid_taps, bounce_invalid_taps;
+	uint64_t bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes;
+	uint32_t bounce_prepare_time_us, bounce_build_time_us, bounce_resolve_time_us, bounce_filter_time_us, bounce_combine_time_us;
+	qboolean bounce_gpu_time_valid, bounce_budget_limited, bounce_pending, bounce_ready;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveDetailLightmapStats (
 		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
@@ -1228,6 +1232,10 @@ void R_EmissiveRTStats_f (void)
 	R_EmissiveRadianceStats (
 		&radiance_groups, &radiance_tiles, &radiance_source_links, &radiance_tile_groups, &radiance_max_groups_per_tile, &radiance_cpu_bytes,
 		&radiance_gpu_bytes, &radiance_cpu_time_us, &radiance_visibility_available, &radiance_pending);
+	R_EmissiveBounceStats (
+		&bounce_direct_texels, &bounce_samples, &bounce_rays, &bounce_valid_taps, &bounce_invalid_taps, &bounce_logical_bytes,
+		&bounce_allocated_bytes, &bounce_budget_bytes, &bounce_prepare_time_us, &bounce_build_time_us, &bounce_resolve_time_us,
+		&bounce_filter_time_us, &bounce_combine_time_us, &bounce_gpu_time_valid, &bounce_budget_limited, &bounce_pending, &bounce_ready);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -1296,6 +1304,17 @@ void R_EmissiveRTStats_f (void)
 		(double)radiance_cpu_time_us / 1000.0,
 		rs_emissive_radiance_gputime_valid ? va ("%.3f ms", (double)rs_emissive_radiance_gputime_us / 1000.0) : "unavailable",
 		radiance_pending ? ", pending" : "");
+	Con_Printf (
+		"RT emissive bounce: %s, %u direct texel%s, %u half-resolution sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
+		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s%s\n",
+		bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable", bounce_direct_texels,
+		bounce_direct_texels == 1 ? "" : "s", bounce_samples, bounce_samples == 1 ? "" : "s", bounce_rays, bounce_rays == 1 ? "" : "s",
+		bounce_valid_taps, bounce_invalid_taps, bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes,
+		(double)bounce_prepare_time_us / 1000.0,
+		bounce_gpu_time_valid ? va ("%.3f/%.3f/%.3f/%.3f ms", (double)bounce_build_time_us / 1000.0,
+			(double)bounce_resolve_time_us / 1000.0, (double)bounce_filter_time_us / 1000.0, (double)bounce_combine_time_us / 1000.0) :
+			"unavailable",
+		bounce_budget_limited ? ", budget exceeded; direct-only fallback" : "");
 	Con_Printf (
 		"RT emissive entity fixtures: table v%d, lump %08x, %d parsed candidate%s, %d matched, %d ambiguous, %d unmatched, %d fallback, "
 		"%d ambiguous fallback, %d rejected, %d retained source%s, %u CPU bytes, %.3f ms CPU, %s\n",

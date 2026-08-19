@@ -1638,6 +1638,27 @@ void R_CreateDescriptorSetLayouts ()
 			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_compute_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive compute");
 	}
+	if (vulkan_globals.ray_query)
+	{
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, bindings, 13);
+		for (int i = 0; i < countof (bindings); ++i)
+		{
+			bindings[i].binding = i;
+			bindings[i].descriptorCount = 1;
+			bindings[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : i == 1 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		}
+		descriptor_set_layout_create_info.bindingCount = countof (bindings);
+		descriptor_set_layout_create_info.pBindings = bindings;
+		memset (&vulkan_globals.emissive_bounce_set_layout, 0, sizeof (vulkan_globals.emissive_bounce_set_layout));
+		vulkan_globals.emissive_bounce_set_layout.num_storage_images = 1;
+		vulkan_globals.emissive_bounce_set_layout.num_sampled_images = 1;
+		vulkan_globals.emissive_bounce_set_layout.num_storage_buffers = 11;
+		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_bounce_set_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_bounce_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive bounce");
+	}
 
 	{
 		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, indirect_compute_layout_bindings, 6);
@@ -2155,6 +2176,22 @@ void R_CreatePipelineLayouts ()
 			(uint64_t)vulkan_globals.emissive_detail_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_detail_pipeline_layout");
 		vulkan_globals.emissive_detail_pipeline.layout.push_constant_range = emissive_push_constant_range;
 
+		VkDescriptorSetLayout bounce_layouts[2] = {vulkan_globals.emissive_bounce_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
+		ZEROED_STRUCT (VkPushConstantRange, bounce_push_range);
+		bounce_push_range.size = 6 * sizeof (uint32_t);
+		bounce_push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, bounce_layout_info);
+		bounce_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		bounce_layout_info.setLayoutCount = countof (bounce_layouts);
+		bounce_layout_info.pSetLayouts = bounce_layouts;
+		bounce_layout_info.pushConstantRangeCount = 1;
+		bounce_layout_info.pPushConstantRanges = &bounce_push_range;
+		err = vkCreatePipelineLayout (vulkan_globals.device, &bounce_layout_info, NULL, &vulkan_globals.emissive_bounce_pipeline.layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_bounce_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_bounce_pipeline_layout");
+		vulkan_globals.emissive_bounce_pipeline.layout.push_constant_range = bounce_push_range;
+
 		// Update lightmaps RT
 		VkDescriptorSetLayout update_lightmap_rt_descriptor_set_layouts[2] = {
 			vulkan_globals.lightmap_compute_set_layout.handle,
@@ -2567,6 +2604,7 @@ DECLARE_SHADER_MODULE (update_lightmap_10bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
 DECLARE_SHADER_MODULE (emissive_detail_comp);
+DECLARE_SHADER_MODULE (emissive_bounce_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
 DECLARE_SHADER_MODULE (mesh_interpolate_comp);
 DECLARE_SHADER_MODULE (skinning_comp);
@@ -4061,6 +4099,7 @@ static void R_CreateUpdateLightmapPipelines ()
 		"emissive_radiance_overlay_detail");
 	if (vulkan_globals.ray_query)
 	{
+		R_CreateComputePipeline (&vulkan_globals.emissive_bounce_pipeline, emissive_bounce_comp_module, 0, NULL, "emissive_bounce");
 		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
 		const VkSpecializationMapEntry transient_detail_entries[] = {{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}};
 		const uint32_t				   transient_detail_data[] = {true, false};
@@ -4151,6 +4190,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
 	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
+	CREATE_SHADER_MODULE_COND (emissive_bounce_comp, vulkan_globals.ray_query);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
 #endif
@@ -4227,6 +4267,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
 	DESTROY_SHADER_MODULE (emissive_detail_comp);
+	DESTROY_SHADER_MODULE (emissive_bounce_comp);
 	DESTROY_SHADER_MODULE (ray_debug_comp);
 	DESTROY_SHADER_MODULE (mesh_interpolate_comp);
 	DESTROY_SHADER_MODULE (skinning_comp);
@@ -4472,6 +4513,11 @@ void R_DestroyPipelines (void)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
 		vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
+	}
+	if (vulkan_globals.emissive_bounce_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bounce_pipeline.handle, NULL);
+		vulkan_globals.emissive_bounce_pipeline.handle = VK_NULL_HANDLE;
 	}
 	if (vulkan_globals.emissive_transient_detail_pipeline.handle != VK_NULL_HANDLE)
 	{

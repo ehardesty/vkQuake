@@ -51,6 +51,7 @@ shaders = [
     'Shaders/ray_debug.comp',
     'Shaders/emissive_coarse.comp',
     'Shaders/emissive_detail.comp',
+    'Shaders/emissive_bounce.comp',
     'Shaders/mesh_interpolate.comp',
     'Shaders/skinning.comp',
 ]

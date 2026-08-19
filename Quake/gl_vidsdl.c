@@ -147,10 +147,11 @@ static qboolean			emissive_coarse_timestamps_written[DOUBLE_BUFFERED];
 static qboolean			emissive_detail_work_written[DOUBLE_BUFFERED];
 static qboolean			emissive_transient_timestamps_written[DOUBLE_BUFFERED];
 static qboolean			emissive_radiance_timestamps_written[DOUBLE_BUFFERED];
+static qboolean			emissive_bounce_timestamps_written[DOUBLE_BUFFERED];
 static uint32_t			emissive_transient_detail_generations[DOUBLE_BUFFERED];
 static qboolean			live_as_timestamps_written[DOUBLE_BUFFERED];
 
-#define TIMESTAMP_QUERY_COUNT				 12
+#define TIMESTAMP_QUERY_COUNT				 19
 #define TIMESTAMP_QUERY_FRAME_START		 0
 #define TIMESTAMP_QUERY_FRAME_END		 1
 #define TIMESTAMP_QUERY_EMISSIVE_START	 2
@@ -163,6 +164,13 @@ static qboolean			live_as_timestamps_written[DOUBLE_BUFFERED];
 #define TIMESTAMP_QUERY_TRANSIENT_END	 9
 #define TIMESTAMP_QUERY_RADIANCE_START		 10
 #define TIMESTAMP_QUERY_RADIANCE_END		 11
+#define TIMESTAMP_QUERY_BOUNCE_START		 12
+#define TIMESTAMP_QUERY_BOUNCE_TRANSFER_END 13
+#define TIMESTAMP_QUERY_BOUNCE_RESOLVE_END  14
+#define TIMESTAMP_QUERY_BOUNCE_FILTER_END	 15
+#define TIMESTAMP_QUERY_BOUNCE_COARSE_END	 16
+#define TIMESTAMP_QUERY_BOUNCE_DETAIL_START 17
+#define TIMESTAMP_QUERY_BOUNCE_DETAIL_END	 18
 
 uint32_t rs_emissive_coarse_gputime_us;
 qboolean rs_emissive_coarse_gputime_valid;
@@ -3347,6 +3355,39 @@ void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx)
 	emissive_detail_work_written[current_cb_index] = true;
 }
 
+void GL_ResetEmissiveBounceTimestamp (void)
+{
+	memset (emissive_bounce_timestamps_written, 0, sizeof (emissive_bounce_timestamps_written));
+}
+
+static void GL_WriteEmissiveBounceTimestamp (cb_context_t *cbx, uint32_t query)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+		vkCmdWriteTimestamp (
+			cbx->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + query);
+}
+
+void GL_BeginEmissiveBounceTimestamp (cb_context_t *cbx)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+	{
+		vkCmdResetQueryPool (
+			cbx->cb, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BOUNCE_START, 7);
+		GL_WriteEmissiveBounceTimestamp (cbx, TIMESTAMP_QUERY_BOUNCE_START);
+	}
+}
+
+void GL_MarkEmissiveBounceTimestamp (cb_context_t *cbx, uint32_t phase)
+{
+	static const uint32_t queries[] = {TIMESTAMP_QUERY_BOUNCE_TRANSFER_END, TIMESTAMP_QUERY_BOUNCE_RESOLVE_END,
+		TIMESTAMP_QUERY_BOUNCE_FILTER_END, TIMESTAMP_QUERY_BOUNCE_COARSE_END, TIMESTAMP_QUERY_BOUNCE_DETAIL_START,
+		TIMESTAMP_QUERY_BOUNCE_DETAIL_END};
+	assert (phase < countof (queries));
+	GL_WriteEmissiveBounceTimestamp (cbx, queries[phase]);
+	if (phase == countof (queries) - 1)
+		emissive_bounce_timestamps_written[current_cb_index] = true;
+}
+
 void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx)
 {
 	if (timestamp_query_pool != VK_NULL_HANDLE)
@@ -3493,6 +3534,28 @@ void GL_BeginRenderingTask (void *unused)
 		}
 		R_EmissiveDetailCompleted ();
 		emissive_detail_work_written[current_cb_index] = false;
+	}
+	if (emissive_bounce_timestamps_written[current_cb_index])
+	{
+		uint32_t build_time_us = 0, resolve_time_us = 0, filter_time_us = 0, combine_time_us = 0;
+		qboolean valid = false;
+		if (timestamp_query_pool != VK_NULL_HANDLE)
+		{
+			uint64_t timestamps[7];
+			if (vkGetQueryPoolResults (
+					vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BOUNCE_START, 7,
+					sizeof (timestamps), timestamps, sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+			{
+				const double period = (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0;
+				build_time_us = (uint32_t)((double)(timestamps[1] - timestamps[0]) * period);
+				resolve_time_us = (uint32_t)((double)(timestamps[2] - timestamps[1]) * period);
+				filter_time_us = (uint32_t)((double)(timestamps[3] - timestamps[2]) * period);
+				combine_time_us = (uint32_t)(((double)(timestamps[4] - timestamps[3]) + (double)(timestamps[6] - timestamps[5])) * period);
+				valid = true;
+			}
+		}
+		R_EmissiveBounceCompleted (build_time_us, resolve_time_us, filter_time_us, combine_time_us, valid);
+		emissive_bounce_timestamps_written[current_cb_index] = false;
 	}
 	if (emissive_transient_timestamps_written[current_cb_index])
 	{

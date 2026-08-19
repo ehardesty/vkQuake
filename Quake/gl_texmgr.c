@@ -1569,6 +1569,57 @@ static void TexMgr_LoadFullbrightMetadata (gltexture_t *glt, const byte *data)
 	glt->fullbright_coverage = (float)(coverage / pixel_count);
 }
 
+static void TexMgr_LoadDiffuseMetadata (gltexture_t *glt, const byte *data)
+{
+	glt->diffuse_color[0] = glt->diffuse_color[1] = glt->diffuse_color[2] = 0.5f;
+	if (!data || !glt->source_width || !glt->source_height ||
+		(glt->source_format != SRC_INDEXED && glt->source_format != SRC_INDEXED_PALETTE && glt->source_format != SRC_RGBA))
+		return;
+	const int pixel_count = glt->source_width * glt->source_height;
+	const byte *palette = NULL;
+	int palette_colors = 0;
+	if (glt->source_format == SRC_INDEXED_PALETTE)
+	{
+		const byte *const palette_data = data + pixel_count / 64 * 85;
+		unsigned short colors;
+		memcpy (&colors, palette_data, sizeof (colors));
+		palette_colors = LittleShort (colors);
+		palette = palette_data + sizeof (colors);
+	}
+	double color[3] = {0.0, 0.0, 0.0};
+	double weight = 0.0;
+	for (int i = 0; i < pixel_count; ++i)
+	{
+		const byte *rgba;
+		double alpha = 1.0;
+		if (glt->source_format == SRC_INDEXED)
+		{
+			const byte index = data[i];
+			if (index >= 224)
+				continue;
+			rgba = (const byte *)&d_8to24table[index];
+		}
+		else if (glt->source_format == SRC_INDEXED_PALETTE)
+		{
+			const byte index = data[i];
+			if (index >= 224 || index >= palette_colors)
+				continue;
+			rgba = &palette[index * 3];
+		}
+		else
+		{
+			rgba = &data[i * 4];
+			alpha = (double)rgba[3] / 255.0;
+		}
+		for (int channel = 0; channel < 3; ++channel)
+			color[channel] += pow ((double)rgba[channel] / 255.0, 2.2) * alpha;
+		weight += alpha;
+	}
+	if (weight > 0.0)
+		for (int channel = 0; channel < 3; ++channel)
+			glt->diffuse_color[channel] = (float)CLAMP (0.0, color[channel] / weight, 1.0);
+}
+
 /*
 ================
 TexMgr_LoadImage -- the one entry point for loading all textures
@@ -1625,6 +1676,7 @@ gltexture_t *TexMgr_LoadImage (
 	glt->source_height = height;
 	glt->source_crc = crc;
 	TexMgr_LoadFullbrightMetadata (glt, data);
+	TexMgr_LoadDiffuseMetadata (glt, data);
 
 	// upload it
 	switch (glt->source_format)
@@ -1715,6 +1767,7 @@ void TexMgr_ReloadImage (gltexture_t *glt, int shirt, int pants)
 	glt->width = glt->source_width;
 	glt->height = glt->source_height;
 	TexMgr_LoadFullbrightMetadata (glt, data);
+	TexMgr_LoadDiffuseMetadata (glt, data);
 	//
 	// apply shirt and pants colors
 	//

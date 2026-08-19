@@ -465,6 +465,7 @@ typedef struct
 	vulkan_pipeline_t		 emissive_radiance_overlay_detail_pipeline;
 	vulkan_pipeline_t		 emissive_transient_pipeline;
 	vulkan_pipeline_t		 emissive_transient_detail_pipeline;
+	vulkan_pipeline_t		 emissive_bounce_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -490,6 +491,7 @@ typedef struct
 	vulkan_desc_set_layout_t single_texture_cs_write_set_layout;
 	vulkan_desc_set_layout_t lightmap_compute_set_layout;
 	vulkan_desc_set_layout_t emissive_compute_set_layout;
+	vulkan_desc_set_layout_t emissive_bounce_set_layout;
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	VkDescriptorSet			 bmodel_instances_desc_set;
@@ -702,6 +704,8 @@ struct lightmap_s
 	VkDescriptorSet emissive_radiance_overlay_detail_descriptor_set;
 	VkDescriptorSet emissive_radiance_descriptor_set;
 	VkDescriptorSet emissive_radiance_detail_descriptor_set;
+	VkDescriptorSet emissive_bounce_descriptor_set;
+	VkDescriptorSet emissive_bounce_detail_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -756,6 +760,12 @@ void R_EmissiveDetailLightmapStats (
 	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
 	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
+void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us, uint32_t filter_time_us, uint32_t combine_time_us, qboolean valid);
+void R_EmissiveBounceStats (
+	uint32_t *direct_texels, uint32_t *samples, uint32_t *rays, uint32_t *valid_taps, uint32_t *invalid_taps, uint64_t *logical_bytes,
+	uint64_t *allocated_bytes, uint64_t *budget_bytes, uint32_t *prepare_time_us, uint32_t *build_time_us, uint32_t *resolve_time_us,
+	uint32_t *filter_time_us, uint32_t *combine_time_us, qboolean *gpu_time_valid, qboolean *budget_limited, qboolean *pending,
+	qboolean *ready);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_TransientEmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
@@ -775,6 +785,9 @@ void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveDetailTimestamp (void);
 void GL_BeginEmissiveDetailTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
+void GL_ResetEmissiveBounceTimestamp (void);
+void GL_BeginEmissiveBounceTimestamp (cb_context_t *cbx);
+void GL_MarkEmissiveBounceTimestamp (cb_context_t *cbx, uint32_t phase);
 void GL_ResetEmissiveTransientTimestamp (void);
 void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_generation);
