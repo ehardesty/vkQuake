@@ -32,6 +32,7 @@ vec3_t lightmap_dlight_origins[MAX_DLIGHTS];
 extern cvar_t r_flatlightstyles; // johnfitz
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_gpulightmapupdate;
+extern cvar_t r_rtshadows;
 extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
@@ -502,7 +503,7 @@ static void R_ActivateEmissiveWorldSurfaceCache (void)
 		return;
 	R_AllocateEmissiveLightmaps ();
 	if (!R_EmissiveDetailReady () && R_EmissiveDetailAvailable ())
-		GL_BuildEmissiveWorldAccelerationStructure ();
+		GL_RequestAccelerationStructure (RT_AS_CONSUMER_CACHEABLE_EMISSIVES);
 	GL_RebuildIndirectDraws (num_emissive_world_receivers > 0);
 	if (!emissive_world_lights_uploaded)
 		R_UploadEmissiveLights ();
@@ -546,6 +547,7 @@ void R_EmissiveRTStats_f (void)
 	uint64_t detail_budget_bytes;
 	qboolean detail_budget_limited;
 	qboolean detail_pending;
+	qboolean detail_as_active;
 	qboolean detail_ready;
 	int		 affected_tiles;
 	int		 total_tiles;
@@ -561,19 +563,23 @@ void R_EmissiveRTStats_f (void)
 	uint32_t emissive_world_as_build_time_us;
 	qboolean emissive_world_as_build_time_valid;
 	qboolean emissive_world_as_ready;
+	qboolean live_as_ready;
+	uint32_t live_as_instances;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveDetailLightmapStats (
 		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
-		&detail_ready);
+		&detail_as_active, &detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
 	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_source_links, &tile_dispatches, &tile_cpu_bytes, &tile_gpu_bytes);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
+	GL_LiveAccelerationStructureStats (&live_as_ready, &live_as_instances);
 	const char *coarse_gpu_time = rs_emissive_coarse_gputime_valid ? va ("%.3f ms", (double)rs_emissive_coarse_gputime_us / 1000.0) : "unavailable";
 	const char *detail_gpu_time = rs_emissive_detail_gputime_valid ? va ("%.3f ms", (double)rs_emissive_detail_gputime_us / 1000.0) : "unavailable";
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
+	const char *live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
 	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected"};
 	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
@@ -609,6 +615,12 @@ void R_EmissiveRTStats_f (void)
 			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, GPU build timing unavailable\n",
 			emissive_world_as_ready ? "ready" : "unavailable", emissive_world_as_triangles, emissive_world_as_triangles == 1 ? "" : "s",
 			emissive_world_as_bytes);
+	Con_Printf (
+		"RT AS consumers: cacheable emissives %s (immutable world %s), RT shadows %s (live scene %s, %u instance%s, last %.3f ms CPU / %s GPU)\n",
+		detail_as_active ? "active" : "inactive", emissive_world_as_ready ? "resident" : "unavailable",
+		(vulkan_globals.ray_query && r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f) ? "active" : "inactive",
+		live_as_ready ? "ready" : "unavailable", live_as_instances,
+		live_as_instances == 1 ? "" : "s", (double)rs_live_as_cputime_us / 1000.0, live_as_gpu_time);
 }
 
 /*
@@ -787,8 +799,6 @@ deliberately not parsed.
 
 #define MAX_ENTITY_DLIGHTS 64
 #define ENTITY_DLIGHT_KEY  0x40000000 // dlight key space for entity dlights, outside entity indices
-
-extern cvar_t r_rtshadows;
 
 // scales the intensity of the rerelease dynamiclight entities; the KEX intensity
 // units don't map 1:1 onto lightmap space, so this is calibrated visually

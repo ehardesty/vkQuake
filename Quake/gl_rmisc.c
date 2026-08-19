@@ -469,14 +469,14 @@ static void R_SetSlimealpha_f (cvar_t *var)
 
 /*
 ====================
-R_SetRTShadows_f
+R_UpdateRTShadowASRequest
 ====================
 */
-static void R_SetRTShadows_f (cvar_t *var)
+static void R_UpdateRTShadowASRequest (qboolean active)
 {
-	if (var->value > 0)
+	if (active)
 	{
-		GL_BuildBModelAccelerationStructures ();
+		GL_RequestAccelerationStructure (RT_AS_CONSUMER_RT_SHADOWS);
 	}
 	else
 	{
@@ -485,6 +485,26 @@ static void R_SetRTShadows_f (cvar_t *var)
 		R_FreeASScratchBuffer ();
 	}
 	GL_UpdateLightmapDescriptorSets ();
+}
+
+/*
+====================
+R_SetRTShadows_f
+====================
+*/
+static void R_SetRTShadows_f (cvar_t *var)
+{
+	R_UpdateRTShadowASRequest (var->value > 0 && r_gpulightmapupdate.value > 0);
+}
+
+/*
+====================
+R_SetGPULightmapUpdate_f
+====================
+*/
+static void R_SetGPULightmapUpdate_f (cvar_t *var)
+{
+	R_UpdateRTShadowASRequest (var->value > 0 && r_rtshadows.value > 0);
 }
 
 /*
@@ -4523,6 +4543,7 @@ void R_Init (void)
 
 	Cvar_RegisterVariable (&r_gpulightmapupdate);
 	Cvar_RegisterVariable (&r_rtshadows);
+	Cvar_SetCallback (&r_gpulightmapupdate, R_SetGPULightmapUpdate_f);
 	Cvar_SetCallback (&r_rtshadows, R_SetRTShadows_f);
 	Cvar_RegisterVariable (&r_indirect);
 	Cvar_RegisterVariable (&r_tasks);
@@ -4756,7 +4777,8 @@ void R_NewMap (void)
 	R_EmissiveRTPrepareNewMap ();
 	GL_BuildLightmaps ();
 	GL_BuildBModelVertexBuffer ();
-	GL_BuildBModelAccelerationStructures ();
+	if (r_rtshadows.value > 0 && r_gpulightmapupdate.value > 0)
+		GL_RequestAccelerationStructure (RT_AS_CONSUMER_RT_SHADOWS);
 	GL_PrepareSIMDAndParallelData ();
 	GL_SetupIndirectDraws ();
 	GL_SetupLightmapCompute ();

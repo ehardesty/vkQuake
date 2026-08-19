@@ -599,6 +599,9 @@ extern uint32_t		   rs_emissive_coarse_gputime_us;
 extern qboolean		   rs_emissive_coarse_gputime_valid;
 extern uint32_t		   rs_emissive_detail_gputime_us;
 extern qboolean		   rs_emissive_detail_gputime_valid;
+extern uint32_t		   rs_live_as_cputime_us;
+extern uint32_t		   rs_live_as_gputime_us;
+extern qboolean		   rs_live_as_gputime_valid;
 extern double		   rs_frame_starttime;
 extern char			   rs_display_lines[3][40]; // scr_speeds on screen overlay, updated from the counters once per frame
 extern int			   rs_display_numlines;
@@ -732,7 +735,7 @@ void R_AllocateEmissiveLightmaps (void);
 void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes);
 void R_EmissiveDetailLightmapStats (
 	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
-	qboolean *ready);
+	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
@@ -745,6 +748,9 @@ void GL_EndEmissiveCoarseTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveDetailTimestamp (void);
 void GL_BeginEmissiveDetailTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
+void GL_ResetLiveASTimestamp (void);
+void GL_BeginLiveASTimestamp (cb_context_t *cbx);
+void GL_EndLiveASTimestamp (cb_context_t *cbx);
 
 extern qboolean r_fullbright_cheatsafe, r_lightmap_cheatsafe, r_drawworld_cheatsafe; // johnfitz
 
@@ -778,6 +784,7 @@ void R_EmissiveRTChanged_f (cvar_t *var);
 void R_EmissiveRTStats_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
+void R_UpdateEmissiveLightmapsOnly (void);
 void R_UpdateLightmapsAndIndirect (void *unused);
 void R_MarkSurfaces (qboolean use_tasks, task_handle_t before_mark, task_handle_t *store_efrags, task_handle_t *cull_surfaces, task_handle_t *chain_surfaces);
 qboolean	  R_CullBox (vec3_t emins, vec3_t emaxs);
@@ -835,10 +842,16 @@ void GL_DeleteBModelAccelerationStructures (void);
 void GL_DeleteEmissiveWorldAccelerationStructure (void);
 void GL_BuildBModelVertexBuffer (void);
 void GL_RebuildIndirectDraws (qboolean emissive_grouping);
-void GL_BuildBModelAccelerationStructures (void);
-void GL_BuildEmissiveWorldAccelerationStructure (void);
+typedef enum
+{
+	RT_AS_CONSUMER_CACHEABLE_EMISSIVES,
+	RT_AS_CONSUMER_RT_SHADOWS,
+} rt_as_consumer_t;
+
+void GL_RequestAccelerationStructure (rt_as_consumer_t consumer);
 void GL_EmissiveWorldAccelerationStructureStats (
 	uint64_t *bytes, uint32_t *triangle_count, uint32_t *build_time_us, qboolean *build_time_valid, qboolean *ready);
+void GL_LiveAccelerationStructureStats (qboolean *ready, uint32_t *instance_count);
 void GL_PrepareSIMDAndParallelData (void);
 void GLMesh_UploadBuffers (
 	qmodel_t *mod, aliashdr_t *hdr, unsigned short *indexes, byte *vertexes, aliasmesh_t *desc, jointpose_t *joints, unsigned short *skeleton_indexes,

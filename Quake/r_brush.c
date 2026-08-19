@@ -115,6 +115,8 @@ static uint32_t			   bmodel_tlas_max_instances = TLAS_SIZE_MULTIPLE;
 static VkBuffer			   bmodel_indices_buffer;
 static VkDeviceAddress	   bmodel_indices_device_address;
 static vulkan_memory_t	   bmodel_as_device_memory;
+uint32_t				   rs_live_as_cputime_us;
+static uint32_t			   live_as_instance_count;
 
 static VkAccelerationStructureKHR emissive_world_blas;
 static VkAccelerationStructureKHR emissive_world_tlas;
@@ -2983,7 +2985,7 @@ R_EmissiveDetailLightmapStats
 */
 void R_EmissiveDetailLightmapStats (
 	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
-	qboolean *ready)
+	qboolean *as_active, qboolean *ready)
 {
 	*count = 0;
 	*logical_bytes = 0;
@@ -2998,6 +3000,8 @@ void R_EmissiveDetailLightmapStats (
 	*budget_bytes = (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
 	*budget_limited = emissive_detail_budget_limited;
 	*pending = emissive_detail_pending || emissive_detail_building;
+	*as_active = emissive_detail_building ||
+		(emissive_detail_pending && emissive_world_tlas != VK_NULL_HANDLE && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f);
 	*ready = emissive_detail_ready;
 }
 
@@ -3382,9 +3386,17 @@ GL_DeleteBModelAccelerationStructures
 void GL_DeleteBModelAccelerationStructures (void)
 {
 	if (bmodel_tlas == VK_NULL_HANDLE)
+	{
+		GL_ResetLiveASTimestamp ();
+		rs_live_as_cputime_us = 0;
+		live_as_instance_count = 0;
 		return;
+	}
 
 	GL_WaitForDeviceIdle ();
+	GL_ResetLiveASTimestamp ();
+	rs_live_as_cputime_us = 0;
+	live_as_instance_count = 0;
 	TEMP_ALLOC (VkBuffer, buffers, 1 + MAX_MODELS);
 	int num_buffers = 0;
 	buffers[num_buffers++] = bmodel_indices_buffer;
@@ -3479,7 +3491,7 @@ emissive detail. It is independent from the live entity TLAS owned by
 r_rtshadows.
 ==================
 */
-void GL_BuildEmissiveWorldAccelerationStructure (void)
+static void GL_BuildEmissiveWorldAccelerationStructure (void)
 {
 	if (!vulkan_globals.ray_query || !cl.worldmodel || emissive_world_tlas != VK_NULL_HANDLE)
 		return;
@@ -3686,7 +3698,7 @@ void GL_BuildEmissiveWorldAccelerationStructure (void)
 		}
 		vkDestroyQueryPool (vulkan_globals.device, build_timestamp_query_pool, NULL);
 	}
-	if (!r_rtshadows.value)
+	if (r_rtshadows.value <= 0 || r_gpulightmapupdate.value <= 0)
 		R_FreeASScratchBuffer ();
 	emissive_world_as_triangles = num_triangles;
 	if (emissive_world_as_build_time_valid)
@@ -3812,11 +3824,11 @@ void GL_BuildBModelVertexBuffer (void)
 GL_BuildBModelAccelerationStructures
 ==================
 */
-void GL_BuildBModelAccelerationStructures (void)
+static void GL_BuildBModelAccelerationStructures (void)
 {
 	VkResult err;
 
-	if (!vulkan_globals.ray_query || !r_rtshadows.value || (bmodel_tlas != VK_NULL_HANDLE))
+	if (!vulkan_globals.ray_query || !r_rtshadows.value || !r_gpulightmapupdate.value || (bmodel_tlas != VK_NULL_HANDLE))
 		return;
 
 	// count all tris in all models
@@ -4049,6 +4061,39 @@ void GL_BuildBModelAccelerationStructures (void)
 }
 
 /*
+==================
+GL_RequestAccelerationStructure
+
+Routes each active ray-query consumer to the minimum scene representation it
+currently needs. Cacheable emissives use the immutable worldspawn AS; RT
+shadows retain the live world, brush, and alias-model AS path.
+==================
+*/
+void GL_RequestAccelerationStructure (rt_as_consumer_t consumer)
+{
+	if (!vulkan_globals.ray_query)
+		return;
+
+	switch (consumer)
+	{
+	case RT_AS_CONSUMER_CACHEABLE_EMISSIVES:
+		GL_BuildEmissiveWorldAccelerationStructure ();
+		break;
+	case RT_AS_CONSUMER_RT_SHADOWS:
+		GL_BuildBModelAccelerationStructures ();
+		break;
+	default:
+		Sys_Error ("GL_RequestAccelerationStructure: invalid consumer %d", (int)consumer);
+	}
+}
+
+void GL_LiveAccelerationStructureStats (qboolean *ready, uint32_t *instance_count)
+{
+	*ready = bmodel_tlas != VK_NULL_HANDLE;
+	*instance_count = live_as_instance_count;
+}
+
+/*
 =============
 R_BuildTopLevelAccelerationStructure
 =============
@@ -4058,7 +4103,9 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 	if (bmodel_tlas == VK_NULL_HANDLE)
 		return;
 
+	const double  start_time = Sys_DoubleTime ();
 	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_BUILD_ACCELERATION_STRUCTURES];
+	GL_BeginLiveASTimestamp (cbx);
 
 	// Update animated entity BLASes first
 	R_UpdateAnimatedBLASes (cbx);
@@ -4228,6 +4275,9 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		cbx->cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
 
 	R_EndDebugUtilsLabel (cbx);
+	GL_EndLiveASTimestamp (cbx);
+	live_as_instance_count = num_instances;
+	rs_live_as_cputime_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 }
 
 /*
@@ -4811,6 +4861,20 @@ static void R_IndirectComputeDispatch (cb_context_t *cbx)
 		cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &memory_barrier, 0, NULL,
 		0, NULL);
 
+	R_EndDebugUtilsLabel (cbx);
+}
+
+/*
+=============
+R_UpdateEmissiveLightmapsOnly
+=============
+*/
+void R_UpdateEmissiveLightmapsOnly (void)
+{
+	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_UPDATE_LIGHTMAPS];
+	R_BeginDebugUtilsLabel (cbx, "Update Emissive Lightmaps");
+	R_UpdateEmissiveLightmaps (cbx, false);
+	R_UpdateEmissiveLightmaps (cbx, true);
 	R_EndDebugUtilsLabel (cbx);
 }
 

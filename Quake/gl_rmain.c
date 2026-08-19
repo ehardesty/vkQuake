@@ -1710,6 +1710,8 @@ void R_RenderView (
 			R_BuildTopLevelAccelerationStructure (NULL);
 			R_UpdateLightmapsAndIndirect (NULL);
 		}
+		else
+			R_UpdateEmissiveLightmapsOnly ();
 		R_PrintStats ();
 	}
 }
