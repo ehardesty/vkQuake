@@ -65,6 +65,7 @@ typedef struct emissive_texture_def_s
 	qboolean		 shadows;
 	qboolean		 two_sided;
 	qboolean		 derive_color;
+	qboolean		 adjacent_inline_brush_owns_source;
 	vec3_t			 emission_direction;
 	vec3_t			 color;
 } emissive_texture_def_t;
@@ -82,10 +83,23 @@ typedef struct emissive_world_fixture_s
 	vec3_t						  origin;
 	vec3_t						  normal;
 	vec3_t						  color;
+	vec3_t						  mins;
+	vec3_t						  maxs;
 	float						  geometric_area;
 	float						  luminous_area;
 	int							  num_surfaces;
+	qboolean					  transient_brush_owned;
 } emissive_world_fixture_t;
+
+typedef struct emissive_brush_source_s
+{
+	const emissive_texture_def_t *definition;
+	vec3_t						  origin;
+	vec3_t						  normal;
+	vec3_t						  color;
+	vec3_t						  mins;
+	vec3_t						  maxs;
+} emissive_brush_source_t;
 
 typedef enum emissive_entity_fixture_family_e
 {
@@ -147,8 +161,8 @@ typedef struct emissive_entity_source_s
 #define EMISSIVE_ENTITY_ANGLE_TOLERANCE		  1.0f
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
-	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
 };
 
 static const emissive_entity_fixture_def_t emissive_entity_fixture_defs[] = {
@@ -170,6 +184,11 @@ static emissive_world_surface_t *emissive_world_surfaces;
 static int						 num_emissive_world_surfaces;
 static emissive_world_fixture_t *emissive_world_fixtures;
 static int						 num_emissive_world_fixtures;
+static int						 num_emissive_cacheable_world_fixtures;
+static int						 num_emissive_transient_brush_owned_fixtures;
+static int						 num_emissive_unpaired_brush_sources;
+static int						 num_emissive_ambiguous_brush_owners;
+static int						 num_emissive_ambiguous_world_owners;
 static int						 num_emissive_world_receivers;
 static emissive_surface_light_t *emissive_world_surface_lights;
 static int						 num_emissive_world_surface_lights;
@@ -602,6 +621,11 @@ static void R_ClearEmissiveWorldSurfaces (void)
 	SAFE_FREE (emissive_world_surface_lights);
 	num_emissive_world_surfaces = 0;
 	num_emissive_world_fixtures = 0;
+	num_emissive_cacheable_world_fixtures = 0;
+	num_emissive_transient_brush_owned_fixtures = 0;
+	num_emissive_unpaired_brush_sources = 0;
+	num_emissive_ambiguous_brush_owners = 0;
+	num_emissive_ambiguous_world_owners = 0;
 	num_emissive_world_receivers = 0;
 	num_emissive_world_surface_lights = 0;
 	emissive_surface_worldmodel = NULL;
@@ -623,6 +647,182 @@ static void R_TransformEmissivePoint (const float matrix[16], const vec3_t point
 {
 	for (int row = 0; row < 3; ++row)
 		transformed[row] = matrix[row] * point[0] + matrix[4 + row] * point[1] + matrix[8 + row] * point[2] + matrix[12 + row];
+}
+
+static qboolean R_BuildEmissiveBrushSource (
+	const qmodel_t *model, const emissive_texture_def_t *definition, emissive_brush_source_t *source)
+{
+	memset (source, 0, sizeof (*source));
+	source->definition = definition;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		source->mins[axis] = FLT_MAX;
+		source->maxs[axis] = -FLT_MAX;
+	}
+
+	vec3_t weighted_origin = {0.0f, 0.0f, 0.0f};
+	vec3_t weighted_normal = {0.0f, 0.0f, 0.0f};
+	float  total_weight = 0.0f;
+	for (int i = 0; i < model->nummodelsurfaces; ++i)
+	{
+		msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
+		texture_t *const texture = surface->texinfo ? surface->texinfo->texture : NULL;
+		if (R_CacheableEmissiveTextureDef (texture) != definition || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
+			continue;
+
+		vec3_t center, normal, surface_color;
+		float  area;
+		R_EmissiveWorldSurfaceGeometry (model, surface, center, normal, &area);
+		const float weight = area * texture->fullbright->fullbright_coverage;
+		R_ResolveEmissiveTextureColor (definition, texture->fullbright, surface_color);
+		VectorMA (weighted_origin, weight, center, weighted_origin);
+		VectorMA (weighted_normal, weight, normal, weighted_normal);
+		VectorMA (source->color, weight, surface_color, source->color);
+		total_weight += weight;
+		for (int vertex = 0; vertex < surface->numedges; ++vertex)
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				const float coordinate = (*R_EmissiveWorldSurfaceVertex (model, surface, vertex))[axis];
+				source->mins[axis] = q_min (source->mins[axis], coordinate);
+				source->maxs[axis] = q_max (source->maxs[axis], coordinate);
+			}
+	}
+	if (total_weight <= 0.0f)
+		return false;
+
+	VectorScale (weighted_origin, 1.0f / total_weight, source->origin);
+	VectorScale (source->color, 1.0f / total_weight, source->color);
+	if (VectorLength (definition->emission_direction) > 0.0f)
+		VectorCopy (definition->emission_direction, source->normal);
+	else
+		VectorCopy (weighted_normal, source->normal);
+	if (VectorNormalize (source->normal) == 0.0f)
+		source->normal[2] = 1.0f;
+
+	/* The immutable-world AS excludes inline brushes. Keep their source at the luminous centroid so fixed world housings can occlude it. */
+	return true;
+}
+
+static float R_EmissiveBoundsOverlapFraction (float min1, float max1, float min2, float max2)
+{
+	const float overlap = q_max (0.0f, q_min (max1, max2) - q_max (min1, min2));
+	const float minimum_span = q_min (max1 - min1, max2 - min2);
+	if (minimum_span > 0.0f)
+		return overlap / minimum_span;
+	return fabsf (0.5f * (min1 + max1 - min2 - max2)) <= 1.0f ? 1.0f : 0.0f;
+}
+
+static qboolean R_EmissiveBrushSourceMatchesWorldFixture (
+	const emissive_brush_source_t *source, const emissive_world_fixture_t *fixture)
+{
+	if (source->definition != fixture->definition || !source->definition->adjacent_inline_brush_owns_source)
+		return false;
+
+	int axis = 0;
+	for (int candidate_axis = 1; candidate_axis < 3; ++candidate_axis)
+		if (fabsf (source->definition->emission_direction[candidate_axis]) > fabsf (source->definition->emission_direction[axis]))
+			axis = candidate_axis;
+	const float direction = source->definition->emission_direction[axis];
+	if (direction == 0.0f)
+		return false;
+	const float contact_distance = direction > 0.0f ? fabsf (fixture->maxs[axis] - source->mins[axis]) :
+													 fabsf (fixture->mins[axis] - source->maxs[axis]);
+	if (contact_distance > 1.0f)
+		return false;
+
+	for (int lateral_axis = 0; lateral_axis < 3; ++lateral_axis)
+		if (lateral_axis != axis &&
+			R_EmissiveBoundsOverlapFraction (source->mins[lateral_axis], source->maxs[lateral_axis], fixture->mins[lateral_axis],
+				fixture->maxs[lateral_axis]) < 0.5f)
+			return false;
+	return true;
+}
+
+typedef struct emissive_brush_owner_candidate_s
+{
+	qmodel_t *model;
+	int		  fixture;
+} emissive_brush_owner_candidate_t;
+
+static void R_ResolveEmissiveWorldFixtureOwnership (void)
+{
+	num_emissive_cacheable_world_fixtures = num_emissive_world_fixtures;
+	num_emissive_transient_brush_owned_fixtures = 0;
+	num_emissive_unpaired_brush_sources = 0;
+	num_emissive_ambiguous_brush_owners = 0;
+	num_emissive_ambiguous_world_owners = 0;
+	for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
+		emissive_world_fixtures[fixture].transient_brush_owned = false;
+	if (!num_emissive_world_fixtures || cl.num_entities <= 1)
+		return;
+
+	emissive_brush_owner_candidate_t *const candidates =
+		Mem_Alloc (cl.num_entities * countof (emissive_texture_defs) * sizeof (*candidates));
+	int *const fixture_candidate_counts = Mem_Alloc (num_emissive_world_fixtures * sizeof (*fixture_candidate_counts));
+	qboolean *const ambiguous_fixtures = Mem_Alloc (num_emissive_world_fixtures * sizeof (*ambiguous_fixtures));
+	memset (fixture_candidate_counts, 0, num_emissive_world_fixtures * sizeof (*fixture_candidate_counts));
+	memset (ambiguous_fixtures, 0, num_emissive_world_fixtures * sizeof (*ambiguous_fixtures));
+	int num_candidates = 0;
+
+	for (int entity_index = 1; entity_index < cl.num_entities; ++entity_index)
+	{
+		const entity_t *const entity = &cl.entities[entity_index];
+		qmodel_t *model = NULL;
+		if (entity->baseline.modelindex > 0 && entity->baseline.modelindex < MAX_MODELS)
+			model = cl.model_precache[entity->baseline.modelindex];
+		if (!model || model->needload || model->type != mod_brush || model->name[0] != '*' || model->surfaces != cl.worldmodel->surfaces)
+			continue;
+
+		for (int definition_index = 0; definition_index < countof (emissive_texture_defs); ++definition_index)
+		{
+			const emissive_texture_def_t *const definition = &emissive_texture_defs[definition_index];
+			if (!definition->adjacent_inline_brush_owns_source)
+				continue;
+			emissive_brush_source_t source;
+			if (!R_BuildEmissiveBrushSource (model, definition, &source))
+				continue;
+			int matching_fixture = -1, num_matches = 0;
+			for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
+				if (R_EmissiveBrushSourceMatchesWorldFixture (&source, &emissive_world_fixtures[fixture]))
+				{
+					matching_fixture = fixture;
+					++num_matches;
+				}
+			if (num_matches == 1)
+			{
+				candidates[num_candidates].model = model;
+				candidates[num_candidates].fixture = matching_fixture;
+				++fixture_candidate_counts[matching_fixture];
+				++num_candidates;
+			}
+			else if (num_matches == 0)
+				++num_emissive_unpaired_brush_sources;
+			else if (num_matches > 1)
+			{
+				++num_emissive_ambiguous_brush_owners;
+				for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
+					if (R_EmissiveBrushSourceMatchesWorldFixture (&source, &emissive_world_fixtures[fixture]))
+						ambiguous_fixtures[fixture] = true;
+			}
+		}
+	}
+
+	for (int fixture = 0; fixture < num_emissive_world_fixtures; ++fixture)
+		if (ambiguous_fixtures[fixture] || fixture_candidate_counts[fixture] > 1)
+			++num_emissive_ambiguous_world_owners;
+	for (int candidate = 0; candidate < num_candidates; ++candidate)
+	{
+		const int fixture = candidates[candidate].fixture;
+		if (ambiguous_fixtures[fixture] || fixture_candidate_counts[fixture] != 1)
+			continue;
+		emissive_world_fixtures[fixture].transient_brush_owned = true;
+		++num_emissive_transient_brush_owned_fixtures;
+		Con_DPrintf ("RT emissives: world fixture %d owned by inline brush %s\n", fixture, candidates[candidate].model->name);
+	}
+	num_emissive_cacheable_world_fixtures -= num_emissive_transient_brush_owned_fixtures;
+	Mem_Free (ambiguous_fixtures);
+	Mem_Free (fixture_candidate_counts);
+	Mem_Free (candidates);
 }
 
 /*
@@ -669,60 +869,14 @@ void R_UpdateTransientEmissiveSources (void)
 
 			for (int def_index = 0; def_index < countof (emissive_texture_defs); ++def_index)
 			{
-				const emissive_texture_def_t *definition = NULL;
-				vec3_t weighted_origin = {0.0f, 0.0f, 0.0f};
-				vec3_t weighted_normal = {0.0f, 0.0f, 0.0f};
-				vec3_t color = {0.0f, 0.0f, 0.0f};
-				float total_weight = 0.0f;
-				for (int i = 0; i < model->nummodelsurfaces; ++i)
-				{
-					msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
-					texture_t *const texture = surface->texinfo ? surface->texinfo->texture : NULL;
-					const emissive_texture_def_t *const surface_definition = R_CacheableEmissiveTextureDef (texture);
-					if (surface_definition != &emissive_texture_defs[def_index] || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
-						continue;
-					vec3_t center, normal, surface_color;
-					float area;
-					R_EmissiveWorldSurfaceGeometry (model, surface, center, normal, &area);
-					const float weight = area * texture->fullbright->fullbright_coverage;
-					R_ResolveEmissiveTextureColor (surface_definition, texture->fullbright, surface_color);
-					VectorMA (weighted_origin, weight, center, weighted_origin);
-					VectorMA (weighted_normal, weight, normal, weighted_normal);
-					VectorMA (color, weight, surface_color, color);
-					total_weight += weight;
-					definition = surface_definition;
-				}
-				if (!definition || total_weight <= 0.0f)
+				emissive_brush_source_t source;
+				if (!R_BuildEmissiveBrushSource (model, &emissive_texture_defs[def_index], &source))
 					continue;
-				VectorScale (weighted_origin, 1.0f / total_weight, weighted_origin);
-				VectorScale (color, 1.0f / total_weight, color);
-				if (VectorLength (definition->emission_direction) > 0.0f)
-					VectorCopy (definition->emission_direction, weighted_normal);
-				if (VectorNormalize (weighted_normal) == 0.0f)
-				{
-					weighted_normal[0] = 0.0f;
-					weighted_normal[1] = 0.0f;
-					weighted_normal[2] = 1.0f;
-				}
-				float support_distance = DotProduct (weighted_origin, weighted_normal);
-				for (int i = 0; i < model->nummodelsurfaces; ++i)
-				{
-					msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
-					const emissive_texture_def_t *const surface_definition =
-						R_CacheableEmissiveTextureDef (surface->texinfo ? surface->texinfo->texture : NULL);
-					if (surface_definition != definition || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
-						continue;
-					for (int vertex = 0; vertex < surface->numedges; ++vertex)
-						support_distance =
-							q_max (support_distance, DotProduct (*R_EmissiveWorldSurfaceVertex (model, surface, vertex), weighted_normal));
-				}
-				VectorMA (weighted_origin, support_distance - DotProduct (weighted_origin, weighted_normal) + definition->normal_offset,
-					weighted_normal, weighted_origin);
 				emissive_light_t light;
-				R_TransformEmissivePoint (matrix, weighted_origin, light.origin);
-				light.radius = definition->radius;
-				VectorCopy (color, light.color);
-				light.intensity = definition->intensity;
+				R_TransformEmissivePoint (matrix, source.origin, light.origin);
+				light.radius = source.definition->radius;
+				VectorCopy (source.color, light.color);
+				light.intensity = source.definition->intensity;
 				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
 			}
 		}
@@ -865,6 +1019,11 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 		vec3_t							fallback_normal = {0.0f, 0.0f, 1.0f};
 		float							largest_luminous_area = 0.0f;
 		fixture->definition = emissive_world_surfaces[group].definition;
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			fixture->mins[axis] = FLT_MAX;
+			fixture->maxs[axis] = -FLT_MAX;
+		}
 		const gltexture_t *const fullbright = emissive_world_surfaces[group].surface->texinfo->texture->fullbright;
 		R_ResolveEmissiveTextureColor (fixture->definition, fullbright, fixture->color);
 
@@ -884,6 +1043,14 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			fixture->geometric_area += area;
 			fixture->luminous_area += luminous_area;
 			++fixture->num_surfaces;
+			for (int vertex = 0; vertex < emissive_world_surfaces[i].surface->numedges; ++vertex)
+				for (int axis = 0; axis < 3; ++axis)
+				{
+					const float coordinate =
+						(*R_EmissiveWorldSurfaceVertex (worldmodel, emissive_world_surfaces[i].surface, vertex))[axis];
+					fixture->mins[axis] = q_min (fixture->mins[axis], coordinate);
+					fixture->maxs[axis] = q_max (fixture->maxs[axis], coordinate);
+				}
 			if (luminous_area > largest_luminous_area)
 			{
 				largest_luminous_area = luminous_area;
@@ -1055,26 +1222,34 @@ static void R_ClassifyEmissiveWorldReceivers (qmodel_t *worldmodel, const emissi
 
 static void R_UploadEmissiveLights (void)
 {
-	const int num_lights = num_emissive_world_fixtures + num_emissive_entity_sources;
+	R_ResolveEmissiveWorldFixtureOwnership ();
+	const int num_lights = num_emissive_cacheable_world_fixtures + num_emissive_entity_sources;
 	if (!num_lights)
+	{
+		emissive_world_lights_uploaded = true;
 		return;
+	}
 
 	emissive_light_t *const lights = Mem_Alloc (num_lights * sizeof (*lights));
 	byte *const				styles = Mem_Alloc (num_lights * sizeof (*styles));
+	int						light = 0;
 	for (int i = 0; i < num_emissive_world_fixtures; ++i)
 	{
 		const emissive_world_fixture_t *const fixture = &emissive_world_fixtures[i];
-		VectorCopy (fixture->origin, lights[i].origin);
-		lights[i].radius = fixture->definition->radius;
-		VectorCopy (fixture->color, lights[i].color);
-		lights[i].intensity = fixture->definition->intensity;
-		styles[i] = 255;
+		if (fixture->transient_brush_owned)
+			continue;
+		VectorCopy (fixture->origin, lights[light].origin);
+		lights[light].radius = fixture->definition->radius;
+		VectorCopy (fixture->color, lights[light].color);
+		lights[light].intensity = fixture->definition->intensity;
+		styles[light++] = 255;
 	}
 	for (int i = 0; i < num_emissive_entity_sources; ++i)
 	{
-		lights[num_emissive_world_fixtures + i] = emissive_entity_sources[i].light;
-		styles[num_emissive_world_fixtures + i] = emissive_entity_sources[i].style;
+		lights[light] = emissive_entity_sources[i].light;
+		styles[light++] = emissive_entity_sources[i].style;
 	}
+	assert (light == num_lights);
 	R_ClassifyEmissiveWorldReceivers (cl.worldmodel, lights, num_lights);
 	if (num_emissive_world_receivers)
 	{
@@ -1266,6 +1441,12 @@ void R_EmissiveRTStats_f (void)
 			num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights)),
 		coarse_lightmaps, coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s",
 		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
+	Con_Printf (
+		"RT emissive brush ownership: %d cacheable world fixture%s, %d transient-brush-owned, %d unpaired brush source%s, %d ambiguous brush/%d ambiguous world match%s\n",
+		num_emissive_cacheable_world_fixtures, num_emissive_cacheable_world_fixtures == 1 ? "" : "s",
+		num_emissive_transient_brush_owned_fixtures, num_emissive_unpaired_brush_sources, num_emissive_unpaired_brush_sources == 1 ? "" : "s",
+		num_emissive_ambiguous_brush_owners, num_emissive_ambiguous_world_owners,
+		num_emissive_ambiguous_brush_owners + num_emissive_ambiguous_world_owners == 1 ? "" : "es");
 	Con_Printf (
 		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
 		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64
