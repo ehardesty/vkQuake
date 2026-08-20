@@ -424,6 +424,9 @@
     <ClCompile Include="..\..\Shaders\Compiled\Debug\world_emissive.frag.c">
       <Filter>Shaders\Debug\World</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Debug\world_emissive_bandlimit.frag.c">
+      <Filter>Shaders\Debug\World</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\world_oit.frag.c">
       <Filter>Shaders\Debug\World</Filter>
     </ClCompile>
@@ -526,6 +529,9 @@
     <ClCompile Include="..\..\Shaders\Compiled\Release\world_emissive.frag.c">
       <Filter>Shaders\Release\World</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Release\world_emissive_bandlimit.frag.c">
+      <Filter>Shaders\Release\World</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Release\world_oit.frag.c">
       <Filter>Shaders\Release\World</Filter>
     </ClCompile>
@@ -577,9 +583,6 @@
     <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_detail.comp.c">
       <Filter>Shaders\Release</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_bandlimit_filter.comp.c">
-      <Filter>Shaders\Release</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_bounce.comp.c">
       <Filter>Shaders\Release</Filter>
     </ClCompile>
@@ -590,9 +593,6 @@
       <Filter>Shaders\Debug</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_detail.comp.c">
-      <Filter>Shaders\Debug</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_bandlimit_filter.comp.c">
       <Filter>Shaders\Debug</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_bounce.comp.c">

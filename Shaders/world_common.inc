@@ -1,3 +1,40 @@
+#ifdef EMISSIVE_BANDLIMIT
+vec4 SampleBandlimitedEmissiveDetail (const vec2 lightmap_uv, const vec2 detail_uv)
+{
+	const ivec2 detail_size = textureSize (emissive_detail_tex, 0);
+	const ivec2 surface_indices_size = textureSize (emissive_surface_indices_tex, 0);
+	const ivec2 receiver_coords =
+		clamp (ivec2 (lightmap_uv * vec2 (LMBLOCK_WIDTH, LMBLOCK_HEIGHT)), ivec2 (0), surface_indices_size - ivec2 (1));
+	const uint receiver_surface = texelFetch (emissive_surface_indices_tex, receiver_coords, 0).x;
+	const vec2 detail_texel = detail_uv * vec2 (detail_size) - 0.5f;
+	const ivec2 first_detail_coords = ivec2 (floor (detail_texel));
+	const vec2 fraction = fract (detail_texel);
+
+	vec3 weighted_rgb = vec3 (0.0f);
+	float supported_weight = 0.0f;
+	for (int y = 0; y < 2; ++y)
+	{
+		for (int x = 0; x < 2; ++x)
+		{
+			const ivec2 detail_coords = clamp (first_detail_coords + ivec2 (x, y), ivec2 (0), detail_size - ivec2 (1));
+			const ivec2 surface_coords = clamp (detail_coords / 2, ivec2 (0), surface_indices_size - ivec2 (1));
+			if (texelFetch (emissive_surface_indices_tex, surface_coords, 0).x != receiver_surface)
+				continue;
+
+			const vec2 axis_weight = mix (vec2 (1.0f) - fraction, fraction, vec2 (x, y));
+			const float weight = axis_weight.x * axis_weight.y;
+			const vec4 detail = texelFetch (emissive_detail_tex, detail_coords, 0);
+			const float supported_tap_weight = detail.a * weight;
+			weighted_rgb += detail.rgb * supported_tap_weight;
+			supported_weight += supported_tap_weight;
+		}
+	}
+
+	const bool supported = supported_weight > 0.0f;
+	return vec4 (supported ? weighted_rgb / supported_weight : vec3 (0.0f), supported_weight);
+}
+#endif
+
 vec4 WorldFragmentColor ()
 {
 	vec4 diffuse = texture (diffuse_tex, in_texcoords.xy);
@@ -24,12 +61,22 @@ vec4 WorldFragmentColor ()
 		const ivec2 emissive_detail_size = textureSize (emissive_detail_tex, 0);
 		const ivec2 emissive_detail_coords =
 			clamp (ivec2 (lightmap_uv * vec2 (LMBLOCK_WIDTH * 2, LMBLOCK_HEIGHT * 2)), ivec2 (0), emissive_detail_size - ivec2 (1));
-		const vec4 emissive_detail = texelFetch (emissive_detail_tex, emissive_detail_coords, 0);
+		vec4 emissive_detail = texelFetch (emissive_detail_tex, emissive_detail_coords, 0);
+#ifdef EMISSIVE_BANDLIMIT
+		if (emissive_bandlimit_enabled)
+			emissive_detail = SampleBandlimitedEmissiveDetail (lightmap_uv, lightmap_uv * emissive_uv_scale);
+#endif
 		if (emissive_debug_mode == 2 || emissive_debug_mode == 6)
 			return vec4 (emissive_detail.rgb, 1.0);
 		if (emissive_debug_mode == 3 || emissive_debug_mode == 7)
 			return vec4 (vec3 (emissive_detail.a), 1.0);
-		if (emissive_detail.a >= 0.5)
+		// Classic detail validity is binary and retains its established threshold.
+		// The band-limited reconstruction reports its actual supported-tap coverage.
+#ifdef EMISSIVE_BANDLIMIT
+		if (emissive_detail.a > 0.0f)
+#else
+		if (emissive_detail.a >= 0.5f)
+#endif
 			emissive_selected = emissive_detail.rgb;
 		else
 			emissive_selected = texture (emissive_coarse_tex, lightmap_uv * emissive_uv_scale).rgb;

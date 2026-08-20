@@ -90,6 +90,7 @@ void main ()
 		return;
 
 	vec3	   contribution = vec3 (0.0f);
+	float	   validity = retained_visibility && !bandlimited ? 1.0f : 0.0f;
 	const ivec2 coarse_coords = retained_visibility ? coords / 2 : coords;
 	const uint surface_index = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
@@ -109,10 +110,16 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
-		contribution = bandlimited
-			? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
-			: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
+		const bool supported = !bandlimited || EmissiveBandlimitPointOnSurface (surf, world_pos, normal);
+		if (supported)
+		{
+			const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+			contribution = bandlimited
+				? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
+				: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
+			if (retained_visibility)
+				validity = 1.0f;
+		}
 	}
 	if (transient_overlay)
 		contribution += texelFetch (cacheable_image, coords, 0).rgb;
@@ -121,6 +128,8 @@ void main ()
 		const vec3 previous_overlay = imageLoad (output_image, coords).rgb - texelFetch (cacheable_image, coords, 0).rgb;
 		contribution += max (previous_overlay, 0.0f);
 	}
+	if (bandlimited && retained_visibility && validity == 0.0f)
+		contribution = vec3 (0.0f);
 
-	imageStore (output_image, coords, vec4 (contribution, retained_visibility ? 1.0f : 0.0f));
+	imageStore (output_image, coords, vec4 (contribution, validity));
 }

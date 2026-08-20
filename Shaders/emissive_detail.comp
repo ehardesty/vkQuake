@@ -91,6 +91,22 @@ bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 lig
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+bool EmissiveBandlimitIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
+{
+	const vec3 ray_origin = world_pos + normal * 0.25f;
+	const vec3 ray_vector = light_origin - ray_origin;
+	const float ray_distance = length (ray_vector);
+	if (ray_distance <= 2.5f)
+		return false;
+
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT (
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_vector / ray_distance, ray_distance - 0.5f);
+	rayQueryProceedEXT (ray_query);
+	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
 #include "lightmap_coords.inc"
 #define EMISSIVE_DETAIL_VISIBILITY
 #define EMISSIVE_SOURCE_INDICES
@@ -129,13 +145,17 @@ void main ()
 		if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
 			normal = -normal;
 
-		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
-		contribution = bandlimited
-			? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
-			: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
-		validity = 1.0f;
+		const bool supported = !bandlimited || EmissiveBandlimitPointOnSurface (surf, world_pos, normal);
+		if (supported)
+		{
+			const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+			contribution = bandlimited
+				? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
+				: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
+			validity = 1.0f;
+		}
 	}
-	if (transient_overlay && !bandlimited)
+	if (transient_overlay)
 	{
 		const vec4 cacheable = texelFetch (cacheable_image, coords, 0);
 		contribution += cacheable.rgb;

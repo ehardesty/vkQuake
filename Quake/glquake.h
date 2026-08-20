@@ -188,8 +188,8 @@ typedef struct vulkan_memory_s
 	vulkan_memory_type_t type;
 } vulkan_memory_t;
 
-#define WORLD_PIPELINE_COUNT			   64
-#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 28
+#define WORLD_PIPELINE_COUNT				128
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 56
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -461,8 +461,8 @@ typedef struct
 	vulkan_pipeline_t		 emissive_detail_pipeline;
 	vulkan_pipeline_t		 emissive_bandlimit_detail_pipeline;
 	vulkan_pipeline_t		 emissive_bandlimit_radiance_pipeline;
+	vulkan_pipeline_t		 emissive_bandlimit_radiance_overlay_pipeline;
 	vulkan_pipeline_t		 emissive_bandlimit_transient_pipeline;
-	vulkan_pipeline_t		 emissive_bandlimit_filter_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_detail_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_overlay_pipeline;
@@ -673,8 +673,7 @@ extern int gl_lightmap_format;
 
 #define EMISSIVE_DETAIL_SCALE 2
 #define EMISSIVE_BANDLIMIT_SAMPLES 4
-#define EMISSIVE_BANDLIMIT_FILTER_RADIUS 2
-#define EMISSIVE_BANDLIMIT_VERSION 1
+#define EMISSIVE_BANDLIMIT_VERSION 2
 
 #define LM_WORKGROUP_SUBMODEL_EMPTY 0xFFFFFFFE // no surfaces assigned yet, converted to 0 before upload
 #define LM_WORKGROUP_SUBMODEL_MIXED 0xFFFFFFFF // surfaces from multiple coordinate spaces, the shader can't cull and passes all lights
@@ -700,9 +699,6 @@ struct lightmap_s
 	gltexture_t	   *texture;
 	gltexture_t	   *emissive_texture;
 	gltexture_t	   *emissive_detail_texture; // resolved RGB detail; alpha is publication validity
-	gltexture_t	   *emissive_bandlimit_raw_texture;
-	gltexture_t	   *emissive_bandlimit_scratch_texture;
-	gltexture_t	   *emissive_bandlimit_transient_raw_texture;
 	gltexture_t	   *emissive_bounce_debug_texture; // coarse bounce-only diagnostic
 	gltexture_t	   *emissive_bounce_texture; // cacheable direct plus current bounce
 	gltexture_t	   *emissive_bounce_detail_texture;
@@ -717,13 +713,7 @@ struct lightmap_s
 	VkDescriptorSet emissive_detail_descriptor_set;
 	VkDescriptorSet emissive_bandlimit_detail_descriptor_set;
 	VkDescriptorSet emissive_bandlimit_radiance_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_filter_horizontal_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_filter_vertical_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_radiance_filter_horizontal_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_radiance_filter_vertical_descriptor_set;
 	VkDescriptorSet emissive_bandlimit_transient_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_transient_filter_horizontal_descriptor_set;
-	VkDescriptorSet emissive_bandlimit_transient_filter_vertical_descriptor_set;
 	VkDescriptorSet emissive_transient_descriptor_set;
 	VkDescriptorSet emissive_transient_detail_descriptor_set;
 	VkDescriptorSet emissive_radiance_overlay_descriptor_set;

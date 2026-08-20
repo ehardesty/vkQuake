@@ -1841,11 +1841,11 @@ void R_CreatePipelineLayouts ()
 
 	{
 		// World
-		VkDescriptorSetLayout world_descriptor_set_layouts[7] = {
+		VkDescriptorSetLayout world_descriptor_set_layouts[8] = {
 			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.single_texture_set_layout.handle,
 			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.mboit_input_attachment_set_layout.handle,
 			vulkan_globals.bmodel_instances_set_layout.handle, vulkan_globals.single_texture_set_layout.handle,
-			vulkan_globals.single_texture_set_layout.handle};
+			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.single_texture_set_layout.handle};
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
@@ -2555,6 +2555,7 @@ DECLARE_SHADER_MODULE (basic_notex_frag);
 DECLARE_SHADER_MODULE (world_vert);
 DECLARE_SHADER_MODULE (world_frag);
 DECLARE_SHADER_MODULE (world_emissive_frag);
+DECLARE_SHADER_MODULE (world_emissive_bandlimit_frag);
 DECLARE_SHADER_MODULE (world_oit_frag);
 DECLARE_SHADER_MODULE (world_mboit_moment_frag);
 DECLARE_SHADER_MODULE (world_mboit_composite_frag);
@@ -2605,7 +2606,6 @@ DECLARE_SHADER_MODULE (update_lightmap_10bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
 DECLARE_SHADER_MODULE (emissive_detail_comp);
-DECLARE_SHADER_MODULE (emissive_bandlimit_filter_comp);
 DECLARE_SHADER_MODULE (emissive_bounce_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
 DECLARE_SHADER_MODULE (mesh_interpolate_comp);
@@ -3608,7 +3608,7 @@ static void R_CreateWorldPipelines ()
 	base.vertex_input_state.vertexBindingDescriptionCount = 1;
 	base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
 
-	VkSpecializationMapEntry specialization_entries[7];
+	VkSpecializationMapEntry specialization_entries[8];
 	specialization_entries[0].constantID = 0;
 	specialization_entries[0].offset = 0;
 	specialization_entries[0].size = 4;
@@ -3630,7 +3630,10 @@ static void R_CreateWorldPipelines ()
 	specialization_entries[6].constantID = 6;
 	specialization_entries[6].offset = 24;
 	specialization_entries[6].size = 4;
-	uint32_t specialization_data[7];
+	specialization_entries[7].constantID = 7;
+	specialization_entries[7].offset = 28;
+	specialization_entries[7].size = 4;
+	uint32_t specialization_data[8];
 	specialization_data[0] = 0;
 	specialization_data[1] = 0;
 	specialization_data[2] = 0;
@@ -3638,9 +3641,10 @@ static void R_CreateWorldPipelines ()
 	specialization_data[4] = vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32; // 10-bit lightmap
 	specialization_data[5] = 0;
 	specialization_data[6] = 0;
+	specialization_data[7] = 0;
 
 	VkSpecializationInfo specialization_info;
-	specialization_info.mapEntryCount = countof (specialization_entries) - 2;
+	specialization_info.mapEntryCount = countof (specialization_entries) - 3;
 	specialization_info.pMapEntries = specialization_entries;
 	specialization_info.dataSize = sizeof (specialization_data);
 	specialization_info.pData = specialization_data;
@@ -3651,94 +3655,106 @@ static void R_CreateWorldPipelines ()
 	pipeline_create_infos_t infos;
 	for (int emissive_detail = 0; emissive_detail < 2; ++emissive_detail)
 	{
-		for (int emissive_coarse = 0; emissive_coarse < 2; ++emissive_coarse)
+		for (int emissive_bandlimit = 0; emissive_bandlimit < 2; ++emissive_bandlimit)
 		{
-			if (emissive_detail && !emissive_coarse)
+			if (emissive_bandlimit && !emissive_detail)
 				continue;
-			for (int alpha_blend = 0; alpha_blend < 2; ++alpha_blend)
+			for (int emissive_coarse = 0; emissive_coarse < 2; ++emissive_coarse)
 			{
-				if (emissive_coarse && alpha_blend)
+				if (emissive_detail && !emissive_coarse)
 					continue;
-				for (int alpha_test = 0; alpha_test < 2; ++alpha_test)
+				for (int alpha_blend = 0; alpha_blend < 2; ++alpha_blend)
 				{
-					for (int fullbright_enabled = 0; fullbright_enabled < 2; ++fullbright_enabled)
+					if (emissive_coarse && alpha_blend)
+						continue;
+					for (int alpha_test = 0; alpha_test < 2; ++alpha_test)
 					{
-						for (int quantize_lm = 0; quantize_lm < 2; ++quantize_lm)
+						for (int fullbright_enabled = 0; fullbright_enabled < 2; ++fullbright_enabled)
 						{
-							const int pipeline_index = fullbright_enabled + (alpha_test * 2) + (alpha_blend * 4) + (quantize_lm * 8) +
-													   (emissive_coarse * 16) + (emissive_detail * 32);
-
-							specialization_data[0] = fullbright_enabled;
-							specialization_data[1] = alpha_test;
-							specialization_data[2] = alpha_blend;
-							specialization_data[3] = quantize_lm;
-							specialization_data[6] = emissive_detail;
-							specialization_info.mapEntryCount = emissive_coarse ? countof (specialization_entries) : countof (specialization_entries) - 2;
-							for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+							for (int quantize_lm = 0; quantize_lm < 2; ++quantize_lm)
 							{
-								R_CopyPipelineCreateInfos (&infos, &base);
-								infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
-								infos.shader_stages[1].module = emissive_coarse ? world_emissive_frag_module : world_frag_module;
-								infos.shader_stages[1].pSpecializationInfo = &specialization_info;
-								infos.blend_attachment_states[0].blendEnable = alpha_blend ? VK_TRUE : VK_FALSE;
-								infos.depth_stencil_state.depthWriteEnable = alpha_blend ? VK_FALSE : VK_TRUE;
-								R_CreateGraphicsPipeline (
-									&vulkan_globals.world_pipelines[variant][pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
-									va (variant ? "world_main_oit %d" : "world %d", pipeline_index));
+								const int pipeline_index = fullbright_enabled + (alpha_test * 2) + (alpha_blend * 4) + (quantize_lm * 8) +
+														   (emissive_coarse * 16) + (emissive_detail * 32) + (emissive_bandlimit * 64);
 
-								if (emissive_detail && !fullbright_enabled)
+								specialization_data[0] = fullbright_enabled;
+								specialization_data[1] = alpha_test;
+								specialization_data[2] = alpha_blend;
+								specialization_data[3] = quantize_lm;
+								specialization_data[6] = emissive_detail;
+								specialization_data[7] = emissive_bandlimit;
+								specialization_info.mapEntryCount = emissive_coarse ? countof (specialization_entries) : countof (specialization_entries) - 3;
+								for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
 								{
-									for (int debug_mode = 1; debug_mode <= 7; ++debug_mode)
+									R_CopyPipelineCreateInfos (&infos, &base);
+									infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+									infos.shader_stages[1].module = emissive_coarse
+										? (emissive_bandlimit ? world_emissive_bandlimit_frag_module : world_emissive_frag_module)
+										: world_frag_module;
+									infos.shader_stages[1].pSpecializationInfo = &specialization_info;
+									infos.blend_attachment_states[0].blendEnable = alpha_blend ? VK_TRUE : VK_FALSE;
+									infos.depth_stencil_state.depthWriteEnable = alpha_blend ? VK_FALSE : VK_TRUE;
+									R_CreateGraphicsPipeline (
+										&vulkan_globals.world_pipelines[variant][pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+										va (variant ? "world_main_oit %d" : "world %d", pipeline_index));
+
+									if (emissive_detail && !fullbright_enabled)
 									{
-										const int debug_pipeline_index = alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4);
-										specialization_data[5] = debug_mode;
-										specialization_data[6] = (debug_mode > 1 && debug_mode < 5) || debug_mode >= 6;
-										R_CreateGraphicsPipeline (
-											&vulkan_globals.world_emissive_debug_pipelines[variant][debug_pipeline_index], &infos,
-											vulkan_globals.world_pipeline_layout,
-											va (variant ? "world_emissive_debug_main_oit %d" : "world_emissive_debug %d", debug_pipeline_index));
+										for (int debug_mode = 1; debug_mode <= 7; ++debug_mode)
+										{
+											const int debug_pipeline_index =
+												alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4) + (emissive_bandlimit * 28);
+											specialization_data[5] = debug_mode;
+											specialization_data[6] = (debug_mode > 1 && debug_mode < 5) || debug_mode >= 6;
+											R_CreateGraphicsPipeline (
+												&vulkan_globals.world_emissive_debug_pipelines[variant][debug_pipeline_index], &infos,
+												vulkan_globals.world_pipeline_layout,
+												va (variant ? "world_emissive_debug_main_oit %d" : "world_emissive_debug %d", debug_pipeline_index));
+										}
+										specialization_data[5] = 0;
+										specialization_data[6] = emissive_detail;
 									}
-									specialization_data[5] = 0;
-									specialization_data[6] = emissive_detail;
 								}
-							}
 
-							specialization_info.mapEntryCount = countof (specialization_entries) - 2;
-							if (alpha_blend)
-							{
-								R_CopyPipelineCreateInfos (&infos, &base);
-								infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
-								infos.graphics_pipeline.subpass = 1;
-								infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
-								infos.shader_stages[1].module = world_oit_frag_module;
-								infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
-								R_SetWBOITBlend (infos.blend_attachment_states);
-								R_CreateGraphicsPipeline (
-									&vulkan_globals.world_wboit_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
-									va ("world_wboit %d", pipeline_index));
+								specialization_info.mapEntryCount = countof (specialization_entries) - 3;
+								if (alpha_blend)
+								{
+									R_CopyPipelineCreateInfos (&infos, &base);
+									infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+									infos.graphics_pipeline.subpass = 1;
+									infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+									infos.shader_stages[1].module = world_oit_frag_module;
+									infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+									R_SetWBOITBlend (infos.blend_attachment_states);
+									R_CreateGraphicsPipeline (
+										&vulkan_globals.world_wboit_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+										va ("world_wboit %d", pipeline_index));
 
-								R_CopyPipelineCreateInfos (&infos, &base);
-								infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
-								infos.graphics_pipeline.subpass = 1;
-								infos.color_blend_state.attachmentCount = MBOIT_MOMENT_COLOR_ATTACHMENT_COUNT;
-								infos.shader_stages[1].module = world_mboit_moment_frag_module;
-								infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
-								R_SetMBOITMomentBlend (infos.blend_attachment_states);
-								R_CreateGraphicsPipeline (
-									&vulkan_globals.world_mboit_moment_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
-									va ("world_mboit_moment %d", pipeline_index));
+									R_CopyPipelineCreateInfos (&infos, &base);
+									infos.graphics_pipeline.renderPass =
+										vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+									infos.graphics_pipeline.subpass = 1;
+									infos.color_blend_state.attachmentCount = MBOIT_MOMENT_COLOR_ATTACHMENT_COUNT;
+									infos.shader_stages[1].module = world_mboit_moment_frag_module;
+									infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+									R_SetMBOITMomentBlend (infos.blend_attachment_states);
+									R_CreateGraphicsPipeline (
+										&vulkan_globals.world_mboit_moment_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+										va ("world_mboit_moment %d", pipeline_index));
 
-								R_CopyPipelineCreateInfos (&infos, &base);
-								infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
-								infos.graphics_pipeline.subpass = 2;
-								infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
-								infos.shader_stages[1].module = (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT) ? world_mboit_composite_frag_module
-																					   : world_mboit_composite_msaa_frag_module;
-								infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
-								R_SetMBOITCompositeBlend (infos.blend_attachment_states);
-								R_CreateGraphicsPipeline (
-									&vulkan_globals.world_mboit_composite_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
-									va ("world_mboit_composite %d", pipeline_index));
+									R_CopyPipelineCreateInfos (&infos, &base);
+									infos.graphics_pipeline.renderPass =
+										vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+									infos.graphics_pipeline.subpass = 2;
+									infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+									infos.shader_stages[1].module = (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
+																		? world_mboit_composite_frag_module
+																		: world_mboit_composite_msaa_frag_module;
+									infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+									R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+									R_CreateGraphicsPipeline (
+										&vulkan_globals.world_mboit_composite_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+										va ("world_mboit_composite %d", pipeline_index));
+								}
 							}
 						}
 					}
@@ -4120,6 +4136,20 @@ static void R_CreateUpdateLightmapPipelines ()
 		R_CreateComputePipeline (
 			&vulkan_globals.emissive_bandlimit_radiance_pipeline, emissive_coarse_comp_module, 0, &bandlimit_radiance_specialization,
 			"emissive_bandlimit_radiance");
+		const VkSpecializationMapEntry bandlimit_radiance_overlay_entries[] = {
+			{1, 0, sizeof (uint32_t)},
+			{2, sizeof (uint32_t), sizeof (uint32_t)},
+			{4, 2 * sizeof (uint32_t), sizeof (uint32_t)},
+			{5, 3 * sizeof (uint32_t), sizeof (uint32_t)},
+		};
+		const uint32_t bandlimit_radiance_overlay_data[] = {true, true, true, true};
+		const VkSpecializationInfo bandlimit_radiance_overlay_specialization = {
+			countof (bandlimit_radiance_overlay_entries), bandlimit_radiance_overlay_entries, sizeof (bandlimit_radiance_overlay_data),
+			bandlimit_radiance_overlay_data};
+		vulkan_globals.emissive_bandlimit_radiance_overlay_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_bandlimit_radiance_overlay_pipeline, emissive_coarse_comp_module, 0,
+			&bandlimit_radiance_overlay_specialization, "emissive_bandlimit_radiance_overlay");
 		const VkSpecializationMapEntry bandlimit_transient_entries[] = {
 			{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}, {2, 2 * sizeof (uint32_t), sizeof (uint32_t)}};
 		const uint32_t bandlimit_transient_data[] = {true, false, true};
@@ -4129,10 +4159,6 @@ static void R_CreateUpdateLightmapPipelines ()
 		R_CreateComputePipeline (
 			&vulkan_globals.emissive_bandlimit_transient_pipeline, emissive_detail_comp_module, 0, &bandlimit_transient_specialization,
 			"emissive_bandlimit_transient");
-		vulkan_globals.emissive_bandlimit_filter_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
-		R_CreateComputePipeline (
-			&vulkan_globals.emissive_bandlimit_filter_pipeline, emissive_bandlimit_filter_comp_module, 0, NULL,
-			"emissive_bandlimit_filter");
 		const VkSpecializationMapEntry transient_detail_entries[] = {{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}};
 		const uint32_t				   transient_detail_data[] = {true, false};
 		const VkSpecializationInfo	   transient_detail_specialization = {
@@ -4172,6 +4198,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (world_vert);
 	CREATE_SHADER_MODULE (world_frag);
 	CREATE_SHADER_MODULE (world_emissive_frag);
+	CREATE_SHADER_MODULE (world_emissive_bandlimit_frag);
 	CREATE_SHADER_MODULE (world_oit_frag);
 	CREATE_SHADER_MODULE (world_mboit_moment_frag);
 	CREATE_SHADER_MODULE (world_mboit_composite_frag);
@@ -4222,7 +4249,6 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
 	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
-	CREATE_SHADER_MODULE_COND (emissive_bandlimit_filter_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_bounce_comp, vulkan_globals.ray_query);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
@@ -4250,6 +4276,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (world_vert);
 	DESTROY_SHADER_MODULE (world_frag);
 	DESTROY_SHADER_MODULE (world_emissive_frag);
+	DESTROY_SHADER_MODULE (world_emissive_bandlimit_frag);
 	DESTROY_SHADER_MODULE (world_oit_frag);
 	DESTROY_SHADER_MODULE (world_mboit_moment_frag);
 	DESTROY_SHADER_MODULE (world_mboit_composite_frag);
@@ -4300,7 +4327,6 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
 	DESTROY_SHADER_MODULE (emissive_detail_comp);
-	DESTROY_SHADER_MODULE (emissive_bandlimit_filter_comp);
 	DESTROY_SHADER_MODULE (emissive_bounce_comp);
 	DESTROY_SHADER_MODULE (ray_debug_comp);
 	DESTROY_SHADER_MODULE (mesh_interpolate_comp);
@@ -4554,10 +4580,10 @@ void R_DestroyPipelines (void)
 		vulkan_globals.emissive_bandlimit_detail_pipeline.handle = VK_NULL_HANDLE;
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_radiance_pipeline.handle, NULL);
 		vulkan_globals.emissive_bandlimit_radiance_pipeline.handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_radiance_overlay_pipeline.handle, NULL);
+		vulkan_globals.emissive_bandlimit_radiance_overlay_pipeline.handle = VK_NULL_HANDLE;
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_transient_pipeline.handle, NULL);
 		vulkan_globals.emissive_bandlimit_transient_pipeline.handle = VK_NULL_HANDLE;
-		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_filter_pipeline.handle, NULL);
-		vulkan_globals.emissive_bandlimit_filter_pipeline.handle = VK_NULL_HANDLE;
 	}
 	if (vulkan_globals.emissive_bounce_pipeline.handle != VK_NULL_HANDLE)
 	{

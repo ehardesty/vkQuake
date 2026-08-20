@@ -188,6 +188,7 @@ SHADER_OBJS = \
 	mboit_resolve_msaa_frag.o \
 	world_frag.o \
 	world_emissive_frag.o \
+	world_emissive_bandlimit_frag.o \
 	world_oit_frag.o \
 	world_mboit_moment_frag.o \
 	world_mboit_composite_frag.o \
@@ -203,7 +204,6 @@ SHADER_OBJS = \
 	ray_debug_comp.o \
 	emissive_coarse_comp.o \
 	emissive_detail_comp.o \
-	emissive_bandlimit_filter_comp.o \
 	emissive_bounce_comp.o \
 	mesh_interpolate_comp.o \
 	skinning_comp.o \
@@ -337,6 +337,7 @@ $(eval $(call SHADER_VARIANT,basic_mboit_composite_frag,basic.frag,-DMBOIT=1 -DM
 $(eval $(call SHADER_VARIANT,basic_mboit_composite_msaa_frag,basic.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
 $(eval $(call SHADER_VARIANT,world_oit_frag,world.frag,-DWBOIT=1))
 $(eval $(call SHADER_VARIANT,world_emissive_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1))
+$(eval $(call SHADER_VARIANT,world_emissive_bandlimit_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1 -DEMISSIVE_BANDLIMIT=1))
 $(eval $(call SHADER_VARIANT,world_mboit_moment_frag,world.frag,-DMBOIT=1))
 $(eval $(call SHADER_VARIANT,world_mboit_composite_frag,world.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1))
 $(eval $(call SHADER_VARIANT,world_mboit_composite_msaa_frag,world.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))

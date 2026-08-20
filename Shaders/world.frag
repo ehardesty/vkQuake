@@ -27,6 +27,9 @@ layout (set = 2, binding = 0) uniform sampler2D fullbright_tex;
 layout (set = 5, binding = 0) uniform sampler2D emissive_coarse_tex;
 #ifdef EMISSIVE_DETAIL
 layout (set = 6, binding = 0) uniform sampler2D emissive_detail_tex;
+#ifdef EMISSIVE_BANDLIMIT
+layout (set = 7, binding = 0) uniform usampler2D emissive_surface_indices_tex;
+#endif
 #endif
 #endif
 
@@ -42,6 +45,7 @@ layout (constant_id = 4) const bool scaled_lm = false;
 layout (constant_id = 5) const uint emissive_debug_mode = 0;
 #ifdef EMISSIVE_DETAIL
 layout (constant_id = 6) const bool emissive_detail_enabled = false;
+layout (constant_id = 7) const bool emissive_bandlimit_enabled = false;
 #endif
 #endif
 

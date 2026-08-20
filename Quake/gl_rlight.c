@@ -1451,10 +1451,11 @@ void R_EmissiveRTStats_f (void)
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
 	const char *live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
-	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32", "band-limit raw", "band-limit support"};
+	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32", "band-limit output", "band-limit validity"};
 	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
 	const uint64_t		 max_source_evaluations = (uint64_t)tile_source_links * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE;
+	const uint64_t		 bandlimit_rays = bandlimit_active ? max_source_evaluations * EMISSIVE_BANDLIMIT_SAMPLES : 0;
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64
 		" logical GPU bytes, %" PRIu64 " allocated GPU bytes, %d uploaded source light%s, %" PRIu64
@@ -1483,11 +1484,13 @@ void R_EmissiveRTStats_f (void)
 		max_source_evaluations == 1 ? "" : "s", detail_gpu_time, detail_state,
 		detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
 	Con_Printf (
-		"RT emissive band-limit: requested %s, %s, %d deterministic receiver samples, radius-%d same-surface filter, %" PRIu64
-		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " aggregate required bytes%s\n",
+		"RT emissive band-limit v%d: requested %s, %s, %d deterministic receiver samples, %" PRIu64
+		" maximum rays, per-source coverage (no neighbor filter), %" PRIu64 " logical/%" PRIu64
+		" allocated retained-visibility bytes, %" PRIu64 " aggregate required bytes, last GPU coverage %s%s\n",
+		EMISSIVE_BANDLIMIT_VERSION,
 		r_emissive_rt_bandlimit.value > 0.0f ? "on" : "off", bandlimit_active ? "active" : "classic fallback",
-		EMISSIVE_BANDLIMIT_SAMPLES, EMISSIVE_BANDLIMIT_FILTER_RADIUS, bandlimit_logical_bytes, bandlimit_allocated_bytes,
-		bandlimit_peak_bytes, bandlimit_budget_limited ? ", budget exceeded" : "");
+		EMISSIVE_BANDLIMIT_SAMPLES, bandlimit_rays, bandlimit_logical_bytes, bandlimit_allocated_bytes,
+		bandlimit_peak_bytes, bandlimit_active ? detail_gpu_time : "unavailable", bandlimit_budget_limited ? ", budget exceeded" : "");
 	if (emissive_world_as_build_time_valid)
 		Con_Printf (
 			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, %.3f ms GPU build\n",

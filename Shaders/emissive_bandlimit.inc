@@ -1,5 +1,5 @@
 const uint EMISSIVE_BANDLIMIT_SAMPLES = 4u;
-const uint EMISSIVE_BANDLIMIT_VERSION = 1u;
+const uint EMISSIVE_BANDLIMIT_VERSION = 2u;
 
 uint EmissiveBandlimitHash (uint value)
 {
@@ -8,6 +8,29 @@ uint EmissiveBandlimitHash (uint value)
 	value ^= value >> 15;
 	value *= 0x846ca68bu;
 	return value ^ (value >> 16);
+}
+
+bool EmissiveBandlimitPointOnSurface (const surface_t surf, const vec3 world_pos, const vec3 normal)
+{
+	const uint first_vertex = surf.vbo_offset;
+	const uint num_vertices = surf.packed_tex_edgecount >> 16;
+	float winding = 0.0f;
+	for (uint vertex = 0u; vertex < num_vertices; ++vertex)
+	{
+		const world_vert_t first = world_verts[first_vertex + vertex];
+		const world_vert_t second = world_verts[first_vertex + (vertex + 1u) % num_vertices];
+		const vec3 first_pos = vec3 (first.x, first.y, first.z);
+		const vec3 edge = vec3 (second.x, second.y, second.z) - first_pos;
+		const float side = dot (cross (edge, world_pos - first_pos), normal);
+		const float epsilon = 0.01f * length (edge);
+		if (abs (side) <= epsilon)
+			continue;
+		if (winding == 0.0f)
+			winding = sign (side);
+		else if (side * winding < -epsilon)
+			return false;
+	}
+	return true;
 }
 
 vec2 EmissiveBandlimitOffset (
@@ -47,13 +70,16 @@ vec3 CalculateBandlimitedEmissiveContribution (
 		if (retained_visibility)
 			visibility_mask = emissive_visibility[(first_source + i) * 256u + visibility_texel];
 #endif
-		vec3 source_contribution = vec3 (0.0f);
+		float visible_weight = 0.0f;
+		float total_weight = 0.0f;
 		for (uint sample_index = 0u; sample_index < EMISSIVE_BANDLIMIT_SAMPLES; ++sample_index)
 		{
 			vec3 tangent;
 			vec3 bitangent;
 			const vec2 offset = EmissiveBandlimitOffset (surface_index, center_s, center_t, light_index, sample_index);
 			const vec3 world_pos = CalculateWorldPos (surf, center_s + offset.x, center_t + offset.y, tangent, bitangent);
+			if (!EmissiveBandlimitPointOnSurface (surf, world_pos, normal))
+				continue;
 			const vec3 light_vec = light.origin - world_pos;
 			const float dist = length (light_vec);
 			if (dist >= light.radius)
@@ -63,8 +89,10 @@ vec3 CalculateBandlimitedEmissiveContribution (
 			if (receiver_lambert <= 0.0f)
 				continue;
 			const float radial_falloff = max (1.0f - dist / light.radius, 0.0f);
+			const float sample_weight = radial_falloff * receiver_lambert;
+			total_weight += sample_weight;
 #ifdef EMISSIVE_DETAIL_VISIBILITY
-			const bool visible = !EmissiveIsOccluded (world_pos, normal, light.origin);
+			const bool visible = !EmissiveBandlimitIsOccluded (world_pos, normal, light.origin);
 			if (visible)
 				visibility_mask |= 1u << sample_index;
 			if (!visible)
@@ -73,13 +101,25 @@ vec3 CalculateBandlimitedEmissiveContribution (
 			if (retained_visibility && (visibility_mask & (1u << sample_index)) == 0u)
 				continue;
 #endif
-			source_contribution += light.intensity * radial_falloff * receiver_lambert * light.color;
+			visible_weight += sample_weight;
 		}
 #ifdef EMISSIVE_DETAIL_VISIBILITY
 		if (cache_visibility)
 			emissive_visibility[(first_source + i) * 256u + visibility_texel] = visibility_mask;
 #endif
-		contribution += modulation * source_contribution / float (EMISSIVE_BANDLIMIT_SAMPLES);
+		vec3 center_tangent;
+		vec3 center_bitangent;
+		const vec3 center_world_pos = CalculateWorldPos (surf, center_s, center_t, center_tangent, center_bitangent);
+		const vec3 center_light_vec = light.origin - center_world_pos;
+		const float center_dist = length (center_light_vec);
+		if (center_dist >= light.radius)
+			continue;
+		const vec3 center_direction = center_light_vec / max (center_dist, 0.001f);
+		const float center_lambert = max (dot (normal, center_direction), 0.0f);
+		const float center_falloff = max (1.0f - center_dist / light.radius, 0.0f);
+		const float coverage = total_weight > 0.0f ? clamp (visible_weight / total_weight, 0.0f, 1.0f) : 0.0f;
+		const vec3 unshadowed_center = light.intensity * center_falloff * center_lambert * light.color;
+		contribution += modulation * unshadowed_center * coverage;
 	}
 	return max (contribution, 0.0f);
 }
