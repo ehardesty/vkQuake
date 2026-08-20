@@ -36,8 +36,8 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays,
-	r_emissive_rt_bounce_resolution;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+	r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -2605,6 +2605,7 @@ DECLARE_SHADER_MODULE (update_lightmap_10bit_comp);
 DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
 DECLARE_SHADER_MODULE (emissive_detail_comp);
+DECLARE_SHADER_MODULE (emissive_bandlimit_filter_comp);
 DECLARE_SHADER_MODULE (emissive_bounce_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
 DECLARE_SHADER_MODULE (mesh_interpolate_comp);
@@ -3687,11 +3688,11 @@ static void R_CreateWorldPipelines ()
 
 								if (emissive_detail && !fullbright_enabled)
 								{
-									for (int debug_mode = 1; debug_mode <= 5; ++debug_mode)
+									for (int debug_mode = 1; debug_mode <= 7; ++debug_mode)
 									{
 										const int debug_pipeline_index = alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4);
 										specialization_data[5] = debug_mode;
-										specialization_data[6] = debug_mode > 1 && debug_mode < 5;
+										specialization_data[6] = (debug_mode > 1 && debug_mode < 5) || debug_mode >= 6;
 										R_CreateGraphicsPipeline (
 											&vulkan_globals.world_emissive_debug_pipelines[variant][debug_pipeline_index], &infos,
 											vulkan_globals.world_pipeline_layout,
@@ -4102,6 +4103,36 @@ static void R_CreateUpdateLightmapPipelines ()
 	{
 		R_CreateComputePipeline (&vulkan_globals.emissive_bounce_pipeline, emissive_bounce_comp_module, 0, NULL, "emissive_bounce");
 		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
+		const VkSpecializationMapEntry bandlimit_detail_entry = {2, 0, sizeof (uint32_t)};
+		const uint32_t bandlimit_enabled = true;
+		const VkSpecializationInfo bandlimit_detail_specialization = {
+			1, &bandlimit_detail_entry, sizeof (bandlimit_enabled), &bandlimit_enabled};
+		vulkan_globals.emissive_bandlimit_detail_pipeline.layout = vulkan_globals.emissive_detail_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_bandlimit_detail_pipeline, emissive_detail_comp_module, 0, &bandlimit_detail_specialization,
+			"emissive_bandlimit_detail");
+		const VkSpecializationMapEntry bandlimit_radiance_entries[] = {
+			{1, 0, sizeof (uint32_t)}, {2, sizeof (uint32_t), sizeof (uint32_t)}, {5, 2 * sizeof (uint32_t), sizeof (uint32_t)}};
+		const uint32_t bandlimit_radiance_data[] = {true, true, true};
+		const VkSpecializationInfo bandlimit_radiance_specialization = {
+			countof (bandlimit_radiance_entries), bandlimit_radiance_entries, sizeof (bandlimit_radiance_data), bandlimit_radiance_data};
+		vulkan_globals.emissive_bandlimit_radiance_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_bandlimit_radiance_pipeline, emissive_coarse_comp_module, 0, &bandlimit_radiance_specialization,
+			"emissive_bandlimit_radiance");
+		const VkSpecializationMapEntry bandlimit_transient_entries[] = {
+			{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}, {2, 2 * sizeof (uint32_t), sizeof (uint32_t)}};
+		const uint32_t bandlimit_transient_data[] = {true, false, true};
+		const VkSpecializationInfo bandlimit_transient_specialization = {
+			countof (bandlimit_transient_entries), bandlimit_transient_entries, sizeof (bandlimit_transient_data), bandlimit_transient_data};
+		vulkan_globals.emissive_bandlimit_transient_pipeline.layout = vulkan_globals.emissive_detail_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_bandlimit_transient_pipeline, emissive_detail_comp_module, 0, &bandlimit_transient_specialization,
+			"emissive_bandlimit_transient");
+		vulkan_globals.emissive_bandlimit_filter_pipeline.layout = vulkan_globals.emissive_coarse_pipeline.layout;
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_bandlimit_filter_pipeline, emissive_bandlimit_filter_comp_module, 0, NULL,
+			"emissive_bandlimit_filter");
 		const VkSpecializationMapEntry transient_detail_entries[] = {{0, 0, sizeof (uint32_t)}, {1, sizeof (uint32_t), sizeof (uint32_t)}};
 		const uint32_t				   transient_detail_data[] = {true, false};
 		const VkSpecializationInfo	   transient_detail_specialization = {
@@ -4191,6 +4222,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
 	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
+	CREATE_SHADER_MODULE_COND (emissive_bandlimit_filter_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_bounce_comp, vulkan_globals.ray_query);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
@@ -4268,6 +4300,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
 	DESTROY_SHADER_MODULE (emissive_detail_comp);
+	DESTROY_SHADER_MODULE (emissive_bandlimit_filter_comp);
 	DESTROY_SHADER_MODULE (emissive_bounce_comp);
 	DESTROY_SHADER_MODULE (ray_debug_comp);
 	DESTROY_SHADER_MODULE (mesh_interpolate_comp);
@@ -4515,6 +4548,17 @@ void R_DestroyPipelines (void)
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_detail_pipeline.handle, NULL);
 		vulkan_globals.emissive_detail_pipeline.handle = VK_NULL_HANDLE;
 	}
+	if (vulkan_globals.emissive_bandlimit_detail_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_detail_pipeline.handle, NULL);
+		vulkan_globals.emissive_bandlimit_detail_pipeline.handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_radiance_pipeline.handle, NULL);
+		vulkan_globals.emissive_bandlimit_radiance_pipeline.handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_transient_pipeline.handle, NULL);
+		vulkan_globals.emissive_bandlimit_transient_pipeline.handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bandlimit_filter_pipeline.handle, NULL);
+		vulkan_globals.emissive_bandlimit_filter_pipeline.handle = VK_NULL_HANDLE;
+	}
 	if (vulkan_globals.emissive_bounce_pipeline.handle != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bounce_pipeline.handle, NULL);
@@ -4623,6 +4667,8 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_bandlimit);
+	Cvar_SetCallback (&r_emissive_rt_bandlimit, R_EmissiveBandlimitChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce);
 	Cvar_SetCallback (&r_emissive_rt_bounce, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce_strength);

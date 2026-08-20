@@ -16,6 +16,7 @@ push_constants;
 
 layout (constant_id = 0) const bool transient_overlay = false;
 layout (constant_id = 1) const bool modulated_sources = true;
+layout (constant_id = 2) const bool bandlimited = false;
 const bool indexed_sources = true;
 bool cache_visibility;
 
@@ -94,6 +95,7 @@ bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 lig
 #define EMISSIVE_DETAIL_VISIBILITY
 #define EMISSIVE_SOURCE_INDICES
 #include "emissive_lighting.inc"
+#include "emissive_bandlimit.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
@@ -128,10 +130,12 @@ void main ()
 			normal = -normal;
 
 		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
-		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
+		contribution = bandlimited
+			? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
+			: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
 		validity = 1.0f;
 	}
-	if (transient_overlay)
+	if (transient_overlay && !bandlimited)
 	{
 		const vec4 cacheable = texelFetch (cacheable_image, coords, 0);
 		contribution += cacheable.rgb;

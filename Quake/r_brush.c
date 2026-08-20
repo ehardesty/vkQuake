@@ -27,8 +27,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_rays,
-	r_emissive_rt_bounce_resolution;
+extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+	r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution;
 
 int gl_lightmap_format;
 
@@ -389,6 +389,8 @@ COMPILE_TIME_ASSERT (emissive_bounce_push_constants_t, sizeof (emissive_bounce_p
 #define EMISSIVE_BOUNCE_MAX_RAYS 64
 #define EMISSIVE_BOUNCE_MEMORY_BUDGET_MB 256
 #define EMISSIVE_BOUNCE_VERSION 2
+// Diagonal of the radius-two detail filter plus the maximum four-unit receiver jitter, rounded up.
+#define EMISSIVE_BANDLIMIT_SUPPORT_RADIUS 29.0f
 enum
 {
 	EMISSIVE_BOUNCE_TIMESTAMP_TRANSFER,
@@ -418,6 +420,11 @@ static qboolean			   emissive_detail_pending;
 static qboolean			   emissive_detail_building;
 static qboolean			   emissive_detail_ready;
 static qboolean			   emissive_detail_budget_limited;
+static qboolean			   emissive_bandlimit_active;
+static qboolean			   emissive_bandlimit_budget_limited;
+static uint64_t			   emissive_bandlimit_logical_bytes;
+static uint64_t			   emissive_bandlimit_allocated_bytes;
+static uint64_t			   emissive_bandlimit_peak_bytes;
 typedef struct emissive_logical_tile_s
 {
 	uint32_t first_source;
@@ -478,6 +485,11 @@ static void R_EnsureTransientEmissiveResources (void);
 static qboolean R_TransientEmissiveDetailAvailable (void);
 static qboolean R_SurfaceInEmissiveWorldAccelerationStructure (const msurface_t *surface);
 static void R_DeleteEmissiveBounceResources (void);
+static void R_FreeEmissiveBandlimitDescriptorSets (void);
+static qboolean R_AllocateEmissiveBandlimitTextures (void);
+static void R_FreeEmissiveBandlimitTextures (void);
+static void R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[5]);
+static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean detail_only);
 static void R_AllocateEmissiveBounceDebugLightmaps (void);
 static VkDeviceSize R_EmissiveBufferMemorySize (VkDeviceSize size, VkBufferUsageFlags usage);
 static void						R_UpdateTransientEmissiveBuffer (VkCommandBuffer cb, VkBuffer buffer, const void *data, size_t size);
@@ -1094,7 +1106,7 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 	gltexture_t *lastemissivedetail = NULL;
 	gltexture_t *lastlightmap = NULL;
 	gltexture_t *lasttexture = NULL;
-	const int	 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 5);
+	const int	 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 7);
 	const qboolean detail_ready = R_EmissiveDetailReady ();
 	const qboolean transient_emissive_active = R_TransientEmissiveActive ();
 	float		 last_alpha = FLT_MAX;
@@ -1167,10 +1179,14 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					? lightmaps[lm_idx].emissive_transient_texture
 					: lightmaps[lm_idx].emissive_texture;
 			}
+			const qboolean bandlimit_raw_debug = debug_mode >= 6 && R_EmissiveBandlimitActive ();
 			gltexture_t *emissive_detail_texture = !bounce_debug && !draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0
-				? (transient_emissive_active && lightmaps[lm_idx].emissive_transient_texture
-						? lightmaps[lm_idx].emissive_transient_detail_texture
-						: lightmaps[lm_idx].emissive_detail_texture)
+				? (bandlimit_raw_debug
+						? (transient_emissive_active ? lightmaps[lm_idx].emissive_bandlimit_transient_raw_texture
+												 : lightmaps[lm_idx].emissive_bandlimit_raw_texture)
+						: (transient_emissive_active && lightmaps[lm_idx].emissive_transient_texture
+								? lightmaps[lm_idx].emissive_transient_detail_texture
+								: lightmaps[lm_idx].emissive_detail_texture))
 				: NULL;
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
@@ -2102,6 +2118,7 @@ void GL_BuildLightmaps (void)
 	msurface_t				  *surf;
 
 	GL_WaitForDeviceIdle ();
+	R_FreeEmissiveBandlimitDescriptorSets ();
 
 	r_framecount = 1; // no dlightcache
 
@@ -2136,6 +2153,9 @@ void GL_BuildLightmaps (void)
 	last_lightmap_allocated = 0;
 	lightmap_count = 0;
 	emissive_detail_budget_limited = false;
+	emissive_bandlimit_active = false;
+	emissive_bandlimit_budget_limited = false;
+	emissive_bandlimit_logical_bytes = emissive_bandlimit_allocated_bytes = emissive_bandlimit_peak_bytes = 0;
 	SAFE_FREE (emissive_logical_tiles);
 	SAFE_FREE (emissive_logical_tile_sources);
 	SAFE_FREE (emissive_light_styles);
@@ -2890,6 +2910,8 @@ static qboolean R_EmissiveSurfaceLightmapPoint (const msurface_t *surface, float
 static qboolean R_EmissiveLightInfluencesTile (
 	const msurface_t *surface, int tile_x, int tile_y, const emissive_light_t *light)
 {
+	const float influence_radius =
+		light->radius + (emissive_bandlimit_active ? EMISSIVE_BANDLIMIT_SUPPORT_RADIUS : 0.0f);
 	const int surface_width = (surface->extents[0] >> 4) + 1;
 	const int surface_height = (surface->extents[1] >> 4) + 1;
 	const int first_s = q_max (tile_x * 8, surface->light_s);
@@ -2926,7 +2948,7 @@ static qboolean R_EmissiveLightInfluencesTile (
 			distance = light->origin[axis] - maxs[axis];
 		distance_squared += distance * distance;
 	}
-	return distance_squared < light->radius * light->radius;
+	return distance_squared < influence_radius * influence_radius;
 }
 
 /*
@@ -3155,18 +3177,20 @@ static void R_InvalidateTransientEmissiveNode (mnode_t *node, transient_emissive
 		return;
 	const float distance = node->plane->type < 3 ? invalidation->light->origin[node->plane->type] - node->plane->dist
 											 : DotProduct (invalidation->light->origin, node->plane->normal) - node->plane->dist;
-	if (distance > invalidation->light->radius)
+	const float influence_radius =
+		invalidation->light->radius + (emissive_bandlimit_active ? EMISSIVE_BANDLIMIT_SUPPORT_RADIUS : 0.0f);
+	if (distance > influence_radius)
 	{
 		R_InvalidateTransientEmissiveNode (node->children[0], invalidation);
 		return;
 	}
-	if (distance < -invalidation->light->radius)
+	if (distance < -influence_radius)
 	{
 		R_InvalidateTransientEmissiveNode (node->children[1], invalidation);
 		return;
 	}
 	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
-	for (int i = 0; i < node->numsurfaces; ++i)
+	for (unsigned int i = 0; i < node->numsurfaces; ++i)
 	{
 		msurface_t *const surface = &cl.worldmodel->surfaces[node->firstsurface + i];
 		if (surface < first_surface || surface >= first_surface + cl.worldmodel->nummodelsurfaces)
@@ -3724,7 +3748,7 @@ static void R_BuildEmissiveBounceResources (void)
 		emissive_bounce_counters[0] = emissive_bounce_counters[1] = 0;
 		emissive_bounce_pending = true;
 		R_SetEmissiveBounceInfluence (true);
-		if (CLAMP (0, (int)r_emissive_rt_debug.value, 5) == 5)
+		if (CLAMP (0, (int)r_emissive_rt_debug.value, 7) == 5)
 			R_AllocateEmissiveBounceDebugLightmaps ();
 	}
 	emissive_bounce_prepare_time_us = (uint32_t)((Sys_DoubleTime () - start) * 1000000.0);
@@ -4032,6 +4056,17 @@ static void R_FreeTransientEmissiveDescriptorSets (void)
 			R_FreeDescriptorSet (lightmap->emissive_transient_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 			lightmap->emissive_transient_detail_descriptor_set = VK_NULL_HANDLE;
 		}
+		VkDescriptorSet *const bandlimit_sets[] = {
+			&lightmap->emissive_bandlimit_transient_descriptor_set,
+			&lightmap->emissive_bandlimit_transient_filter_horizontal_descriptor_set,
+			&lightmap->emissive_bandlimit_transient_filter_vertical_descriptor_set,
+		};
+		for (int set = 0; set < countof (bandlimit_sets); ++set)
+			if (*bandlimit_sets[set] != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (*bandlimit_sets[set], &vulkan_globals.emissive_compute_set_layout);
+				*bandlimit_sets[set] = VK_NULL_HANDLE;
+			}
 	}
 }
 
@@ -4162,8 +4197,20 @@ static void R_EnsureTransientEmissiveResources (void)
 		else if (lightmap->emissive_detail_texture)
 			detail_required_bytes += TexMgr_RGBA16FImageMemorySize (
 				lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height);
+		if (emissive_bandlimit_active && lightmap->emissive_detail_texture)
+		{
+			detail_required_bytes += GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_raw_texture->allocation);
+			detail_required_bytes += GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_scratch_texture->allocation);
+			detail_required_bytes += lightmap->emissive_bandlimit_transient_raw_texture
+				? GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_transient_raw_texture->allocation)
+				: TexMgr_RGBA16FImageMemorySize (lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height);
+		}
 	}
-	const qboolean transient_detail_admitted = detail_required_bytes <= (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	const uint64_t retained_required_bytes = emissive_bandlimit_active ? emissive_visibility_buffer_memory.size : 0;
+	const qboolean transient_detail_admitted =
+		detail_required_bytes + retained_required_bytes <= (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	emissive_bandlimit_peak_bytes = q_max (
+		emissive_bandlimit_peak_bytes, detail_required_bytes + retained_required_bytes);
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -4182,6 +4229,15 @@ static void R_EnsureTransientEmissiveResources (void)
 		{
 			q_snprintf (name, sizeof (name), "emissive_transient_detail_%07i", i);
 			lightmap->emissive_transient_detail_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+			created_texture = true;
+		}
+		if (transient_detail_admitted && emissive_bandlimit_active && lightmap->emissive_detail_texture &&
+			!lightmap->emissive_bandlimit_transient_raw_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_bandlimit_transient_raw_%07i", i);
+			lightmap->emissive_bandlimit_transient_raw_texture = TexMgr_LoadImage (
 				cl.worldmodel, name, lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height, SRC_RGBA16F, NULL, "", 0,
 				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
 			created_texture = true;
@@ -4211,6 +4267,18 @@ static void R_EnsureTransientEmissiveResources (void)
 			if (lightmap->emissive_transient_detail_texture)
 				lightmap->emissive_transient_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 					lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_detail_texture, source_buffers, "transient detail", i);
+			if (emissive_bandlimit_active && lightmap->emissive_bandlimit_transient_raw_texture &&
+				lightmap->emissive_transient_detail_texture)
+			{
+				lightmap->emissive_bandlimit_transient_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+					lightmap, lightmap->emissive_bandlimit_transient_raw_texture, NULL, source_buffers, "bandlimit transient", i);
+				lightmap->emissive_bandlimit_transient_filter_horizontal_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+					lightmap, lightmap->emissive_bandlimit_scratch_texture, lightmap->emissive_bandlimit_transient_raw_texture, source_buffers,
+					"bandlimit transient horizontal", i);
+				lightmap->emissive_bandlimit_transient_filter_vertical_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+					lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_bandlimit_scratch_texture, source_buffers,
+					"bandlimit transient vertical", i);
+			}
 		}
 		R_CreateEmissiveRadianceOverlayDescriptorSets ();
 	}
@@ -4226,6 +4294,7 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	if (emissive_lights_buffer != VK_NULL_HANDLE || emissive_tiles_buffer != VK_NULL_HANDLE || emissive_tile_sources_buffer != VK_NULL_HANDLE ||
 		emissive_modulations_buffer != VK_NULL_HANDLE || emissive_visibility_buffer != VK_NULL_HANDLE || emissive_radiance_tiles_buffer != VK_NULL_HANDLE)
 		GL_WaitForDeviceIdle ();
+	R_FreeEmissiveBandlimitDescriptorSets ();
 	R_FreeEmissiveRadianceOverlayDescriptorSets ();
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -4286,13 +4355,47 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	emissive_detail_pending = false;
 	emissive_detail_building = false;
 	emissive_detail_ready = false;
+	emissive_bandlimit_active = false;
 	GL_ResetEmissiveCoarseTimestamp ();
 	GL_ResetEmissiveDetailTimestamp ();
 	GL_ResetEmissiveRadianceTimestamp ();
+	if (lights && count > 0)
+		emissive_bandlimit_active = R_AllocateEmissiveBandlimitTextures ();
+	else
+		R_FreeEmissiveBandlimitTextures ();
+	if (!emissive_bandlimit_active && lights && count > 0 && CLAMP (0, (int)r_emissive_rt_bandlimit.value, 1) == 0)
+		R_FreeEmissiveBandlimitTextures ();
 	R_BuildEmissiveLogicalTileSources (lights, count, surface_lights, num_surface_lights);
 	if (!lights || count <= 0)
 		return;
 	assert (styles);
+	const uint64_t visibility_budget = (uint64_t)EMISSIVE_VISIBILITY_MEMORY_BUDGET_MB * 1024 * 1024;
+	uint64_t visibility_size =
+		(uint64_t)num_emissive_logical_tile_sources * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE * sizeof (uint32_t);
+	VkDeviceSize visibility_required_size =
+		visibility_size ? R_EmissiveBufferMemorySize (visibility_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : 0;
+	const uint64_t detail_budget = (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	if (emissive_bandlimit_active &&
+		(visibility_required_size > visibility_budget || emissive_bandlimit_peak_bytes + visibility_required_size > detail_budget))
+	{
+		const uint64_t rejected_required = emissive_bandlimit_peak_bytes + visibility_required_size;
+		emissive_bandlimit_budget_limited = true;
+		emissive_bandlimit_active = false;
+		R_FreeEmissiveBandlimitTextures ();
+		emissive_bandlimit_peak_bytes = rejected_required;
+		R_BuildEmissiveLogicalTileSources (lights, count, surface_lights, num_surface_lights);
+		visibility_size =
+			(uint64_t)num_emissive_logical_tile_sources * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE * sizeof (uint32_t);
+		visibility_required_size = visibility_size
+			? R_EmissiveBufferMemorySize (visibility_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+			: 0;
+		Con_DPrintf (
+			"RT emissives: band-limited detail rejected (%" PRIu64
+			" aggregate required bytes); classic detail remains active\n",
+			rejected_required);
+	}
+	else if (emissive_bandlimit_active)
+		emissive_bandlimit_peak_bytes += visibility_required_size;
 
 	const size_t size = count * sizeof (*lights);
 	R_CreateBuffer (
@@ -4343,10 +4446,6 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 			&num_vulkan_bmodel_allocations, NULL, "Emissive tile source indices");
 		R_StagingUploadBuffer (emissive_tile_sources_buffer, tile_sources_size, (const byte *)emissive_logical_tile_sources);
 	}
-	const uint64_t visibility_budget = (uint64_t)EMISSIVE_VISIBILITY_MEMORY_BUDGET_MB * 1024 * 1024;
-	const uint64_t visibility_size = (uint64_t)num_emissive_logical_tile_sources * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE * sizeof (uint32_t);
-	const VkDeviceSize visibility_required_size =
-		visibility_size ? R_EmissiveBufferMemorySize (visibility_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : 0;
 	if (visibility_required_size && visibility_required_size <= visibility_budget)
 	{
 		R_CreateBuffer (
@@ -4382,8 +4481,153 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 			emissive_detail_pending = num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ();
 		}
 	}
+	R_CreateEmissiveBandlimitDescriptorSets (source_buffers);
 	R_CreateEmissiveRadianceOverlayDescriptorSets ();
 	emissive_coarse_pending = true;
+}
+
+static void R_FreeEmissiveBandlimitDescriptorSets (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		VkDescriptorSet *const sets[] = {
+			&lightmap->emissive_bandlimit_detail_descriptor_set,
+			&lightmap->emissive_bandlimit_radiance_descriptor_set,
+			&lightmap->emissive_bandlimit_filter_horizontal_descriptor_set,
+			&lightmap->emissive_bandlimit_filter_vertical_descriptor_set,
+			&lightmap->emissive_bandlimit_radiance_filter_horizontal_descriptor_set,
+			&lightmap->emissive_bandlimit_radiance_filter_vertical_descriptor_set,
+			&lightmap->emissive_bandlimit_transient_descriptor_set,
+			&lightmap->emissive_bandlimit_transient_filter_horizontal_descriptor_set,
+			&lightmap->emissive_bandlimit_transient_filter_vertical_descriptor_set,
+		};
+		for (int set = 0; set < countof (sets); ++set)
+			if (*sets[set] != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (*sets[set], &vulkan_globals.emissive_compute_set_layout);
+				*sets[set] = VK_NULL_HANDLE;
+			}
+	}
+}
+
+static qboolean R_AllocateEmissiveBandlimitTextures (void)
+{
+	if (!vulkan_globals.ray_query || CLAMP (0, (int)r_emissive_rt_bandlimit.value, 1) == 0)
+		return false;
+
+	const uint64_t budget = (uint64_t)EMISSIVE_DETAIL_MEMORY_BUDGET_MB * 1024 * 1024;
+	uint64_t required = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		const struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!lightmap->emissive_detail_texture)
+			continue;
+		required += GL_HeapGetAllocationSize (lightmap->emissive_detail_texture->allocation);
+		required += lightmap->emissive_bandlimit_raw_texture
+			? GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_raw_texture->allocation)
+			: TexMgr_RGBA16FImageMemorySize (lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height);
+		required += lightmap->emissive_bandlimit_scratch_texture
+			? GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_scratch_texture->allocation)
+			: TexMgr_RGBA16FImageMemorySize (lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height);
+	}
+	emissive_bandlimit_peak_bytes = required;
+	if (required > budget)
+	{
+		emissive_bandlimit_budget_limited = true;
+		Con_DPrintf (
+			"RT emissives: band-limited detail rejected (%" PRIu64 " required bytes, %" PRIu64 " byte detail budget); classic detail remains active\n",
+			required, budget);
+		return false;
+	}
+
+	emissive_bandlimit_logical_bytes = emissive_bandlimit_allocated_bytes = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!lightmap->emissive_detail_texture)
+			continue;
+		char name[48];
+		if (!lightmap->emissive_bandlimit_raw_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_bandlimit_raw_%07i", i);
+			lightmap->emissive_bandlimit_raw_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		}
+		if (!lightmap->emissive_bandlimit_scratch_texture)
+		{
+			q_snprintf (name, sizeof (name), "emissive_bandlimit_scratch_%07i", i);
+			lightmap->emissive_bandlimit_scratch_texture = TexMgr_LoadImage (
+				cl.worldmodel, name, lightmap->emissive_detail_texture->width, lightmap->emissive_detail_texture->height, SRC_RGBA16F, NULL, "", 0,
+				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		}
+		emissive_bandlimit_logical_bytes +=
+			(uint64_t)lightmap->emissive_detail_texture->width * lightmap->emissive_detail_texture->height * 16;
+		emissive_bandlimit_allocated_bytes += GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_raw_texture->allocation) +
+			GL_HeapGetAllocationSize (lightmap->emissive_bandlimit_scratch_texture->allocation);
+	}
+	emissive_bandlimit_budget_limited = false;
+	return true;
+}
+
+static void R_FreeEmissiveBandlimitTextures (void)
+{
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		gltexture_t **const textures[] = {
+			&lightmap->emissive_bandlimit_raw_texture,
+			&lightmap->emissive_bandlimit_scratch_texture,
+			&lightmap->emissive_bandlimit_transient_raw_texture,
+		};
+		for (int texture = 0; texture < countof (textures); ++texture)
+			if (*textures[texture])
+			{
+				TexMgr_FreeTexture (*textures[texture]);
+				*textures[texture] = NULL;
+			}
+	}
+	emissive_bandlimit_logical_bytes = 0;
+	emissive_bandlimit_allocated_bytes = 0;
+	emissive_bandlimit_peak_bytes = 0;
+}
+
+static void R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[5])
+{
+	R_FreeEmissiveBandlimitDescriptorSets ();
+	if (!emissive_bandlimit_active)
+	{
+		return;
+	}
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (!lightmap->emissive_bandlimit_raw_texture || !lightmap->emissive_bandlimit_scratch_texture)
+			continue;
+		lightmap->emissive_bandlimit_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_bandlimit_raw_texture, NULL, source_buffers, "bandlimit detail", i);
+		VkDescriptorBufferInfo radiance_buffers[5];
+		memcpy (radiance_buffers, source_buffers, sizeof (radiance_buffers));
+		radiance_buffers[1].buffer = emissive_radiance_tiles_buffer != VK_NULL_HANDLE ? emissive_radiance_tiles_buffer : emissive_lights_buffer;
+		radiance_buffers[1].offset = 0;
+		radiance_buffers[1].range = emissive_radiance_tiles_buffer != VK_NULL_HANDLE ? VK_WHOLE_SIZE : sizeof (uint32_t);
+		lightmap->emissive_bandlimit_radiance_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_bandlimit_raw_texture, NULL, radiance_buffers, "bandlimit radiance", i);
+		lightmap->emissive_bandlimit_filter_horizontal_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_bandlimit_scratch_texture, lightmap->emissive_bandlimit_raw_texture, source_buffers,
+			"bandlimit horizontal", i);
+		lightmap->emissive_bandlimit_filter_vertical_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_detail_texture, lightmap->emissive_bandlimit_scratch_texture, source_buffers,
+			"bandlimit vertical", i);
+		lightmap->emissive_bandlimit_radiance_filter_horizontal_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_bandlimit_scratch_texture, lightmap->emissive_bandlimit_raw_texture, radiance_buffers,
+			"bandlimit radiance horizontal", i);
+		lightmap->emissive_bandlimit_radiance_filter_vertical_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+			lightmap, lightmap->emissive_detail_texture, lightmap->emissive_bandlimit_scratch_texture, radiance_buffers,
+			"bandlimit radiance vertical", i);
+	}
+	emissive_bandlimit_active = true;
 }
 
 static VkDescriptorSet R_AllocateEmissiveBounceDescriptorSet (struct lightmap_s *lightmap, gltexture_t *texture, int index)
@@ -4504,7 +4748,7 @@ void R_EmissiveBounceChanged_f (cvar_t *var)
 		R_SetEmissiveBounceInfluence (true);
 		emissive_bounce_pending = false;
 		emissive_bounce_recombine_pending = true;
-		if (CLAMP (0, (int)r_emissive_rt_debug.value, 5) == 5)
+		if (CLAMP (0, (int)r_emissive_rt_debug.value, 7) == 5)
 			emissive_bounce_debug_pending = true;
 	}
 	else
@@ -4519,7 +4763,7 @@ qboolean R_EmissiveBounceDebugReady (void)
 	return emissive_bounce_debug_ready;
 }
 
-static void R_EmissiveBounceImageBarrier (cb_context_t *cbx, gltexture_t *texture, VkImageLayout old_layout, VkImageLayout new_layout)
+static void R_EmissiveComputeImageBarrier (cb_context_t *cbx, gltexture_t *texture, VkImageLayout old_layout, VkImageLayout new_layout)
 {
 	ZEROED_STRUCT (VkImageMemoryBarrier, barrier);
 	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -4568,7 +4812,7 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 				continue;
 			if (*descriptor_set == VK_NULL_HANDLE)
 				*descriptor_set = R_AllocateEmissiveBounceDescriptorSet (lightmap, texture, i);
-			R_EmissiveBounceImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+			R_EmissiveComputeImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 			vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, descriptor_set, 0, NULL);
 			emissive_bounce_push_constants_t constants = {4, 0, detail ? EMISSIVE_DETAIL_SCALE : 1,
 				emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f};
@@ -4615,7 +4859,7 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			R_FreeDescriptorSet (*descriptor_set, &vulkan_globals.emissive_bounce_set_layout);
 		*descriptor_set = R_AllocateEmissiveBounceDescriptorSet (lightmap, texture, i);
 		first_set = first_set == VK_NULL_HANDLE ? *descriptor_set : first_set;
-		R_EmissiveBounceImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		R_EmissiveComputeImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, descriptor_set, 0, NULL);
 		emissive_bounce_push_constants_t constants = {detail ? 4 : 0, 0, detail ? EMISSIVE_DETAIL_SCALE : 1,
 			emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f};
@@ -4701,7 +4945,7 @@ static void R_DispatchEmissiveBounceDebug (cb_context_t *cbx)
 		gltexture_t *const texture = lightmap->emissive_bounce_debug_texture;
 		if (!texture || lightmap->emissive_bounce_debug_descriptor_set == VK_NULL_HANDLE)
 			continue;
-		R_EmissiveBounceImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		R_EmissiveComputeImageBarrier (cbx, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 		vkCmdBindDescriptorSets (
 			cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &lightmap->emissive_bounce_debug_descriptor_set, 0, NULL);
 		emissive_bounce_push_constants_t constants = {
@@ -4827,8 +5071,105 @@ void R_UpdateEmissiveLightstyles (void)
 		/* Styled detail is not admitted without retained visibility; the coarse atlas remains authoritative. */
 		emissive_radiance_detail_pending = false;
 		emissive_radiance_force_all_styled_tiles = false;
+		emissive_detail_pending = emissive_detail_building = emissive_detail_ready = false;
+		transient_emissive_detail_ready = false;
 	}
 	emissive_radiance_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
+}
+
+void R_EmissiveBandlimitStats (
+	qboolean *active, qboolean *budget_limited, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *peak_bytes)
+{
+	*active = emissive_bandlimit_active;
+	*budget_limited = emissive_bandlimit_budget_limited;
+	*logical_bytes = 0;
+	*allocated_bytes = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		const struct lightmap_s *const lightmap = &lightmaps[i];
+		const gltexture_t *const textures[] = {
+			lightmap->emissive_bandlimit_raw_texture,
+			lightmap->emissive_bandlimit_scratch_texture,
+			lightmap->emissive_bandlimit_transient_raw_texture,
+		};
+		for (int texture = 0; texture < countof (textures); ++texture)
+			if (textures[texture])
+			{
+				*logical_bytes += (uint64_t)textures[texture]->width * textures[texture]->height * 8;
+				*allocated_bytes += GL_HeapGetAllocationSize (textures[texture]->allocation);
+			}
+	}
+	*peak_bytes = emissive_bandlimit_peak_bytes;
+}
+
+qboolean R_EmissiveBandlimitActive (void)
+{
+	return emissive_bandlimit_active;
+}
+
+typedef enum emissive_bandlimit_filter_work_e
+{
+	EMISSIVE_BANDLIMIT_FILTER_STATIC,
+	EMISSIVE_BANDLIMIT_FILTER_RADIANCE,
+	EMISSIVE_BANDLIMIT_FILTER_TRANSIENT
+} emissive_bandlimit_filter_work_t;
+
+static void R_FilterEmissiveBandlimitedDetail (cb_context_t *cbx, emissive_bandlimit_filter_work_t work)
+{
+	const vulkan_pipeline_t *const pipeline = &vulkan_globals.emissive_bandlimit_filter_pipeline;
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+	const emissive_logical_tile_t *const tiles = work == EMISSIVE_BANDLIMIT_FILTER_STATIC
+		? emissive_logical_tiles
+		: work == EMISSIVE_BANDLIMIT_FILTER_RADIANCE ? emissive_radiance_tiles : transient_emissive_tiles;
+	const int num_logical_tiles = work == EMISSIVE_BANDLIMIT_FILTER_STATIC
+		? num_emissive_logical_tiles
+		: work == EMISSIVE_BANDLIMIT_FILTER_RADIANCE ? num_emissive_radiance_tiles : num_transient_emissive_tiles;
+	int logical_tile = 0;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		while (logical_tile < num_logical_tiles && tiles[logical_tile].lightmap < i)
+			++logical_tile;
+		const int first_tile = logical_tile;
+		while (logical_tile < num_logical_tiles && tiles[logical_tile].lightmap == i)
+			++logical_tile;
+		const int num_tiles = logical_tile - first_tile;
+		if (!num_tiles)
+			continue;
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		const qboolean transient = work == EMISSIVE_BANDLIMIT_FILTER_TRANSIENT;
+		gltexture_t *const raw_texture =
+			transient ? lightmap->emissive_bandlimit_transient_raw_texture : lightmap->emissive_bandlimit_raw_texture;
+		gltexture_t *const output_texture =
+			transient ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture;
+		const VkDescriptorSet horizontal_descriptor_set = transient
+			? lightmap->emissive_bandlimit_transient_filter_horizontal_descriptor_set
+			: work == EMISSIVE_BANDLIMIT_FILTER_RADIANCE ? lightmap->emissive_bandlimit_radiance_filter_horizontal_descriptor_set
+													: lightmap->emissive_bandlimit_filter_horizontal_descriptor_set;
+		const VkDescriptorSet vertical_descriptor_set = transient
+			? lightmap->emissive_bandlimit_transient_filter_vertical_descriptor_set
+			: work == EMISSIVE_BANDLIMIT_FILTER_RADIANCE ? lightmap->emissive_bandlimit_radiance_filter_vertical_descriptor_set
+													: lightmap->emissive_bandlimit_filter_vertical_descriptor_set;
+		if (!raw_texture || !output_texture || !lightmap->emissive_bandlimit_scratch_texture || horizontal_descriptor_set == VK_NULL_HANDLE ||
+			vertical_descriptor_set == VK_NULL_HANDLE)
+			continue;
+		R_EmissiveComputeImageBarrier (
+			cbx, lightmap->emissive_bandlimit_scratch_texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
+			&horizontal_descriptor_set, 0, NULL);
+		const uint32_t horizontal_constants[3] = {true, false, first_tile};
+		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (horizontal_constants), horizontal_constants);
+		vkCmdDispatch (cbx->cb, EMISSIVE_DETAIL_SCALE, EMISSIVE_DETAIL_SCALE, num_tiles);
+		R_EmissiveComputeImageBarrier (
+			cbx, lightmap->emissive_bandlimit_scratch_texture, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		R_EmissiveComputeImageBarrier (
+			cbx, output_texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1,
+			&vertical_descriptor_set, 0, NULL);
+		const uint32_t vertical_constants[3] = {false, transient, first_tile};
+		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (vertical_constants), vertical_constants);
+		vkCmdDispatch (cbx->cb, EMISSIVE_DETAIL_SCALE, EMISSIVE_DETAIL_SCALE, num_tiles);
+		R_PublishEmissiveBounceImage (cbx, output_texture);
+	}
 }
 
 static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
@@ -4841,7 +5182,10 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	if (detail && emissive_world_tlas == VK_NULL_HANDLE)
 		return;
 
-	const vulkan_pipeline_t *const pipeline = detail ? &vulkan_globals.emissive_detail_pipeline : &vulkan_globals.emissive_coarse_pipeline;
+	const qboolean bandlimited = detail && emissive_bandlimit_active;
+	const vulkan_pipeline_t *const pipeline = detail
+		? (bandlimited ? &vulkan_globals.emissive_bandlimit_detail_pipeline : &vulkan_globals.emissive_detail_pipeline)
+		: &vulkan_globals.emissive_coarse_pipeline;
 	R_BeginDebugUtilsLabel (cbx, detail ? "Update Detail Emissive Lightmaps" : "Update Coarse Emissive Lightmaps");
 	if (detail)
 		GL_BeginEmissiveDetailTimestamp (cbx);
@@ -4882,8 +5226,12 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
-		const VkDescriptorSet	 descriptor_set = detail ? lightmap->emissive_detail_descriptor_set : lightmap->emissive_coarse_descriptor_set;
-		const gltexture_t *const texture = detail ? lightmap->emissive_detail_texture : lightmap->emissive_texture;
+		const VkDescriptorSet descriptor_set = detail
+			? (bandlimited ? lightmap->emissive_bandlimit_detail_descriptor_set : lightmap->emissive_detail_descriptor_set)
+			: lightmap->emissive_coarse_descriptor_set;
+		const gltexture_t *const texture = detail
+			? (bandlimited ? lightmap->emissive_bandlimit_raw_texture : lightmap->emissive_detail_texture)
+			: lightmap->emissive_texture;
 		if (descriptor_set == VK_NULL_HANDLE)
 			continue;
 
@@ -4912,6 +5260,26 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 			barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
 			vkCmdPipelineBarrier (
 				cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+			if (bandlimited)
+			{
+				gltexture_t *const output = lightmap->emissive_detail_texture;
+				VkImageMemoryBarrier output_barrier = barrier;
+				output_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				output_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				output_barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				output_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+				output_barrier.image = output->image;
+				vkCmdPipelineBarrier (
+					cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &output_barrier);
+				vkCmdClearColorImage (
+					cbx->cb, output->image, VK_IMAGE_LAYOUT_GENERAL, &clear_color, 1, &output_barrier.subresourceRange);
+				output_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				output_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				output_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+				output_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				vkCmdPipelineBarrier (
+					cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &output_barrier);
+			}
 		}
 
 		vkCmdBindDescriptorSets (
@@ -4938,10 +5306,15 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
 		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		const VkPipelineStageFlags destination_stages = bandlimited
+			? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+			: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (detail ? VK_PIPELINE_STAGE_TRANSFER_BIT : 0), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
-			NULL, 0, NULL, 1, &barrier);
+			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (detail ? VK_PIPELINE_STAGE_TRANSFER_BIT : 0),
+			destination_stages, 0, 0, NULL, 0, NULL, 1, &barrier);
 	}
+	if (bandlimited)
+		R_FilterEmissiveBandlimitedDetail (cbx, EMISSIVE_BANDLIMIT_FILTER_STATIC);
 	R_DispatchEmissiveBounce (cbx, detail);
 	if (!detail)
 		R_DispatchEmissiveBounceDebug (cbx);
@@ -4973,8 +5346,10 @@ static void R_UpdateTransientEmissiveBuffer (VkCommandBuffer cb, VkBuffer buffer
 
 static void R_DispatchEmissiveRadianceTiles (cb_context_t *cbx, qboolean detail, qboolean overlay)
 {
+	const qboolean bandlimited = detail && !overlay && emissive_bandlimit_active;
 	const vulkan_pipeline_t *const pipeline =
-		detail ? (overlay ? &vulkan_globals.emissive_radiance_overlay_detail_pipeline : &vulkan_globals.emissive_radiance_detail_pipeline)
+		detail ? (bandlimited ? &vulkan_globals.emissive_bandlimit_radiance_pipeline
+							 : (overlay ? &vulkan_globals.emissive_radiance_overlay_detail_pipeline : &vulkan_globals.emissive_radiance_detail_pipeline))
 			   : (overlay ? &vulkan_globals.emissive_radiance_overlay_pipeline : &vulkan_globals.emissive_radiance_pipeline);
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 	emissive_compute_push_constants_t push_constants = {num_emissive_lights, 0, EMISSIVE_PUBLICATION_UPDATE};
@@ -4991,9 +5366,11 @@ static void R_DispatchEmissiveRadianceTiles (cb_context_t *cbx, qboolean detail,
 			continue;
 		struct lightmap_s *const lightmap = &lightmaps[i];
 		const VkDescriptorSet	 descriptor_set =
-			detail ? (overlay ? lightmap->emissive_radiance_overlay_detail_descriptor_set : lightmap->emissive_radiance_detail_descriptor_set)
+			detail ? (bandlimited ? lightmap->emissive_bandlimit_radiance_descriptor_set
+							 : (overlay ? lightmap->emissive_radiance_overlay_detail_descriptor_set : lightmap->emissive_radiance_detail_descriptor_set))
 				   : (overlay ? lightmap->emissive_radiance_overlay_descriptor_set : lightmap->emissive_radiance_descriptor_set);
-		gltexture_t *const texture = detail ? (overlay ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture)
+		gltexture_t *const texture = detail ? (bandlimited ? lightmap->emissive_bandlimit_raw_texture
+														 : (overlay ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture))
 											: (overlay ? lightmap->emissive_transient_texture : lightmap->emissive_texture);
 		if (descriptor_set == VK_NULL_HANDLE || !texture)
 			continue;
@@ -5054,9 +5431,22 @@ static void R_UpdateEmissiveRadiance (cb_context_t *cbx)
 		}
 		if (emissive_radiance_detail_pending && emissive_detail_ready)
 		{
-			if (transient_emissive_initialized && transient_emissive_detail_cache_copied)
-				R_DispatchEmissiveRadianceTiles (cbx, true, true);
-			R_DispatchEmissiveRadianceTiles (cbx, true, false);
+			if (emissive_bandlimit_active)
+			{
+				R_DispatchEmissiveRadianceTiles (cbx, true, false);
+				R_FilterEmissiveBandlimitedDetail (cbx, EMISSIVE_BANDLIMIT_FILTER_RADIANCE);
+				if (transient_emissive_initialized && transient_emissive_detail_cache_copied)
+				{
+					R_InitializeTransientEmissiveImages (cbx, true);
+					R_FilterEmissiveBandlimitedDetail (cbx, EMISSIVE_BANDLIMIT_FILTER_TRANSIENT);
+				}
+			}
+			else
+			{
+				if (transient_emissive_initialized && transient_emissive_detail_cache_copied)
+					R_DispatchEmissiveRadianceTiles (cbx, true, true);
+				R_DispatchEmissiveRadianceTiles (cbx, true, false);
+			}
 			emissive_radiance_detail_pending = false;
 		}
 		GL_EndEmissiveRadianceTimestamp (cbx);
@@ -5073,6 +5463,7 @@ static void R_UpdateEmissiveRadiance (cb_context_t *cbx)
 
 static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean detail_only)
 {
+	const qboolean initialize_bandlimit_raw = !transient_emissive_initialized && emissive_bandlimit_active;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -5132,6 +5523,33 @@ static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean det
 				cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
 				NULL, 2, barriers);
 		}
+		if (initialize_bandlimit_raw && lightmap->emissive_bandlimit_transient_raw_texture)
+		{
+			gltexture_t *const texture = lightmap->emissive_bandlimit_transient_raw_texture;
+			ZEROED_STRUCT (VkImageMemoryBarrier, barrier);
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = texture->image;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+			ZEROED_STRUCT (VkClearColorValue, clear_color);
+			vkCmdClearColorImage (
+				cbx->cb, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &barrier.subresourceRange);
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+		}
 	}
 	transient_emissive_initialized = true;
 	transient_emissive_detail_cache_copied = !num_emissive_lights || R_EmissiveDetailReady ();
@@ -5139,7 +5557,10 @@ static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean det
 
 static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail, qboolean invalidate)
 {
-	const vulkan_pipeline_t *const pipeline = detail ? &vulkan_globals.emissive_transient_detail_pipeline : &vulkan_globals.emissive_transient_pipeline;
+	const qboolean bandlimited = detail && emissive_bandlimit_active;
+	const vulkan_pipeline_t *const pipeline = detail
+		? (bandlimited ? &vulkan_globals.emissive_bandlimit_transient_pipeline : &vulkan_globals.emissive_transient_detail_pipeline)
+		: &vulkan_globals.emissive_transient_pipeline;
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 	if (detail)
 	{
@@ -5172,8 +5593,12 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 		if (!num_tiles)
 			continue;
 		struct lightmap_s *const lightmap = &lightmaps[i];
-		const VkDescriptorSet descriptor_set = detail ? lightmap->emissive_transient_detail_descriptor_set : lightmap->emissive_transient_descriptor_set;
-		gltexture_t *const texture = detail ? lightmap->emissive_transient_detail_texture : lightmap->emissive_transient_texture;
+		const VkDescriptorSet descriptor_set = detail
+			? (bandlimited ? lightmap->emissive_bandlimit_transient_descriptor_set : lightmap->emissive_transient_detail_descriptor_set)
+			: lightmap->emissive_transient_descriptor_set;
+		gltexture_t *const texture = detail
+			? (bandlimited ? lightmap->emissive_bandlimit_transient_raw_texture : lightmap->emissive_transient_detail_texture)
+			: lightmap->emissive_transient_texture;
 		if (descriptor_set == VK_NULL_HANDLE || !texture)
 			continue;
 		VkImageMemoryBarrier barrier;
@@ -5190,7 +5615,8 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 		barrier.subresourceRange.levelCount = 1;
 		barrier.subresourceRange.layerCount = 1;
 		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &descriptor_set, 0, NULL);
 		push_constants.first_tile = first_tile;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
@@ -5200,7 +5626,8 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
 		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 	}
 }
 
@@ -5247,6 +5674,11 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		(!num_emissive_lights || transient_emissive_detail_cache_copied))
 	{
 		R_DispatchTransientEmissiveTiles (cbx, true, false);
+		if (emissive_bandlimit_active)
+		{
+			R_InitializeTransientEmissiveImages (cbx, true);
+			R_FilterEmissiveBandlimitedDetail (cbx, EMISSIVE_BANDLIMIT_FILTER_TRANSIENT);
+		}
 		transient_emissive_detail_pending = false;
 		detail_recorded = true;
 	}

@@ -18,6 +18,7 @@ layout (constant_id = 1) const bool retained_visibility = false;
 layout (constant_id = 2) const bool radiance_update = false;
 layout (constant_id = 3) const bool modulated_sources = true;
 layout (constant_id = 4) const bool preserve_overlay = false;
+layout (constant_id = 5) const bool bandlimited = false;
 const bool indexed_sources = transient_overlay || radiance_update;
 const bool cache_visibility = false;
 
@@ -75,6 +76,7 @@ layout (std430, set = 0, binding = 10) readonly restrict buffer emissive_visibil
 #define EMISSIVE_OPTIONAL_SOURCE_INDICES
 #define EMISSIVE_RETAINED_VISIBILITY
 #include "emissive_lighting.inc"
+#include "emissive_bandlimit.inc"
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
@@ -108,7 +110,9 @@ void main ()
 			normal = -normal;
 
 		const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
-		contribution = CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
+		contribution = bandlimited
+			? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
+			: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
 	}
 	if (transient_overlay)
 		contribution += texelFetch (cacheable_image, coords, 0).rgb;

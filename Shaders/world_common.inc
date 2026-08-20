@@ -25,9 +25,9 @@ vec4 WorldFragmentColor ()
 		const ivec2 emissive_detail_coords =
 			clamp (ivec2 (lightmap_uv * vec2 (LMBLOCK_WIDTH * 2, LMBLOCK_HEIGHT * 2)), ivec2 (0), emissive_detail_size - ivec2 (1));
 		const vec4 emissive_detail = texelFetch (emissive_detail_tex, emissive_detail_coords, 0);
-		if (emissive_debug_mode == 2)
+		if (emissive_debug_mode == 2 || emissive_debug_mode == 6)
 			return vec4 (emissive_detail.rgb, 1.0);
-		if (emissive_debug_mode == 3)
+		if (emissive_debug_mode == 3 || emissive_debug_mode == 7)
 			return vec4 (vec3 (emissive_detail.a), 1.0);
 		if (emissive_detail.a >= 0.5)
 			emissive_selected = emissive_detail.rgb;

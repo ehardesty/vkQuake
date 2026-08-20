@@ -70,6 +70,12 @@
     <CustomBuild Include="..\..\Shaders\emissive_detail.comp">
       <Filter>Shaders</Filter>
     </CustomBuild>
+    <CustomBuild Include="..\..\Shaders\emissive_bandlimit_filter.comp">
+      <Filter>Shaders</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\Shaders\emissive_bounce.comp">
+      <Filter>Shaders</Filter>
+    </CustomBuild>
     <CustomBuild Include="..\..\Shaders\md5.vert">
       <Filter>Shaders\Alias</Filter>
     </CustomBuild>

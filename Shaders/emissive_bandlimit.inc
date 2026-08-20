@@ -1,0 +1,85 @@
+const uint EMISSIVE_BANDLIMIT_SAMPLES = 4u;
+const uint EMISSIVE_BANDLIMIT_VERSION = 1u;
+
+uint EmissiveBandlimitHash (uint value)
+{
+	value ^= value >> 16;
+	value *= 0x7feb352du;
+	value ^= value >> 15;
+	value *= 0x846ca68bu;
+	return value ^ (value >> 16);
+}
+
+vec2 EmissiveBandlimitOffset (
+	const uint surface_index, const float center_s, const float center_t, const uint light_index, const uint sample_index)
+{
+	uint key = EmissiveBandlimitHash (surface_index ^ (EMISSIVE_BANDLIMIT_VERSION * 0x9e3779b9u));
+	key = EmissiveBandlimitHash (key ^ floatBitsToUint (center_s));
+	key = EmissiveBandlimitHash (key ^ floatBitsToUint (center_t));
+	key = EmissiveBandlimitHash (key ^ light_index);
+	key = EmissiveBandlimitHash (key ^ sample_index);
+	const vec2 jitter = vec2 (float (key & 0xFFFFu), float (key >> 16)) / 65536.0f;
+	const vec2 stratum = vec2 (float (sample_index & 1u), float (sample_index >> 1u));
+	return (stratum + jitter) * 0.25f - 0.25f;
+}
+
+vec3 CalculateBandlimitedEmissiveContribution (
+	const uint surface_index, const surface_t surf, const float center_s, const float center_t, const vec3 normal, const uint first_source,
+	const uint num_lights, const uint visibility_texel)
+{
+	vec3 contribution = vec3 (0.0f);
+	for (uint i = 0u; i < num_lights; ++i)
+	{
+#ifdef EMISSIVE_SOURCE_INDICES
+		const uint light_index = emissive_source_indices[first_source + i];
+#elif defined(EMISSIVE_OPTIONAL_SOURCE_INDICES)
+		const uint light_index = indexed_sources ? emissive_source_indices[first_source + i] : first_source + i;
+#else
+		const uint light_index = i;
+#endif
+		const emissive_light_t light = emissive_lights[light_index];
+		const float modulation = modulated_sources ? emissive_modulations[light_index] : 1.0f;
+		if (modulation <= 0.0f && !cache_visibility)
+			continue;
+
+		uint visibility_mask = 0u;
+#ifdef EMISSIVE_RETAINED_VISIBILITY
+		if (retained_visibility)
+			visibility_mask = emissive_visibility[(first_source + i) * 256u + visibility_texel];
+#endif
+		vec3 source_contribution = vec3 (0.0f);
+		for (uint sample_index = 0u; sample_index < EMISSIVE_BANDLIMIT_SAMPLES; ++sample_index)
+		{
+			vec3 tangent;
+			vec3 bitangent;
+			const vec2 offset = EmissiveBandlimitOffset (surface_index, center_s, center_t, light_index, sample_index);
+			const vec3 world_pos = CalculateWorldPos (surf, center_s + offset.x, center_t + offset.y, tangent, bitangent);
+			const vec3 light_vec = light.origin - world_pos;
+			const float dist = length (light_vec);
+			if (dist >= light.radius)
+				continue;
+			const vec3 direction = light_vec / max (dist, 0.001f);
+			const float receiver_lambert = max (dot (normal, direction), 0.0f);
+			if (receiver_lambert <= 0.0f)
+				continue;
+			const float radial_falloff = max (1.0f - dist / light.radius, 0.0f);
+#ifdef EMISSIVE_DETAIL_VISIBILITY
+			const bool visible = !EmissiveIsOccluded (world_pos, normal, light.origin);
+			if (visible)
+				visibility_mask |= 1u << sample_index;
+			if (!visible)
+				continue;
+#elif defined(EMISSIVE_RETAINED_VISIBILITY)
+			if (retained_visibility && (visibility_mask & (1u << sample_index)) == 0u)
+				continue;
+#endif
+			source_contribution += light.intensity * radial_falloff * receiver_lambert * light.color;
+		}
+#ifdef EMISSIVE_DETAIL_VISIBILITY
+		if (cache_visibility)
+			emissive_visibility[(first_source + i) * 256u + visibility_texel] = visibility_mask;
+#endif
+		contribution += modulation * source_contribution / float (EMISSIVE_BANDLIMIT_SAMPLES);
+	}
+	return max (contribution, 0.0f);
+}

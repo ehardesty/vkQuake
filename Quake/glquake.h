@@ -189,7 +189,7 @@ typedef struct vulkan_memory_s
 } vulkan_memory_t;
 
 #define WORLD_PIPELINE_COUNT			   64
-#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 20
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 28
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -459,6 +459,10 @@ typedef struct
 	vulkan_pipeline_t		 update_lightmap_rt_pipeline;
 	vulkan_pipeline_t		 emissive_coarse_pipeline;
 	vulkan_pipeline_t		 emissive_detail_pipeline;
+	vulkan_pipeline_t		 emissive_bandlimit_detail_pipeline;
+	vulkan_pipeline_t		 emissive_bandlimit_radiance_pipeline;
+	vulkan_pipeline_t		 emissive_bandlimit_transient_pipeline;
+	vulkan_pipeline_t		 emissive_bandlimit_filter_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_detail_pipeline;
 	vulkan_pipeline_t		 emissive_radiance_overlay_pipeline;
@@ -666,6 +670,9 @@ extern int gl_lightmap_format;
 #define LM_CULL_BLOCK_H 256
 
 #define EMISSIVE_DETAIL_SCALE 2
+#define EMISSIVE_BANDLIMIT_SAMPLES 4
+#define EMISSIVE_BANDLIMIT_FILTER_RADIUS 2
+#define EMISSIVE_BANDLIMIT_VERSION 1
 
 #define LM_WORKGROUP_SUBMODEL_EMPTY 0xFFFFFFFE // no surfaces assigned yet, converted to 0 before upload
 #define LM_WORKGROUP_SUBMODEL_MIXED 0xFFFFFFFF // surfaces from multiple coordinate spaces, the shader can't cull and passes all lights
@@ -691,6 +698,9 @@ struct lightmap_s
 	gltexture_t	   *texture;
 	gltexture_t	   *emissive_texture;
 	gltexture_t	   *emissive_detail_texture; // resolved RGB detail; alpha is publication validity
+	gltexture_t	   *emissive_bandlimit_raw_texture;
+	gltexture_t	   *emissive_bandlimit_scratch_texture;
+	gltexture_t	   *emissive_bandlimit_transient_raw_texture;
 	gltexture_t	   *emissive_bounce_debug_texture; // coarse bounce-only diagnostic
 	gltexture_t	   *emissive_transient_texture; // cacheable + current transient coarse field
 	gltexture_t	   *emissive_transient_detail_texture; // cacheable + current transient detail field
@@ -699,6 +709,15 @@ struct lightmap_s
 	VkDescriptorSet descriptor_set;
 	VkDescriptorSet emissive_coarse_descriptor_set;
 	VkDescriptorSet emissive_detail_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_detail_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_radiance_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_filter_horizontal_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_filter_vertical_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_radiance_filter_horizontal_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_radiance_filter_vertical_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_transient_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_transient_filter_horizontal_descriptor_set;
+	VkDescriptorSet emissive_bandlimit_transient_filter_vertical_descriptor_set;
 	VkDescriptorSet emissive_transient_descriptor_set;
 	VkDescriptorSet emissive_transient_detail_descriptor_set;
 	VkDescriptorSet emissive_radiance_overlay_descriptor_set;
@@ -764,8 +783,12 @@ void R_EmissiveDetailLightmapStats (
 void R_EmissiveDetailCompleted (void);
 void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us, uint32_t filter_time_us, uint32_t combine_time_us, qboolean valid);
 void R_EmissiveBounceChanged_f (cvar_t *var);
+void R_EmissiveBandlimitChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
+void R_EmissiveBandlimitStats (
+	qboolean *active, qboolean *budget_limited, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *peak_bytes);
+qboolean R_EmissiveBandlimitActive (void);
 void R_EmissiveBounceStats (
 	uint32_t *direct_texels, uint32_t *samples, uint32_t *rays, uint32_t *valid_taps, uint32_t *invalid_taps, uint64_t *logical_bytes,
 	uint64_t *allocated_bytes, uint64_t *budget_bytes, uint32_t *prepare_time_us, uint32_t *build_time_us, uint32_t *resolve_time_us,

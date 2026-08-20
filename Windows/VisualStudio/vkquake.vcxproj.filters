@@ -577,6 +577,12 @@
     <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_detail.comp.c">
       <Filter>Shaders\Release</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_bandlimit_filter.comp.c">
+      <Filter>Shaders\Release</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Release\emissive_bounce.comp.c">
+      <Filter>Shaders\Release</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\ray_debug.comp.c">
       <Filter>Shaders\Debug</Filter>
     </ClCompile>
@@ -584,6 +590,12 @@
       <Filter>Shaders\Debug</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_detail.comp.c">
+      <Filter>Shaders\Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_bandlimit_filter.comp.c">
+      <Filter>Shaders\Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Shaders\Compiled\Debug\emissive_bounce.comp.c">
       <Filter>Shaders\Debug</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Shaders\Compiled\Release\mesh_interpolate.comp.c">

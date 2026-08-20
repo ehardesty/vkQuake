@@ -37,6 +37,7 @@ extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
+cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_strength = {"r_emissive_rt_bounce_strength", "0.65", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_rays = {"r_emissive_rt_bounce_rays", "8", CVAR_NONE};
@@ -1352,6 +1353,17 @@ void R_EmissiveRTChanged_f (cvar_t *var)
 		GL_RebuildIndirectDraws (false, false);
 }
 
+void R_EmissiveBandlimitChanged_f (cvar_t *var)
+{
+	(void)var;
+	if (!cl.worldmodel || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
+		return;
+	emissive_world_lights_uploaded = false;
+	R_InvalidateTransientEmissiveLights ();
+	R_EmissiveBounceChanged_f (&r_emissive_rt_bounce);
+	R_ActivateEmissiveWorldSurfaceCache ();
+}
+
 void R_EmissiveRTStats_f (void)
 {
 	int		 coarse_lightmaps;
@@ -1404,6 +1416,8 @@ void R_EmissiveRTStats_f (void)
 	uint64_t bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes;
 	uint32_t bounce_prepare_time_us, bounce_build_time_us, bounce_resolve_time_us, bounce_filter_time_us, bounce_combine_time_us;
 	qboolean bounce_gpu_time_valid, bounce_budget_limited, bounce_pending, bounce_ready;
+	qboolean bandlimit_active, bandlimit_budget_limited;
+	uint64_t bandlimit_logical_bytes, bandlimit_allocated_bytes, bandlimit_peak_bytes;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveDetailLightmapStats (
 		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
@@ -1420,6 +1434,8 @@ void R_EmissiveRTStats_f (void)
 		&bounce_direct_texels, &bounce_samples, &bounce_rays, &bounce_valid_taps, &bounce_invalid_taps, &bounce_logical_bytes,
 		&bounce_allocated_bytes, &bounce_budget_bytes, &bounce_prepare_time_us, &bounce_build_time_us, &bounce_resolve_time_us,
 		&bounce_filter_time_us, &bounce_combine_time_us, &bounce_gpu_time_valid, &bounce_budget_limited, &bounce_pending, &bounce_ready);
+	R_EmissiveBandlimitStats (
+		&bandlimit_active, &bandlimit_budget_limited, &bandlimit_logical_bytes, &bandlimit_allocated_bytes, &bandlimit_peak_bytes);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
@@ -1429,7 +1445,7 @@ void R_EmissiveRTStats_f (void)
 	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
 	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
 	const char *live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
-	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32"};
+	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32", "band-limit raw", "band-limit support"};
 	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
 	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
 	const uint64_t		 max_source_evaluations = (uint64_t)tile_source_links * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE;
@@ -1460,6 +1476,12 @@ void R_EmissiveRTStats_f (void)
 		tile_dispatches, tile_dispatches == 1 ? "" : "es", detail_workgroups, max_source_evaluations,
 		max_source_evaluations == 1 ? "" : "s", detail_gpu_time, detail_state,
 		detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
+	Con_Printf (
+		"RT emissive band-limit: requested %s, %s, %d deterministic receiver samples, radius-%d same-surface filter, %" PRIu64
+		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " aggregate required bytes%s\n",
+		r_emissive_rt_bandlimit.value > 0.0f ? "on" : "off", bandlimit_active ? "active" : "classic fallback",
+		EMISSIVE_BANDLIMIT_SAMPLES, EMISSIVE_BANDLIMIT_FILTER_RADIUS, bandlimit_logical_bytes, bandlimit_allocated_bytes,
+		bandlimit_peak_bytes, bandlimit_budget_limited ? ", budget exceeded" : "");
 	if (emissive_world_as_build_time_valid)
 		Con_Printf (
 			"RT emissive world AS: %s, %u triangle%s, %" PRIu64 " allocated GPU bytes, %.3f ms GPU build\n",
