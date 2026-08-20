@@ -156,24 +156,24 @@ typedef struct emissive_entity_source_s
 	emissive_light_t					 light;
 } emissive_entity_source_t;
 
-#define EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION 1
+#define EMISSIVE_ENTITY_FIXTURE_TABLE_VERSION 2
 #define EMISSIVE_ENTITY_ORIGIN_TOLERANCE	  1.0f
 #define EMISSIVE_ENTITY_ANGLE_TOLERANCE		  1.0f
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 1.6f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
-	{"TLIGHT11", 192.0f, 4.8f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT01", 192.0f, 0.9124f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 0.7850f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
 };
 
 static const emissive_entity_fixture_def_t emissive_entity_fixture_defs[] = {
-	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH, 144.0f, 3.6f, {1.0f, 0.48f, 0.18f}},
-	{"light_flame_large_yellow", "progs/flame2.mdl", 1, 0, EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
-	{"light_flame_small_yellow", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
+	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH, 192.0f, 2.0480f, {1.0f, 0.48f, 0.18f}},
+	{"light_flame_large_yellow", "progs/flame2.mdl", 1, 0, EMISSIVE_ENTITY_FIXTURE_LARGE_FLAME, 272.0f, 2.6290f, {1.0f, 0.52f, 0.18f}},
+	{"light_flame_small_yellow", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME, 160.0f, 2.6290f, {1.0f, 0.52f, 0.18f}},
 	{"light_flame_small_white", "progs/flame2.mdl", 0, 0, EMISSIVE_ENTITY_FIXTURE_SMALL_FLAME, 160.0f, 4.4f, {1.0f, 1.0f, 1.0f}},
-	{NULL, "progs/braztall.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER, 152.0f, 4.0f, {1.0f, 0.5f, 0.18f}},
-	{NULL, "progs/brazshrt.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER, 144.0f, 3.6f, {1.0f, 0.5f, 0.18f}},
-	{NULL, "progs/longtrch.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_LONG_TORCH, 152.0f, 4.0f, {1.0f, 0.5f, 0.18f}},
-	{NULL, "progs/flame_pyre.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_PYRE, 160.0f, 4.4f, {1.0f, 0.52f, 0.18f}},
+	{NULL, "progs/braztall.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_TALL_BRAZIER, 272.0f, 2.3328f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/brazshrt.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_SHORT_BRAZIER, 144.0f, 2.0995f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/longtrch.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_LONG_TORCH, 152.0f, 2.3328f, {1.0f, 0.5f, 0.18f}},
+	{NULL, "progs/flame_pyre.mdl", -1, -1, EMISSIVE_ENTITY_FIXTURE_PYRE, 160.0f, 2.6290f, {1.0f, 0.52f, 0.18f}},
 };
 
 static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area);
@@ -451,19 +451,26 @@ static void R_EmissiveEntityProxyOrigin (const entity_t *entity, const emissive_
 	}
 }
 
+static qboolean R_NormalizeEmissiveColor (vec3_t color)
+{
+	for (int channel = 0; channel < 3; ++channel)
+		color[channel] = q_max (0.0f, color[channel]);
+	const float luminance = 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
+	if (luminance <= 0.0f)
+		return false;
+	VectorScale (color, 1.0f / luminance, color);
+	return true;
+}
+
 static void R_BuildEmissiveEntitySourceLight (emissive_entity_source_t *source, const entity_t *entity, const emissive_entity_candidate_t *candidate)
 {
 	const emissive_entity_fixture_def_t *const definition = source->definition;
 	R_EmissiveEntityProxyOrigin (entity, definition, source->light.origin);
 	source->light.radius = definition->radius;
 	VectorCopy (candidate && candidate->has_color ? candidate->color : definition->color, source->light.color);
-	for (int channel = 0; channel < 3; ++channel)
-		source->light.color[channel] = q_max (0.0f, source->light.color[channel]);
-	const float max_color = q_max (source->light.color[0], q_max (source->light.color[1], source->light.color[2]));
-	if (max_color > 0.0f)
-		VectorScale (source->light.color, 1.0f / max_color, source->light.color);
 	const float authored_scale = candidate && candidate->has_light ? candidate->authored_light / 300.0f : 1.0f;
-	source->light.intensity = definition->intensity * q_max (0.0f, authored_scale);
+	source->light.intensity =
+		R_NormalizeEmissiveColor (source->light.color) ? definition->intensity * q_max (0.0f, authored_scale) : 0.0f;
 }
 
 static qboolean R_EmissiveEntityCandidateLocationMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
@@ -580,13 +587,8 @@ static void R_MatchEmissiveEntitySources (void)
 static qboolean R_ResolveEmissiveTextureColor (const emissive_texture_def_t *definition, const gltexture_t *fullbright, vec3_t color)
 {
 	const vec3_t *const source = definition->derive_color ? &fullbright->fullbright_color : &definition->color;
-	for (int channel = 0; channel < 3; ++channel)
-		color[channel] = q_max (0.0f, (*source)[channel]);
-	const float max_component = q_max (color[0], q_max (color[1], color[2]));
-	if (max_component <= 0.0f)
-		return false;
-	VectorScale (color, 1.0f / max_component, color);
-	return true;
+	VectorCopy (*source, color);
+	return R_NormalizeEmissiveColor (color);
 }
 
 static const emissive_texture_def_t *R_CacheableEmissiveTextureDef (const texture_t *texture)
