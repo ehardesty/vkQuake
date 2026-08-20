@@ -841,6 +841,7 @@ void R_UpdateTransientEmissiveSources (void);
 void		  R_UpdateEmissiveLightstyles (void);
 void R_InvalidateTransientEmissiveLights (void);
 void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count);
+qboolean R_TransientEmissiveActive (void);
 void R_UpdateLightmapsAndIndirect (void *unused);
 void R_MarkSurfaces (qboolean use_tasks, task_handle_t before_mark, task_handle_t *store_efrags, task_handle_t *cull_surfaces, task_handle_t *chain_surfaces);
 qboolean	  R_CullBox (vec3_t emins, vec3_t emaxs);

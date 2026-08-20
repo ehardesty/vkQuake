@@ -1096,6 +1096,7 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 	gltexture_t *lasttexture = NULL;
 	const int	 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 5);
 	const qboolean detail_ready = R_EmissiveDetailReady ();
+	const qboolean transient_emissive_active = R_TransientEmissiveActive ();
 	float		 last_alpha = FLT_MAX;
 	float		 last_constant_factor = FLT_MAX;
 
@@ -1162,17 +1163,19 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				emissive_texture = R_EmissiveBounceDebugReady () ? lightmaps[lm_idx].emissive_bounce_debug_texture : NULL;
 			else if (!draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0)
 			{
-				emissive_texture = lightmaps[lm_idx].emissive_transient_texture ? lightmaps[lm_idx].emissive_transient_texture
-																	 : lightmaps[lm_idx].emissive_texture;
+				emissive_texture = transient_emissive_active && lightmaps[lm_idx].emissive_transient_texture
+					? lightmaps[lm_idx].emissive_transient_texture
+					: lightmaps[lm_idx].emissive_texture;
 			}
 			gltexture_t *emissive_detail_texture = !bounce_debug && !draw_water && (indirect_draws[i].world_flags & INDIRECT_EMISSIVE_INFLUENCE) && lm_idx >= 0
-				? (lightmaps[lm_idx].emissive_transient_texture ? lightmaps[lm_idx].emissive_transient_detail_texture
-																 : lightmaps[lm_idx].emissive_detail_texture)
+				? (transient_emissive_active && lightmaps[lm_idx].emissive_transient_texture
+						? lightmaps[lm_idx].emissive_transient_detail_texture
+						: lightmaps[lm_idx].emissive_detail_texture)
 				: NULL;
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
 			const qboolean detail_enabled = emissive_enabled && emissive_detail_texture &&
-				(lightmaps[lm_idx].emissive_transient_detail_texture ? R_TransientEmissiveDetailReady () : detail_ready);
+				(transient_emissive_active ? R_TransientEmissiveDetailReady () : detail_ready);
 			const qboolean	  emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || debug_mode == 5 || detail_enabled);
 			int				  pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 											   (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) +
@@ -2207,7 +2210,8 @@ void GL_BuildLightmaps (void)
 	memset (shelf_idx, 0, sizeof (shelf_idx));
 	used_indirect_draws = 0;
 	indirect_ready = true;
-	indirect_emissive_grouping = r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f;
+	// Emissive receiver classification activates and regroups these draws later.
+	indirect_emissive_grouping = false;
 	indirect_bmodel_start = INT_MAX;
 	used_deps_data = 0;
 	Mem_Free (brush_deps_data);
@@ -3667,11 +3671,11 @@ static void R_BuildEmissiveBounceResources (void)
 			continue;
 		const uint32_t width = meta->packed_direct_size & 0xFFFF, height = meta->packed_direct_size >> 16;
 		const uint32_t bounce_width = meta->packed_bounce_size & 0xFFFF, bounce_height = meta->packed_bounce_size >> 16;
-		const vec3_t *const color = &surface->texinfo->texture->gltexture->diffuse_color;
 		for (uint32_t texel = 0; texel < width * height; ++texel)
 		{
-			VectorCopy (*color, reflectance[meta->direct_base + texel]);
-			reflectance[meta->direct_base + texel][3] = 0.0f;
+			vec4_t *const value = &reflectance[meta->direct_base + texel];
+			(*value)[0] = (*value)[1] = (*value)[2] = 1.0f;
+			(*value)[3] = 0.0f;
 		}
 		for (uint32_t y = 0; y < bounce_height; ++y)
 			for (uint32_t x = 0; x < bounce_width; ++x)
@@ -3851,6 +3855,11 @@ qboolean R_EmissiveDetailReady (void)
 qboolean R_TransientEmissiveDetailReady (void)
 {
 	return transient_emissive_detail_ready;
+}
+
+qboolean R_TransientEmissiveActive (void)
+{
+	return num_transient_emissive_lights > 0;
 }
 
 void R_TransientEmissiveDetailCompleted (uint32_t generation)
@@ -4576,7 +4585,8 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			emissive_bounce_recorded = true;
 		return;
 	}
-	if ((!detail && (!emissive_bounce_pending || emissive_world_tlas == VK_NULL_HANDLE)) || (detail && !emissive_bounce_recorded))
+	if ((!detail && (!emissive_bounce_pending || emissive_world_tlas == VK_NULL_HANDLE)) ||
+		(detail && !emissive_bounce_recorded && !emissive_bounce_ready))
 		return;
 	const vulkan_pipeline_t *const pipeline = &vulkan_globals.emissive_bounce_pipeline;
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
