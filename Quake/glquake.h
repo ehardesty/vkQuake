@@ -615,6 +615,8 @@ extern uint32_t		   rs_emissive_transient_gputime_us;
 extern qboolean		   rs_emissive_transient_gputime_valid;
 extern uint32_t		   rs_emissive_radiance_gputime_us;
 extern qboolean		   rs_emissive_radiance_gputime_valid;
+extern uint32_t		   rs_emissive_bounce_refresh_gputime_us;
+extern qboolean		   rs_emissive_bounce_refresh_gputime_valid;
 extern uint32_t		   rs_live_as_cputime_us;
 extern uint32_t		   rs_live_as_gputime_us;
 extern qboolean		   rs_live_as_gputime_valid;
@@ -702,8 +704,12 @@ struct lightmap_s
 	gltexture_t	   *emissive_bandlimit_scratch_texture;
 	gltexture_t	   *emissive_bandlimit_transient_raw_texture;
 	gltexture_t	   *emissive_bounce_debug_texture; // coarse bounce-only diagnostic
+	gltexture_t	   *emissive_bounce_texture; // cacheable direct plus current bounce
+	gltexture_t	   *emissive_bounce_detail_texture;
 	gltexture_t	   *emissive_transient_texture; // cacheable + current transient coarse field
 	gltexture_t	   *emissive_transient_detail_texture; // cacheable + current transient detail field
+	gltexture_t	   *emissive_transient_bounce_texture;
+	gltexture_t	   *emissive_transient_bounce_detail_texture;
 	gltexture_t	   *surface_indices_texture;
 	gltexture_t	   *lightstyle_textures[MAXLIGHTMAPS * 3 / 4];
 	VkDescriptorSet descriptor_set;
@@ -726,6 +732,12 @@ struct lightmap_s
 	VkDescriptorSet emissive_radiance_detail_descriptor_set;
 	VkDescriptorSet emissive_bounce_descriptor_set;
 	VkDescriptorSet emissive_bounce_detail_descriptor_set;
+	VkDescriptorSet emissive_bounce_output_descriptor_set;
+	VkDescriptorSet emissive_bounce_output_detail_descriptor_set;
+	VkDescriptorSet emissive_bounce_transient_descriptor_set;
+	VkDescriptorSet emissive_bounce_transient_detail_descriptor_set;
+	VkDescriptorSet emissive_bounce_transient_output_descriptor_set;
+	VkDescriptorSet emissive_bounce_transient_output_detail_descriptor_set;
 	VkDescriptorSet emissive_bounce_debug_descriptor_set;
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
@@ -786,14 +798,17 @@ void R_EmissiveBounceChanged_f (cvar_t *var);
 void R_EmissiveBandlimitChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
+void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltexture_t **detail);
 void R_EmissiveBandlimitStats (
 	qboolean *active, qboolean *budget_limited, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *peak_bytes);
 qboolean R_EmissiveBandlimitActive (void);
 void R_EmissiveBounceStats (
 	uint32_t *direct_texels, uint32_t *samples, uint32_t *rays, uint32_t *valid_taps, uint32_t *invalid_taps, uint64_t *logical_bytes,
 	uint64_t *allocated_bytes, uint64_t *budget_bytes, uint32_t *prepare_time_us, uint32_t *build_time_us, uint32_t *resolve_time_us,
-	uint32_t *filter_time_us, uint32_t *combine_time_us, qboolean *gpu_time_valid, qboolean *budget_limited, qboolean *pending,
-	qboolean *ready);
+	uint32_t *filter_time_us, uint32_t *combine_time_us, uint32_t *refresh_cpu_time_us, uint32_t *no_ray_refreshes,
+	uint32_t *dirty_receiver_surfaces, uint32_t *cacheable_direct_epoch,
+	uint32_t *cacheable_bounce_epoch, uint32_t *transient_direct_epoch, uint32_t *transient_bounce_epoch, qboolean *gpu_time_valid,
+	qboolean *budget_limited, qboolean *pending, qboolean *ready);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_TransientEmissiveDetailReady (void);
 qboolean R_EmissiveDetailAvailable (void);
@@ -816,6 +831,9 @@ void GL_EndEmissiveDetailTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveBounceTimestamp (void);
 void GL_BeginEmissiveBounceTimestamp (cb_context_t *cbx);
 void GL_MarkEmissiveBounceTimestamp (cb_context_t *cbx, uint32_t phase);
+void GL_ResetEmissiveBounceRefreshTimestamp (void);
+void GL_BeginEmissiveBounceRefreshTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveBounceRefreshTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveTransientTimestamp (void);
 void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_generation);

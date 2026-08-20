@@ -1415,6 +1415,9 @@ void R_EmissiveRTStats_f (void)
 	uint32_t bounce_direct_texels, bounce_samples, bounce_rays, bounce_valid_taps, bounce_invalid_taps;
 	uint64_t bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes;
 	uint32_t bounce_prepare_time_us, bounce_build_time_us, bounce_resolve_time_us, bounce_filter_time_us, bounce_combine_time_us;
+	uint32_t bounce_refresh_cpu_time_us, bounce_no_ray_refreshes, bounce_dirty_receiver_surfaces, bounce_cacheable_direct_epoch,
+		bounce_cacheable_epoch;
+	uint32_t bounce_transient_direct_epoch, bounce_transient_epoch;
 	qboolean bounce_gpu_time_valid, bounce_budget_limited, bounce_pending, bounce_ready;
 	qboolean bandlimit_active, bandlimit_budget_limited;
 	uint64_t bandlimit_logical_bytes, bandlimit_allocated_bytes, bandlimit_peak_bytes;
@@ -1433,7 +1436,10 @@ void R_EmissiveRTStats_f (void)
 	R_EmissiveBounceStats (
 		&bounce_direct_texels, &bounce_samples, &bounce_rays, &bounce_valid_taps, &bounce_invalid_taps, &bounce_logical_bytes,
 		&bounce_allocated_bytes, &bounce_budget_bytes, &bounce_prepare_time_us, &bounce_build_time_us, &bounce_resolve_time_us,
-		&bounce_filter_time_us, &bounce_combine_time_us, &bounce_gpu_time_valid, &bounce_budget_limited, &bounce_pending, &bounce_ready);
+		&bounce_filter_time_us, &bounce_combine_time_us, &bounce_refresh_cpu_time_us, &bounce_no_ray_refreshes,
+		&bounce_dirty_receiver_surfaces, &bounce_cacheable_direct_epoch,
+		&bounce_cacheable_epoch, &bounce_transient_direct_epoch, &bounce_transient_epoch, &bounce_gpu_time_valid, &bounce_budget_limited,
+		&bounce_pending, &bounce_ready);
 	R_EmissiveBandlimitStats (
 		&bandlimit_active, &bandlimit_budget_limited, &bandlimit_logical_bytes, &bandlimit_allocated_bytes, &bandlimit_peak_bytes);
 	GL_EmissiveWorldAccelerationStructureStats (
@@ -1518,7 +1524,8 @@ void R_EmissiveRTStats_f (void)
 		radiance_pending ? ", pending" : "");
 	Con_Printf (
 		"RT emissive bounce: %s, %s resolution (%d world units), strength %.3f, %d ray%s/sample, %u direct texel%s, %u receiver sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
-		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s%s\n",
+		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s, "
+		"%u no-ray refresh%s, last refresh %.3f ms CPU / %s GPU over %u receiver surface%s, epochs cacheable %u/%u transient %u/%u%s\n",
 		r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f ? "disabled" :
 			bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable",
 		CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? "full-coarse" : "half-coarse",
@@ -1531,6 +1538,11 @@ void R_EmissiveRTStats_f (void)
 		bounce_gpu_time_valid ? va ("%.3f/%.3f/%.3f/%.3f ms", (double)bounce_build_time_us / 1000.0,
 			(double)bounce_resolve_time_us / 1000.0, (double)bounce_filter_time_us / 1000.0, (double)bounce_combine_time_us / 1000.0) :
 			"unavailable",
+		bounce_no_ray_refreshes, bounce_no_ray_refreshes == 1 ? "" : "es", (double)bounce_refresh_cpu_time_us / 1000.0,
+		rs_emissive_bounce_refresh_gputime_valid ? va ("%.3f ms", (double)rs_emissive_bounce_refresh_gputime_us / 1000.0) : "unavailable",
+		bounce_dirty_receiver_surfaces,
+		bounce_dirty_receiver_surfaces == 1 ? "" : "s", bounce_cacheable_direct_epoch, bounce_cacheable_epoch,
+		bounce_transient_direct_epoch, bounce_transient_epoch,
 		bounce_budget_limited ? ", budget exceeded; direct-only fallback" : "");
 	Con_Printf (
 		"RT emissive entity fixtures: table v%d, lump %08x, %d parsed candidate%s, %d matched, %d ambiguous, %d unmatched, %d fallback, "

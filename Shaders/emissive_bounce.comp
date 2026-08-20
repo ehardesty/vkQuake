@@ -16,6 +16,9 @@ layout (push_constant) uniform PushConsts
 	uint rays_per_sample;
 	float strength;
 	float max_distance;
+	uint first;
+	int offset_x;
+	int offset_y;
 }
 push_constants;
 
@@ -79,7 +82,7 @@ uint LogicalIndex (uint surface_index, ivec2 atlas_coords)
 
 void CaptureDirect ()
 {
-	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
 		return;
 	const uint surface = texelFetch (surface_indices, coords, 0).x;
@@ -92,9 +95,10 @@ void CaptureDirect ()
 
 void BuildTransfer ()
 {
-	const uint sample_index = gl_GlobalInvocationID.x;
-	if (sample_index >= push_constants.count)
+	const uint local_index = gl_GlobalInvocationID.x;
+	if (local_index >= push_constants.count)
 		return;
+	const uint sample_index = push_constants.first + local_index;
 	const bounce_sample_t receiver = bounce_samples[sample_index];
 	const surface_t surf = surfaces[receiver.surface];
 	const float s = float (receiver.packed_st & 0xFFFFu) * float (push_constants.coordinate_scale) - 0.5f;
@@ -146,9 +150,10 @@ void BuildTransfer ()
 
 void ResolveBounce ()
 {
-	const uint sample_index = gl_GlobalInvocationID.x;
-	if (sample_index >= push_constants.count)
+	const uint local_index = gl_GlobalInvocationID.x;
+	if (local_index >= push_constants.count)
 		return;
+	const uint sample_index = push_constants.first + local_index;
 	vec3 sum = vec3 (0.0f);
 	for (uint tap = 0u; tap < push_constants.rays_per_sample; ++tap)
 	{
@@ -161,7 +166,7 @@ void ResolveBounce ()
 
 void FilterBounce ()
 {
-	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, textureSize (surface_indices, 0))))
 		return;
 	const uint surface = texelFetch (surface_indices, coords, 0).x;
@@ -192,7 +197,7 @@ void FilterBounce ()
 
 void CombineBounce ()
 {
-	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
 		return;
 	const ivec2 coarse_coords = coords / int (push_constants.coordinate_scale);

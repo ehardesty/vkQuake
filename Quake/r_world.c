@@ -1441,24 +1441,21 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 				(bounce_debug || s->emissive_influence || s->emissive_bounce_influence) && r_emissive_rt.value > 0.0f &&
 				gl_fullbrights.value > 0.0f && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
 			gltexture_t *surface_emissive_texture = NULL;
+			gltexture_t *surface_emissive_detail_texture = NULL;
 			if (surface_emissive)
 			{
 				if (bounce_debug)
 					surface_emissive_texture =
 						R_EmissiveBounceDebugReady () ? lightmaps[s->lightmaptexturenum].emissive_bounce_debug_texture : NULL;
 				else
-					surface_emissive_texture = transient_emissive_active && lightmaps[s->lightmaptexturenum].emissive_transient_texture
-						? lightmaps[s->lightmaptexturenum].emissive_transient_texture
-						: lightmaps[s->lightmaptexturenum].emissive_texture;
+					R_EmissiveResolvedTextures (s->lightmaptexturenum, &surface_emissive_texture, &surface_emissive_detail_texture);
 			}
-			gltexture_t *const surface_emissive_detail_texture = surface_emissive && !bounce_debug
-				? (bandlimit_raw_debug
-						? (transient_emissive_active ? lightmaps[s->lightmaptexturenum].emissive_bandlimit_transient_raw_texture
-												 : lightmaps[s->lightmaptexturenum].emissive_bandlimit_raw_texture)
-						: (transient_emissive_active && lightmaps[s->lightmaptexturenum].emissive_transient_texture
-								? lightmaps[s->lightmaptexturenum].emissive_transient_detail_texture
-								: lightmaps[s->lightmaptexturenum].emissive_detail_texture))
-				: NULL;
+			if (!surface_emissive || bounce_debug)
+				surface_emissive_detail_texture = NULL;
+			else if (bandlimit_raw_debug)
+				surface_emissive_detail_texture = transient_emissive_active
+					? lightmaps[s->lightmaptexturenum].emissive_bandlimit_transient_raw_texture
+					: lightmaps[s->lightmaptexturenum].emissive_bandlimit_raw_texture;
 			if (s->lightmaptexturenum != lastlightmap || surface_emissive_texture != emissive_texture)
 			{
 				R_FlushBatch (
