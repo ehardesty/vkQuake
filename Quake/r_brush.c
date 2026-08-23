@@ -418,6 +418,7 @@ static qboolean emissive_bounce_recombine_pending;
 static qboolean emissive_bounce_cacheable_refresh_pending, emissive_bounce_transient_refresh_pending;
 static qboolean emissive_bounce_cacheable_force_full_refresh;
 static qboolean emissive_bounce_transient_outputs_initialized, emissive_bounce_transient_force_full_refresh;
+static qboolean emissive_bounce_cacheable_latched, emissive_bounce_transient_latched;
 static uint32_t emissive_cacheable_direct_epoch, emissive_cacheable_bounce_epoch;
 static uint32_t emissive_transient_direct_epoch, emissive_transient_bounce_epoch;
 static uint32_t emissive_bounce_no_ray_refreshes;
@@ -4000,6 +4001,32 @@ qboolean R_TransientEmissiveActive (void)
 	return num_transient_emissive_lights > 0;
 }
 
+void R_LatchEmissiveResolvedTextures (void)
+{
+	emissive_bounce_cacheable_latched = emissive_bounce_transient_latched = false;
+	if (!emissive_bounce_ready || emissive_bounce_surfaces_buffer == VK_NULL_HANDLE || r_emissive_rt_bounce.value <= 0.0f ||
+		r_emissive_rt_bounce_strength.value <= 0.0f)
+		return;
+
+	const qboolean cacheable_refresh = emissive_bounce_cacheable_refresh_pending || emissive_radiance_coarse_pending ||
+		emissive_radiance_detail_pending;
+	const qboolean cacheable_refresh_ready = !R_EmissiveDetailAvailable () || emissive_detail_ready;
+	if (cacheable_refresh)
+		emissive_bounce_cacheable_latched = cacheable_refresh_ready;
+	else
+		emissive_bounce_cacheable_latched = emissive_cacheable_bounce_epoch == emissive_cacheable_direct_epoch;
+
+	const qboolean transient_refresh = emissive_bounce_transient_refresh_pending ||
+		(transient_emissive_initialized && (emissive_radiance_coarse_pending || emissive_radiance_detail_pending));
+	const qboolean transient_refresh_ready = emissive_bounce_transient_outputs_initialized &&
+		(!R_TransientEmissiveDetailAvailable () || transient_emissive_detail_ready);
+	if (transient_refresh)
+		emissive_bounce_transient_latched = transient_refresh_ready;
+	else
+		emissive_bounce_transient_latched =
+			emissive_bounce_transient_outputs_initialized && emissive_transient_bounce_epoch == emissive_transient_direct_epoch;
+}
+
 void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltexture_t **detail)
 {
 	*coarse = *detail = NULL;
@@ -4011,9 +4038,8 @@ void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltex
 	*detail = transient ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture;
 	if (!emissive_bounce_ready || r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f)
 		return;
-	const qboolean current = transient ? emissive_transient_bounce_epoch == emissive_transient_direct_epoch
-										 : emissive_cacheable_bounce_epoch == emissive_cacheable_direct_epoch;
-	if (!current)
+	const qboolean use_bounce = transient ? emissive_bounce_transient_latched : emissive_bounce_cacheable_latched;
+	if (!use_bounce)
 		return;
 	gltexture_t *const bounce_coarse = transient ? lightmap->emissive_transient_bounce_texture : lightmap->emissive_bounce_texture;
 	gltexture_t *const bounce_detail = transient ? lightmap->emissive_transient_bounce_detail_texture : lightmap->emissive_bounce_detail_texture;

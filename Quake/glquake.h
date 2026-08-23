@@ -870,6 +870,7 @@ void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
 void R_UpdateTransientEmissiveSources (void);
 void		  R_UpdateEmissiveLightstyles (void);
+void R_LatchEmissiveResolvedTextures (void);
 void R_InvalidateTransientEmissiveLights (void);
 void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count);
 qboolean R_TransientEmissiveActive (void);
