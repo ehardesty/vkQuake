@@ -551,6 +551,20 @@ static qboolean R_BuildGeneralizedModelEmitter (const entity_t *entity, emissive
 	return light->intensity > 0.0f;
 }
 
+qboolean R_EmissiveAliasEntityIsSource (const entity_t *entity)
+{
+	if (!entity || !entity->model || entity->model->needload || entity->model->type != mod_alias)
+		return false;
+	if (R_EmissiveEntityFallbackDef (entity, NULL))
+		return true;
+	if (CLAMP (0, (int)r_emissive_rt_model_emitters.value, 1) > 0)
+	{
+		emissive_light_t light;
+		return R_BuildGeneralizedModelEmitter (entity, &light);
+	}
+	return false;
+}
+
 static qboolean R_EmissiveEntityCandidateLocationMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
 {
 	vec3_t offset;

@@ -445,7 +445,7 @@ typedef struct emissive_alias_receiver_s
 	qmodel_t					  *model;
 	vec3_t						   origin, angles;
 	byte						   scale;
-	uint32_t					   source_generation;
+	uint32_t					   source_generation, occluder_generation;
 	qboolean					   active, ready;
 	emissive_clustered_candidate_t candidates[EMISSIVE_CLUSTERED_CANDIDATES];
 } emissive_alias_receiver_t;
@@ -457,6 +457,25 @@ static atomic_uint32_t emissive_clustered_alias_source_evaluations;
 static atomic_uint32_t emissive_clustered_alias_shadow_tests;
 static atomic_uint32_t emissive_clustered_alias_shadow_rejections;
 static atomic_uint32_t emissive_clustered_alias_contributors;
+typedef struct emissive_occluder_state_s
+{
+	entity_t *entity;
+	qmodel_t *model;
+	vec3_t	 origin, angles;
+	int		 pose1, pose2;
+	byte	 scale;
+} emissive_occluder_state_t;
+#define EMISSIVE_OCCLUDER_UPDATE_INTERVAL (1.0 / 30.0)
+#define EMISSIVE_OCCLUDER_POSITION_QUANTUM 1.0f
+#define EMISSIVE_OCCLUDER_ANGLE_STEPS 64.0f
+#define EMISSIVE_OCCLUDER_BOUNDS_PADDING 8.0f
+static emissive_occluder_state_t *emissive_occluder_states, *emissive_occluder_state_scratch;
+static int					 emissive_occluder_state_count, emissive_occluder_state_capacity;
+static qmodel_t				*emissive_occluder_worldmodel;
+static uint32_t				 emissive_brush_occluder_generation;
+static qboolean				 emissive_occluder_state_valid, emissive_occluder_dirty_tiles_valid, emissive_live_as_dirty;
+static qboolean				 emissive_occluder_receiver_refresh_pending;
+static double				 emissive_occluder_next_update_time;
 typedef struct emissive_bounce_surface_s
 {
 	uint32_t direct_base, bounce_base, packed_direct_size, packed_bounce_size;
@@ -518,6 +537,7 @@ static qboolean			   emissive_coarse_pending;
 static qboolean			   emissive_detail_pending;
 static qboolean			   emissive_detail_building;
 static qboolean			   emissive_detail_ready;
+static int				   emissive_detail_recorded_tiles, emissive_detail_recorded_dispatches;
 static qboolean			   emissive_detail_budget_limited;
 static int				   emissive_detail_scale = 2;
 static qboolean			   emissive_bandlimit_active;
@@ -537,6 +557,14 @@ COMPILE_TIME_ASSERT (emissive_logical_tile_t, sizeof (emissive_logical_tile_t) =
 static emissive_logical_tile_t *emissive_logical_tiles;
 static emissive_logical_tile_t *emissive_radiance_tiles;
 static uint32_t				*emissive_logical_tile_sources;
+static vec3_t				*emissive_logical_tile_mins, *emissive_logical_tile_maxs;
+static byte					*emissive_occluder_dirty_tile_bits;
+static emissive_logical_tile_t *emissive_occluder_tiles;
+static int					 num_emissive_occluder_dirty_tiles;
+static qboolean				 emissive_occluder_full_detail_refresh, emissive_occluder_partial_detail_refresh;
+static VkBuffer				 emissive_occluder_tiles_buffer;
+static vulkan_memory_t		 emissive_occluder_tiles_buffer_memory;
+static VkDescriptorSet		*emissive_occluder_detail_descriptor_sets;
 static int					 num_emissive_logical_tiles;
 static int					 num_emissive_logical_tiles_total;
 static int					 num_emissive_logical_tile_sources;
@@ -589,6 +617,7 @@ static void						R_EmissiveBounceSurfaceBounds (const msurface_t *surface, vec3_
 static qboolean					R_SurfaceInEmissiveWorldAccelerationStructure (const msurface_t *surface);
 static void						R_DeleteEmissiveBounceResources (void);
 static void						R_FreeEmissiveBandlimitDescriptorSets (void);
+static void						R_FreeEmissiveOccluderDescriptorSets (void);
 static qboolean					R_EnableEmissiveBandlimit (void);
 static void						R_ResetEmissiveBandlimitStats (void);
 static void						R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[5]);
@@ -2251,6 +2280,7 @@ void GL_BuildLightmaps (void)
 
 	GL_WaitForDeviceIdle ();
 	R_FreeEmissiveBandlimitDescriptorSets ();
+	R_FreeEmissiveOccluderDescriptorSets ();
 	R_FreeEmissiveBrushReceivers ();
 	emissive_detail_scale = r_emissive_rt_resolution.value <= 1.0f ? 1 : r_emissive_rt_resolution.value <= 2.0f ? 2 : 4;
 
@@ -3042,10 +3072,8 @@ static qboolean R_EmissiveSurfaceLightmapPoint (const msurface_t *surface, float
 	return true;
 }
 
-static qboolean R_EmissiveLightInfluencesTile (
-	const msurface_t *surface, int tile_x, int tile_y, const emissive_light_t *light)
+static qboolean R_EmissiveSurfaceTileBounds (const msurface_t *surface, int tile_x, int tile_y, vec3_t mins, vec3_t maxs)
 {
-	const float influence_radius = light->radius;
 	const int surface_width = (surface->extents[0] >> 4) + 1;
 	const int surface_height = (surface->extents[1] >> 4) + 1;
 	const int first_s = q_max (tile_x * 8, surface->light_s);
@@ -3060,9 +3088,22 @@ static qboolean R_EmissiveLightInfluencesTile (
 		!R_EmissiveSurfaceLightmapPoint (surface, last_s - surface->light_s - 1.0f, first_t - surface->light_t - 1.0f, corners[1]) ||
 		!R_EmissiveSurfaceLightmapPoint (surface, first_s - surface->light_s - 1.0f, last_t - surface->light_t - 1.0f, corners[2]) ||
 		!R_EmissiveSurfaceLightmapPoint (surface, last_s - surface->light_s - 1.0f, last_t - surface->light_t - 1.0f, corners[3]))
+	{
+		const float *vertex = surface->polys->verts[0];
+		VectorCopy (vertex, mins);
+		VectorCopy (vertex, maxs);
+		for (int i = 1; i < surface->polys->numverts; ++i)
+		{
+			vertex += VERTEXSIZE;
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				mins[axis] = q_min (mins[axis], vertex[axis]);
+				maxs[axis] = q_max (maxs[axis], vertex[axis]);
+			}
+		}
 		return true;
+	}
 
-	vec3_t mins, maxs;
 	VectorCopy (corners[0], mins);
 	VectorCopy (corners[0], maxs);
 	for (int corner = 1; corner < countof (corners); ++corner)
@@ -3071,6 +3112,15 @@ static qboolean R_EmissiveLightInfluencesTile (
 			mins[axis] = q_min (mins[axis], corners[corner][axis]);
 			maxs[axis] = q_max (maxs[axis], corners[corner][axis]);
 		}
+	return true;
+}
+
+static qboolean R_EmissiveLightInfluencesTile (
+	const msurface_t *surface, int tile_x, int tile_y, const emissive_light_t *light)
+{
+	vec3_t mins, maxs;
+	if (!R_EmissiveSurfaceTileBounds (surface, tile_x, tile_y, mins, maxs))
+		return false;
 
 	float distance_squared = 0.0f;
 	for (int axis = 0; axis < 3; ++axis)
@@ -3082,7 +3132,7 @@ static qboolean R_EmissiveLightInfluencesTile (
 			distance = light->origin[axis] - maxs[axis];
 		distance_squared += distance * distance;
 	}
-	return distance_squared < influence_radius * influence_radius;
+	return distance_squared < light->radius * light->radius;
 }
 
 /*
@@ -3538,6 +3588,51 @@ void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
 	Mem_Free (lightmap_offsets);
 }
 
+static void R_BuildEmissiveLogicalTileBounds (void)
+{
+	SAFE_FREE (emissive_logical_tile_mins);
+	SAFE_FREE (emissive_logical_tile_maxs);
+	SAFE_FREE (emissive_occluder_dirty_tile_bits);
+	SAFE_FREE (emissive_occluder_tiles);
+	num_emissive_occluder_dirty_tiles = 0;
+	if (!num_emissive_logical_tiles)
+		return;
+
+	emissive_logical_tile_mins = Mem_Alloc (num_emissive_logical_tiles * sizeof (*emissive_logical_tile_mins));
+	emissive_logical_tile_maxs = Mem_Alloc (num_emissive_logical_tiles * sizeof (*emissive_logical_tile_maxs));
+	emissive_occluder_dirty_tile_bits = Mem_Alloc (num_emissive_logical_tiles * sizeof (*emissive_occluder_dirty_tile_bits));
+	emissive_occluder_tiles = Mem_Alloc (num_emissive_logical_tiles * sizeof (*emissive_occluder_tiles));
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	for (int tile_index = 0; tile_index < num_emissive_logical_tiles; ++tile_index)
+	{
+		const emissive_logical_tile_t *const tile = &emissive_logical_tiles[tile_index];
+		vec3_t *const mins = &emissive_logical_tile_mins[tile_index];
+		vec3_t *const maxs = &emissive_logical_tile_maxs[tile_index];
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			(*mins)[axis] = FLT_MAX;
+			(*maxs)[axis] = -FLT_MAX;
+		}
+		for (int surface_index = 0; surface_index < cl.worldmodel->nummodelsurfaces; ++surface_index)
+		{
+			const msurface_t *const surface = &first_surface[surface_index];
+			emissive_surface_tile_rect_t rect;
+			if (!R_EmissiveSurfaceTileRect (surface, &rect) || rect.lightmap != tile->lightmap || tile->x < rect.first_x ||
+				tile->x > rect.last_x || tile->y < rect.first_y || tile->y > rect.last_y)
+				continue;
+			vec3_t surface_mins, surface_maxs;
+			if (!R_EmissiveSurfaceTileBounds (surface, tile->x, tile->y, surface_mins, surface_maxs))
+				continue;
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				(*mins)[axis] = q_min ((*mins)[axis], surface_mins[axis]);
+				(*maxs)[axis] = q_max ((*maxs)[axis], surface_maxs[axis]);
+			}
+		}
+		assert ((*mins)[0] <= (*maxs)[0] && (*mins)[1] <= (*maxs)[1] && (*mins)[2] <= (*maxs)[2]);
+	}
+}
+
 static void R_BuildEmissiveLogicalTileSources (
 	const emissive_light_t *lights, int num_lights, const emissive_surface_light_t *surface_lights, int num_surface_lights)
 {
@@ -3619,6 +3714,7 @@ static void R_BuildEmissiveLogicalTileSources (
 		emissive_logical_tiles = Mem_Realloc (emissive_logical_tiles, num_emissive_logical_tiles * sizeof (*emissive_logical_tiles));
 	else
 		SAFE_FREE (emissive_logical_tiles);
+	R_BuildEmissiveLogicalTileBounds ();
 	Con_DPrintf (
 		"RT emissives: %d affected 8x8 tile%s, %d tile-source link%s (%.2f per tile, %" PRIu64 " persistent CPU bytes)\n",
 		num_emissive_logical_tiles, num_emissive_logical_tiles == 1 ? "" : "s", num_emissive_logical_tile_sources,
@@ -4027,18 +4123,19 @@ void R_EmissiveDetailCompleted (void)
 {
 	emissive_detail_building = false;
 	emissive_detail_ready = true;
-	const int dispatches = R_EmissiveDetailDispatchCount ();
+	const int tiles = emissive_detail_recorded_tiles ? emissive_detail_recorded_tiles : num_emissive_logical_tiles;
+	const int dispatches = emissive_detail_recorded_dispatches ? emissive_detail_recorded_dispatches : R_EmissiveDetailDispatchCount ();
 	if (rs_emissive_detail_gputime_valid)
 		Con_DPrintf (
-			"RT emissives: completed %d detail tile%s in %d dispatch%s/%d workgroups in %.3f ms GPU\n", num_emissive_logical_tiles,
-			num_emissive_logical_tiles == 1 ? "" : "s", dispatches, dispatches == 1 ? "" : "es",
-			num_emissive_logical_tiles * R_EmissiveDetailScale () * R_EmissiveDetailScale (),
+			"RT emissives: completed %d detail tile%s in %d dispatch%s/%d workgroups in %.3f ms GPU\n", tiles,
+			tiles == 1 ? "" : "s", dispatches, dispatches == 1 ? "" : "es",
+			tiles * R_EmissiveDetailScale () * R_EmissiveDetailScale (),
 			(double)rs_emissive_detail_gputime_us / 1000.0);
 	else
 		Con_DPrintf (
-			"RT emissives: completed %d detail tile%s in %d dispatch%s/%d workgroups, GPU timing unavailable\n", num_emissive_logical_tiles,
-			num_emissive_logical_tiles == 1 ? "" : "s", dispatches, dispatches == 1 ? "" : "es",
-			num_emissive_logical_tiles * R_EmissiveDetailScale () * R_EmissiveDetailScale ());
+			"RT emissives: completed %d detail tile%s in %d dispatch%s/%d workgroups, GPU timing unavailable\n", tiles,
+			tiles == 1 ? "" : "s", dispatches, dispatches == 1 ? "" : "es",
+			tiles * R_EmissiveDetailScale () * R_EmissiveDetailScale ());
 }
 
 void R_EmissiveBounceCompleted (
@@ -4726,6 +4823,238 @@ static int R_EmissiveAliasLightLimit (void)
 	return CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS);
 }
 
+static void R_EmissiveOccluderStateBounds (const emissive_occluder_state_t *state, vec3_t mins, vec3_t maxs)
+{
+	vec3_t origin, angles;
+	VectorCopy (state->origin, origin);
+	VectorCopy (state->angles, angles);
+	angles[0] = -angles[0];
+	float model_matrix[16];
+	IdentityMatrix (model_matrix);
+	R_RotateForEntity (model_matrix, origin, angles, state->scale);
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		mins[axis] = FLT_MAX;
+		maxs[axis] = -FLT_MAX;
+	}
+	for (int corner = 0; corner < 8; ++corner)
+	{
+		const vec4_t local = {
+			(corner & 1) ? state->model->maxs[0] : state->model->mins[0],
+			(corner & 2) ? state->model->maxs[1] : state->model->mins[1],
+			(corner & 4) ? state->model->maxs[2] : state->model->mins[2], 1.0f};
+		vec3_t world;
+		for (int row = 0; row < 3; ++row)
+			world[row] = model_matrix[row] * local[0] + model_matrix[4 + row] * local[1] + model_matrix[8 + row] * local[2] + model_matrix[12 + row];
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			mins[axis] = q_min (mins[axis], world[axis]);
+			maxs[axis] = q_max (maxs[axis], world[axis]);
+		}
+	}
+}
+
+static void R_MarkEmissiveOccluderStateTiles (const emissive_occluder_state_t *state)
+{
+	if (!emissive_occluder_dirty_tile_bits || !emissive_logical_tile_mins || !emissive_logical_tile_maxs)
+		return;
+	vec3_t occluder_mins, occluder_maxs;
+	R_EmissiveOccluderStateBounds (state, occluder_mins, occluder_maxs);
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		occluder_mins[axis] -= EMISSIVE_OCCLUDER_BOUNDS_PADDING;
+		occluder_maxs[axis] += EMISSIVE_OCCLUDER_BOUNDS_PADDING;
+	}
+	for (int tile_index = 0; tile_index < num_emissive_logical_tiles; ++tile_index)
+	{
+		if (emissive_occluder_dirty_tile_bits[tile_index])
+			continue;
+		const emissive_logical_tile_t *const tile = &emissive_logical_tiles[tile_index];
+		for (uint32_t source_link = tile->first_source; source_link < tile->first_source + tile->num_sources; ++source_link)
+		{
+			const emissive_light_t *const source = &emissive_cacheable_lights[emissive_logical_tile_sources[source_link]];
+			qboolean intersects = true;
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				const float ray_min = q_min (source->origin[axis], emissive_logical_tile_mins[tile_index][axis]);
+				const float ray_max = q_max (source->origin[axis], emissive_logical_tile_maxs[tile_index][axis]);
+				if (ray_max < occluder_mins[axis] || ray_min > occluder_maxs[axis])
+				{
+					intersects = false;
+					break;
+				}
+			}
+			if (intersects)
+			{
+				emissive_occluder_dirty_tile_bits[tile_index] = true;
+				break;
+			}
+		}
+	}
+}
+
+static void R_BuildEmissiveOccluderDirtyTiles (
+	const emissive_occluder_state_t *previous_states, int previous_count, const emissive_occluder_state_t *current_states, int current_count)
+{
+	emissive_occluder_full_detail_refresh = !emissive_occluder_state_valid || !emissive_detail_ready || !emissive_occluder_dirty_tile_bits;
+	emissive_occluder_partial_detail_refresh = false;
+	if (emissive_occluder_full_detail_refresh)
+	{
+		emissive_occluder_dirty_tiles_valid = false;
+		return;
+	}
+	qboolean same_bounds = previous_count == current_count;
+	for (int i = 0; same_bounds && i < current_count; ++i)
+		same_bounds = previous_states[i].entity == current_states[i].entity && previous_states[i].model == current_states[i].model &&
+			previous_states[i].scale == current_states[i].scale && !memcmp (previous_states[i].origin, current_states[i].origin, sizeof (current_states[i].origin)) &&
+			!memcmp (previous_states[i].angles, current_states[i].angles, sizeof (current_states[i].angles));
+	if (same_bounds && emissive_occluder_dirty_tiles_valid)
+	{
+		emissive_occluder_partial_detail_refresh = num_emissive_occluder_dirty_tiles > 0;
+		return;
+	}
+
+	num_emissive_occluder_dirty_tiles = 0;
+	memset (emissive_occluder_dirty_tile_bits, 0, num_emissive_logical_tiles * sizeof (*emissive_occluder_dirty_tile_bits));
+	for (int current = 0; current < current_count; ++current)
+	{
+		int previous = 0;
+		while (previous < previous_count && (previous_states[previous].entity != current_states[current].entity ||
+			previous_states[previous].model != current_states[current].model))
+			++previous;
+		if (previous < previous_count && !memcmp (&previous_states[previous], &current_states[current], sizeof (current_states[current])))
+			continue;
+		if (previous < previous_count)
+			R_MarkEmissiveOccluderStateTiles (&previous_states[previous]);
+		R_MarkEmissiveOccluderStateTiles (&current_states[current]);
+	}
+	for (int previous = 0; previous < previous_count; ++previous)
+	{
+		int current = 0;
+		while (current < current_count && (current_states[current].entity != previous_states[previous].entity ||
+			current_states[current].model != previous_states[previous].model))
+			++current;
+		if (current == current_count)
+			R_MarkEmissiveOccluderStateTiles (&previous_states[previous]);
+	}
+	for (int tile = 0; tile < num_emissive_logical_tiles; ++tile)
+		if (emissive_occluder_dirty_tile_bits[tile])
+			emissive_occluder_tiles[num_emissive_occluder_dirty_tiles++] = emissive_logical_tiles[tile];
+	emissive_occluder_full_detail_refresh = num_emissive_occluder_dirty_tiles == num_emissive_logical_tiles;
+	emissive_occluder_partial_detail_refresh = num_emissive_occluder_dirty_tiles > 0 && !emissive_occluder_full_detail_refresh;
+	emissive_occluder_dirty_tiles_valid = !emissive_occluder_full_detail_refresh;
+}
+
+static qboolean R_UpdateEmissiveOccluderState (void)
+{
+	const int occluder_tier = CLAMP (0, (int)r_emissive_rt_occluders.value, 2);
+	if (occluder_tier <= 0 || !cl.worldmodel)
+	{
+		emissive_occluder_state_count = 0;
+		emissive_occluder_state_valid = false;
+		emissive_occluder_worldmodel = cl.worldmodel;
+		return false;
+	}
+	const double update_time = Sys_DoubleTime ();
+	if (emissive_occluder_state_valid && update_time < emissive_occluder_next_update_time)
+		return false;
+	emissive_occluder_next_update_time = update_time + EMISSIVE_OCCLUDER_UPDATE_INTERVAL;
+
+	if (emissive_occluder_worldmodel != cl.worldmodel)
+	{
+		emissive_occluder_state_count = 0;
+		emissive_occluder_state_valid = false;
+		emissive_occluder_worldmodel = cl.worldmodel;
+	}
+
+	const int max_states = cl.num_entities + cl.num_statics;
+	if (max_states > emissive_occluder_state_capacity)
+	{
+		emissive_occluder_state_capacity = max_states;
+		emissive_occluder_states = Mem_Realloc (
+			emissive_occluder_states, emissive_occluder_state_capacity * sizeof (*emissive_occluder_states));
+		emissive_occluder_state_scratch = Mem_Realloc (
+			emissive_occluder_state_scratch, emissive_occluder_state_capacity * sizeof (*emissive_occluder_state_scratch));
+	}
+
+	int state_count = 0;
+	for (int i = 0; i < max_states; ++i)
+	{
+		entity_t *const entity = i < cl.num_entities ? &cl.entities[i] : cl.static_entities[i - cl.num_entities];
+		qmodel_t *const model = entity->model;
+		if (!model || model->needload || ((entity->alpha != ENTALPHA_DEFAULT) && (ENTALPHA_DECODE (entity->alpha) < 1.0f)))
+			continue;
+		const qboolean brush = model->type == mod_brush && model->blas != VK_NULL_HANDLE;
+		const qboolean alias = occluder_tier > 1 && model->type == mod_alias && entity->blas_data &&
+			entity->blas_data->blas != VK_NULL_HANDLE && !entity->blas_data->needs_initial_build && entity->blas_data->model == model &&
+			!R_EmissiveAliasEntityIsSource (entity);
+		if (!brush && !alias)
+			continue;
+
+		emissive_occluder_state_t *const state = &emissive_occluder_state_scratch[state_count++];
+		memset (state, 0, sizeof (*state));
+		state->entity = entity;
+		state->model = model;
+		state->scale = entity->netstate.scale;
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			state->origin[axis] = floorf (entity->origin[axis] / EMISSIVE_OCCLUDER_POSITION_QUANTUM + 0.5f) * EMISSIVE_OCCLUDER_POSITION_QUANTUM;
+			state->angles[axis] = floorf (entity->angles[axis] * (EMISSIVE_OCCLUDER_ANGLE_STEPS / 360.0f) + 0.5f) *
+				(360.0f / EMISSIVE_OCCLUDER_ANGLE_STEPS);
+		}
+		if (alias)
+		{
+			aliashdr_t *const header = (aliashdr_t *)Mod_Extradata (model);
+			if (header)
+			{
+				lerpdata_t lerp;
+				R_SetupAliasFrame (entity, header, &lerp);
+				state->pose1 = lerp.pose1;
+				state->pose2 = lerp.pose2;
+			}
+		}
+	}
+
+	const qboolean changed = !emissive_occluder_state_valid || state_count != emissive_occluder_state_count ||
+		(state_count && memcmp (emissive_occluder_state_scratch, emissive_occluder_states, state_count * sizeof (*emissive_occluder_states)));
+	if (!changed)
+		return false;
+
+	qboolean brush_changed = !emissive_occluder_state_valid;
+	for (int current = 0; !brush_changed && current < state_count; ++current)
+		if (emissive_occluder_state_scratch[current].model->type == mod_brush)
+		{
+			int previous = 0;
+			while (previous < emissive_occluder_state_count &&
+				(emissive_occluder_states[previous].entity != emissive_occluder_state_scratch[current].entity ||
+					emissive_occluder_states[previous].model != emissive_occluder_state_scratch[current].model))
+				++previous;
+			brush_changed = previous == emissive_occluder_state_count ||
+				memcmp (&emissive_occluder_states[previous], &emissive_occluder_state_scratch[current], sizeof (emissive_occluder_states[previous]));
+		}
+	for (int previous = 0; !brush_changed && previous < emissive_occluder_state_count; ++previous)
+		if (emissive_occluder_states[previous].model->type == mod_brush)
+		{
+			int current = 0;
+			while (current < state_count &&
+				(emissive_occluder_state_scratch[current].entity != emissive_occluder_states[previous].entity ||
+					emissive_occluder_state_scratch[current].model != emissive_occluder_states[previous].model))
+				++current;
+			brush_changed = current == state_count;
+		}
+	if (brush_changed && ++emissive_brush_occluder_generation == 0)
+		++emissive_brush_occluder_generation;
+	R_BuildEmissiveOccluderDirtyTiles (
+		emissive_occluder_states, emissive_occluder_state_count, emissive_occluder_state_scratch, state_count);
+	emissive_occluder_state_t *const previous = emissive_occluder_states;
+	emissive_occluder_states = emissive_occluder_state_scratch;
+	emissive_occluder_state_scratch = previous;
+	emissive_occluder_state_count = state_count;
+	emissive_occluder_state_valid = true;
+	emissive_live_as_dirty = true;
+	return true;
+}
+
 static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 {
 	qmodel_t *const model = entity->model;
@@ -4745,8 +5074,8 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 		receiver->model = model;
 	}
 	receiver->active = true;
-	if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) == 0 && receiver->ready &&
-		receiver->source_generation == emissive_brush_receiver_source_generation &&
+	if (receiver->ready && receiver->source_generation == emissive_brush_receiver_source_generation &&
+		receiver->occluder_generation == emissive_brush_occluder_generation &&
 		!memcmp (receiver->origin, entity->origin, sizeof (receiver->origin)) && !memcmp (receiver->angles, entity->angles, sizeof (receiver->angles)) &&
 		receiver->scale == entity->netstate.scale)
 		return;
@@ -4755,6 +5084,7 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 	VectorCopy (entity->angles, receiver->angles);
 	receiver->scale = entity->netstate.scale;
 	receiver->source_generation = emissive_brush_receiver_source_generation;
+	receiver->occluder_generation = emissive_brush_occluder_generation;
 	memset (receiver->candidates, 0, sizeof (receiver->candidates));
 	vec3_t center, forward, right, up;
 	R_EmissiveAliasReceiverFrame (entity, center, forward, right, up);
@@ -4833,13 +5163,9 @@ void R_UpdateEmissiveBrushReceivers (void)
 	if (!cl.worldmodel || !vulkan_globals.ray_query || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f ||
 		(!num_emissive_lights && !num_transient_emissive_lights))
 		return;
-	const int occluder_tier = CLAMP (0, (int)r_emissive_rt_occluders.value, 2);
-	if (occluder_tier > 0)
+	if (emissive_occluder_receiver_refresh_pending)
 	{
-		if (!emissive_detail_building && num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ())
-			emissive_detail_pending = true;
-		if (num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ())
-			transient_emissive_detail_pending = true;
+		emissive_occluder_receiver_refresh_pending = false;
 		for (int i = 0; i < emissive_brush_receiver_count; ++i)
 		{
 			emissive_brush_receivers[i].dirty = true;
@@ -5264,6 +5590,15 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	return descriptor_set;
 }
 
+static void R_FreeEmissiveOccluderDescriptorSets (void)
+{
+	if (emissive_occluder_detail_descriptor_sets)
+		for (int i = 0; i < lightmap_count; ++i)
+			if (emissive_occluder_detail_descriptor_sets[i] != VK_NULL_HANDLE)
+				R_FreeDescriptorSet (emissive_occluder_detail_descriptor_sets[i], &vulkan_globals.emissive_compute_set_layout);
+	SAFE_FREE (emissive_occluder_detail_descriptor_sets);
+}
+
 static void R_FreeTransientEmissiveDescriptorSets (void)
 {
 	for (int i = 0; i < lightmap_count; ++i)
@@ -5491,12 +5826,14 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	num_emissive_light_diagnostics = q_min (count, MAX_DLIGHTS);
 	if (num_emissive_light_diagnostics)
 		memcpy (emissive_light_diagnostics, lights, num_emissive_light_diagnostics * sizeof (*lights));
-	if (emissive_lights_buffer != VK_NULL_HANDLE || emissive_tiles_buffer != VK_NULL_HANDLE || emissive_tile_sources_buffer != VK_NULL_HANDLE ||
+	if (emissive_lights_buffer != VK_NULL_HANDLE || emissive_tiles_buffer != VK_NULL_HANDLE || emissive_occluder_tiles_buffer != VK_NULL_HANDLE ||
+		emissive_tile_sources_buffer != VK_NULL_HANDLE ||
 		emissive_modulations_buffer != VK_NULL_HANDLE || emissive_visibility_buffer != VK_NULL_HANDLE || emissive_radiance_tiles_buffer != VK_NULL_HANDLE ||
 		emissive_brush_receiver_count)
 		GL_WaitForDeviceIdle ();
 	R_FreeEmissiveBrushReceiverDescriptorSets ();
 	R_FreeEmissiveBandlimitDescriptorSets ();
+	R_FreeEmissiveOccluderDescriptorSets ();
 	R_FreeEmissiveRadianceOverlayDescriptorSets ();
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -5544,6 +5881,8 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	emissive_lights_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_tiles_buffer, &emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_tiles_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (emissive_occluder_tiles_buffer, &emissive_occluder_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_occluder_tiles_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_tile_sources_buffer, &emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_tile_sources_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_modulations_buffer, &emissive_modulations_buffer_memory, &num_vulkan_bmodel_allocations);
@@ -5652,6 +5991,10 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
 			&num_vulkan_bmodel_allocations, NULL, "Emissive logical tiles");
 		R_StagingUploadBuffer (emissive_tiles_buffer, tiles_size, (const byte *)emissive_logical_tiles);
+		R_CreateBuffer (
+			&emissive_occluder_tiles_buffer, &emissive_occluder_tiles_buffer_memory, tiles_size,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+			&num_vulkan_bmodel_allocations, NULL, "Emissive occluder dirty tiles");
 		emissive_radiance_tiles = Mem_Alloc (tiles_size);
 		R_CreateBuffer (
 			&emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, tiles_size,
@@ -5694,6 +6037,12 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		{emissive_visibility_available ? emissive_visibility_buffer : emissive_modulations_buffer, 0,
 		 emissive_visibility_available ? VK_WHOLE_SIZE : modulations_size},
 	};
+	VkDescriptorBufferInfo occluder_source_buffers[5];
+	memcpy (occluder_source_buffers, source_buffers, sizeof (occluder_source_buffers));
+	occluder_source_buffers[1].buffer = emissive_occluder_tiles_buffer != VK_NULL_HANDLE ? emissive_occluder_tiles_buffer : emissive_lights_buffer;
+	occluder_source_buffers[1].range = tiles_size ? tiles_size : sizeof (uint32_t);
+	emissive_occluder_detail_descriptor_sets = Mem_Alloc (lightmap_count * sizeof (*emissive_occluder_detail_descriptor_sets));
+	memset (emissive_occluder_detail_descriptor_sets, 0, lightmap_count * sizeof (*emissive_occluder_detail_descriptor_sets));
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -5704,6 +6053,8 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		{
 			lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 				lightmap, lightmap->emissive_detail_texture, NULL, source_buffers, "detail", i);
+			emissive_occluder_detail_descriptor_sets[i] = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_detail_texture, NULL, occluder_source_buffers, "occluder detail", i);
 			emissive_detail_pending = num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ();
 		}
 	}
@@ -6726,6 +7077,9 @@ qboolean R_EmissiveBandlimitActive (void)
 void R_EmissiveOccludersChanged_f (cvar_t *var)
 {
 	(void)var;
+	emissive_occluder_state_valid = false;
+	emissive_occluder_next_update_time = 0.0;
+	emissive_live_as_dirty = true;
 	if (!cl.worldmodel)
 		return;
 	R_InvalidateEmissiveBrushReceiverSources ();
@@ -6748,6 +7102,8 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	if (detail && direct_tlas == VK_NULL_HANDLE)
 		return;
 
+	const qboolean partial_detail = detail && emissive_occluder_partial_detail_refresh && emissive_detail_ready &&
+		num_emissive_occluder_dirty_tiles > 0;
 	const qboolean bandlimited = detail && emissive_bandlimit_active;
 	const vulkan_pipeline_t *const pipeline = detail
 		? (bandlimited ? &vulkan_globals.emissive_bandlimit_detail_pipeline : &vulkan_globals.emissive_detail_pipeline)
@@ -6773,7 +7129,7 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
 		vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
-		if (emissive_visibility_available)
+		if (emissive_visibility_available && !partial_detail)
 		{
 			vkCmdFillBuffer (cbx->cb, emissive_visibility_buffer, 0, VK_WHOLE_SIZE, 0);
 			ZEROED_STRUCT (VkMemoryBarrier, visibility_barrier);
@@ -6781,6 +7137,26 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 			visibility_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			visibility_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 			vkCmdPipelineBarrier (cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &visibility_barrier, 0, NULL, 0, NULL);
+		}
+		else if (emissive_visibility_available)
+		{
+			ZEROED_STRUCT (VkMemoryBarrier, visibility_barrier);
+			visibility_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			visibility_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			visibility_barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &visibility_barrier, 0, NULL, 0, NULL);
+		}
+		if (partial_detail)
+		{
+			R_UpdateTransientEmissiveBuffer (cbx->cb, emissive_occluder_tiles_buffer, emissive_occluder_tiles,
+				num_emissive_occluder_dirty_tiles * sizeof (*emissive_occluder_tiles));
+			ZEROED_STRUCT (VkMemoryBarrier, tile_barrier);
+			tile_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			tile_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			tile_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			vkCmdPipelineBarrier (
+				cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &tile_barrier, 0, NULL, 0, NULL);
 		}
 	}
 	emissive_compute_push_constants_t push_constants = {
@@ -6790,11 +7166,28 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
 
 	int logical_tile = 0;
+	int dirty_tile = 0;
+	emissive_detail_recorded_tiles = partial_detail ? num_emissive_occluder_dirty_tiles : num_emissive_logical_tiles;
+	emissive_detail_recorded_dispatches = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
+		int first_dirty_tile = dirty_tile;
+		int num_dirty_tiles = 0;
+		if (partial_detail)
+		{
+			while (first_dirty_tile < num_emissive_occluder_dirty_tiles && emissive_occluder_tiles[first_dirty_tile].lightmap < i)
+				++first_dirty_tile;
+			dirty_tile = first_dirty_tile;
+			while (dirty_tile < num_emissive_occluder_dirty_tiles && emissive_occluder_tiles[dirty_tile].lightmap == i)
+				++dirty_tile;
+			num_dirty_tiles = dirty_tile - first_dirty_tile;
+			if (!num_dirty_tiles)
+				continue;
+		}
 		const VkDescriptorSet descriptor_set = detail
-			? (bandlimited ? lightmap->emissive_bandlimit_detail_descriptor_set : lightmap->emissive_detail_descriptor_set)
+			? (partial_detail ? emissive_occluder_detail_descriptor_sets[i]
+							  : (bandlimited ? lightmap->emissive_bandlimit_detail_descriptor_set : lightmap->emissive_detail_descriptor_set))
 			: lightmap->emissive_coarse_descriptor_set;
 		const gltexture_t *const texture = detail
 			? lightmap->emissive_detail_texture
@@ -6806,7 +7199,7 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		memset (&barrier, 0, sizeof (barrier));
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-		barrier.dstAccessMask = detail ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = detail && !partial_detail ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_WRITE_BIT;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -6816,9 +7209,9 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		barrier.subresourceRange.levelCount = 1;
 		barrier.subresourceRange.layerCount = 1;
 		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, detail ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0,
+			cbx->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, detail && !partial_detail ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0,
 			NULL, 1, &barrier);
-		if (detail)
+		if (detail && !partial_detail)
 		{
 			ZEROED_STRUCT (VkClearColorValue, clear_color);
 			vkCmdClearColorImage (cbx->cb, texture->image, VK_IMAGE_LAYOUT_GENERAL, &clear_color, 1, &barrier.subresourceRange);
@@ -6833,17 +7226,28 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 			cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &descriptor_set, 0, NULL);
 		if (detail)
 		{
-			while (logical_tile < num_emissive_logical_tiles && emissive_logical_tiles[logical_tile].lightmap < i)
-				++logical_tile;
-			const int first_tile = logical_tile;
-			while (logical_tile < num_emissive_logical_tiles && emissive_logical_tiles[logical_tile].lightmap == i)
-				++logical_tile;
-			const int num_tiles = logical_tile - first_tile;
-			if (num_tiles)
+			if (partial_detail)
 			{
-				push_constants.first_tile = first_tile;
+				push_constants.first_tile = first_dirty_tile;
 				R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
-				vkCmdDispatch (cbx->cb, R_EmissiveDetailScale (), R_EmissiveDetailScale (), num_tiles);
+				vkCmdDispatch (cbx->cb, R_EmissiveDetailScale (), R_EmissiveDetailScale (), num_dirty_tiles);
+				++emissive_detail_recorded_dispatches;
+			}
+			else
+			{
+				while (logical_tile < num_emissive_logical_tiles && emissive_logical_tiles[logical_tile].lightmap < i)
+					++logical_tile;
+				const int first_tile = logical_tile;
+				while (logical_tile < num_emissive_logical_tiles && emissive_logical_tiles[logical_tile].lightmap == i)
+					++logical_tile;
+				const int num_tiles = logical_tile - first_tile;
+				if (num_tiles)
+				{
+					push_constants.first_tile = first_tile;
+					R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
+					vkCmdDispatch (cbx->cb, R_EmissiveDetailScale (), R_EmissiveDetailScale (), num_tiles);
+					++emissive_detail_recorded_dispatches;
+				}
 			}
 		}
 		else
@@ -6866,6 +7270,8 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	if (detail)
 	{
 		emissive_detail_building = true;
+		emissive_occluder_partial_detail_refresh = false;
+		emissive_occluder_full_detail_refresh = false;
 		GL_EndEmissiveDetailTimestamp (cbx);
 	}
 	else
@@ -7984,7 +8390,21 @@ R_BuildTopLevelAccelerationStructure
 */
 void R_BuildTopLevelAccelerationStructure (void *unused)
 {
+	const int occluder_tier = CLAMP (0, (int)r_emissive_rt_occluders.value, 2);
+	if (r_emissive_rt.value > 0.0f && occluder_tier > 0 && R_UpdateEmissiveOccluderState ())
+	{
+		if (!emissive_detail_building && num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable () &&
+			(emissive_occluder_full_detail_refresh || num_emissive_occluder_dirty_tiles > 0))
+			emissive_detail_pending = true;
+		if (num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ())
+			transient_emissive_detail_pending = true;
+		emissive_occluder_receiver_refresh_pending = true;
+	}
 	if (bmodel_tlas == VK_NULL_HANDLE)
+		return;
+	const qboolean rt_shadows_require_update = r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f;
+	if (!rt_shadows_require_update && r_emissive_rt.value > 0.0f && CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0 &&
+		!emissive_live_as_dirty)
 		return;
 
 	const double  start_time = Sys_DoubleTime ();
@@ -8091,14 +8511,13 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		instance->transform.matrix[2][2] = model_matrix[10];
 		instance->transform.matrix[2][3] = model_matrix[14];
 		instance->instanceCustomIndex = 0;
-		instance->mask = is_alias ? 0x02 : 0x01;
+		instance->mask = is_alias ? (R_EmissiveAliasEntityIsSource (e) ? 0x04 : 0x02) : 0x01;
 		instance->instanceShaderBindingTableRecordOffset = 0;
 		instance->flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR | VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instance->accelerationStructureReference = address;
 
 		++num_instances;
 	}
-
 	ZEROED_STRUCT (VkAccelerationStructureGeometryKHR, tlas_geometry);
 	tlas_geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
 	tlas_geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -8162,6 +8581,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 	GL_EndLiveASTimestamp (cbx);
 	live_as_instance_count = num_instances;
 	rs_live_as_cputime_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
+	emissive_live_as_dirty = false;
 }
 
 /*

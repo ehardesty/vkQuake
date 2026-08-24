@@ -902,6 +902,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
 void R_UpdateTransientEmissiveSources (void);
+qboolean R_EmissiveAliasEntityIsSource (const entity_t *entity);
 void		  R_UpdateEmissiveBrushReceivers (void);
 qboolean	  R_EmissiveBrushReceiverActive (entity_t *entity);
 qboolean	  R_EmissiveBrushReceiverTextures (
