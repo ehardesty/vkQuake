@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_translucent_receivers, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 
 int gl_lightmap_format;
@@ -4629,7 +4629,10 @@ static uint32_t R_EmissiveBrushReceiverSourceSignature (
 static void R_UpdateEmissiveBrushReceiverEntity (entity_t *entity, uint32_t receiver_instance_id)
 {
 	qmodel_t *const model = entity->model;
-	if (!model || model->needload || model->type != mod_brush || ENTALPHA_DECODE (entity->alpha) != 1.0f)
+	if (!model || model->needload || model->type != mod_brush)
+		return;
+	const float alpha = ENTALPHA_DECODE (entity->alpha);
+	if (alpha <= 0.0f || (alpha < 1.0f && r_emissive_rt_translucent_receivers.value <= 0.0f))
 		return;
 	const qboolean inline_bsp = model->name[0] == '*' && model->surfaces == cl.worldmodel->surfaces;
 	if (!inline_bsp && r_emissive_rt_external_bsp.value <= 0.0f)
