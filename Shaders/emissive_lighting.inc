@@ -27,11 +27,13 @@ vec3 CalculateEmissiveContribution (
 #ifdef EMISSIVE_DETAIL_VISIBILITY
 		const bool visible = !EmissiveIsOccluded (world_pos, normal, light.origin);
 		if (cache_visibility)
-			emissive_visibility[(first_source + i) * 256u + visibility_texel] = visible ? 1u : 0u;
+			emissive_visibility[(first_source + i) * 64u * push_constants.coordinate_scale * push_constants.coordinate_scale + visibility_texel] =
+				visible ? 1u : 0u;
 		if (!visible)
 			continue;
 #elif defined(EMISSIVE_RETAINED_VISIBILITY)
-		if (retained_visibility && emissive_visibility[(first_source + i) * 256u + visibility_texel] == 0u)
+		if (retained_visibility &&
+			emissive_visibility[(first_source + i) * 64u * push_constants.coordinate_scale * push_constants.coordinate_scale + visibility_texel] == 0u)
 			continue;
 #endif
 		contribution += modulation * light.intensity * radial_falloff * receiver_lambert * light.color;

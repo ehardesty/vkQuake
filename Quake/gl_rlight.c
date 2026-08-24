@@ -36,12 +36,15 @@ extern cvar_t r_rtshadows;
 extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
+cvar_t r_emissive_rt_resolution = {"r_emissive_rt_resolution", "2", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_strength = {"r_emissive_rt_bounce_strength", "0.65", CVAR_NONE};
+cvar_t r_emissive_rt_bounce_reflectance = {"r_emissive_rt_bounce_reflectance", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_rays = {"r_emissive_rt_bounce_rays", "8", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_resolution = {"r_emissive_rt_bounce_resolution", "0", CVAR_NONE};
+cvar_t r_emissive_rt_model_lights = {"r_emissive_rt_model_lights", "2", CVAR_NONE};
 
 /*
 =============================================================================
@@ -1364,6 +1367,13 @@ void R_EmissiveBandlimitChanged_f (cvar_t *var)
 	R_ActivateEmissiveWorldSurfaceCache ();
 }
 
+void R_EmissiveResolutionChanged_f (cvar_t *var)
+{
+	const int requested_scale = var->value <= 1.0f ? 1 : var->value <= 2.0f ? 2 : 4;
+	if (cl.worldmodel && requested_scale != R_EmissiveDetailScale ())
+		Con_Printf ("RT emissive direct resolution will change from %dx to %dx on the next map load\n", R_EmissiveDetailScale (), requested_scale);
+}
+
 void R_EmissiveRTStats_f (void)
 {
 	int		 coarse_lightmaps;
@@ -1415,16 +1425,22 @@ void R_EmissiveRTStats_f (void)
 	uint32_t bounce_direct_texels, bounce_samples, bounce_rays, bounce_valid_taps, bounce_invalid_taps;
 	uint64_t bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes;
 	uint32_t bounce_prepare_time_us, bounce_build_time_us, bounce_resolve_time_us, bounce_filter_time_us, bounce_combine_time_us;
-	uint32_t bounce_refresh_cpu_time_us, bounce_no_ray_refreshes, bounce_dirty_receiver_surfaces, bounce_cacheable_direct_epoch,
-		bounce_cacheable_epoch;
+	uint32_t bounce_refresh_cpu_time_us, bounce_no_ray_refreshes, bounce_dirty_receiver_surfaces, bounce_cacheable_direct_epoch, bounce_cacheable_epoch;
 	uint32_t bounce_transient_direct_epoch, bounce_transient_epoch;
 	qboolean bounce_gpu_time_valid, bounce_budget_limited, bounce_pending, bounce_ready;
 	qboolean bandlimit_active, bandlimit_budget_limited;
 	uint64_t bandlimit_logical_bytes, bandlimit_allocated_bytes, bandlimit_peak_bytes;
+	int		 brush_receiver_records, brush_receiver_active, brush_receiver_ready, brush_receiver_dirty, brush_receiver_layers;
+	uint64_t brush_receiver_allocated_bytes, brush_receiver_budget_bytes;
+	qboolean brush_receiver_budget_limited;
+	uint32_t brush_receiver_updates, brush_receiver_dispatches, brush_receiver_no_ray_dispatches, brush_receiver_transform_invalidations;
+	int		 clustered_alias_records, clustered_alias_active, clustered_alias_ready;
+	uint32_t clustered_alias_receivers, clustered_alias_builds, clustered_alias_source_evaluations, clustered_alias_shadow_tests,
+		clustered_alias_shadow_rejections, clustered_alias_contributors;
 	R_EmissiveLightmapStats (&coarse_lightmaps, &coarse_logical_bytes, &coarse_allocated_bytes);
 	R_EmissiveDetailLightmapStats (
-		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending,
-		&detail_as_active, &detail_ready);
+		&detail_lightmaps, &detail_logical_bytes, &detail_allocated_bytes, &detail_budget_bytes, &detail_budget_limited, &detail_pending, &detail_as_active,
+		&detail_ready);
 	R_EmissiveLightStats (&emissive_lights, &emissive_light_bytes, &coarse_pending);
 	R_EmissiveTileStats (&affected_tiles, &total_tiles, &tile_source_links, &tile_dispatches, &tile_cpu_bytes, &tile_gpu_bytes);
 	R_TransientEmissiveStats (
@@ -1434,28 +1450,45 @@ void R_EmissiveRTStats_f (void)
 		&radiance_groups, &radiance_tiles, &radiance_source_links, &radiance_tile_groups, &radiance_max_groups_per_tile, &radiance_cpu_bytes,
 		&radiance_gpu_bytes, &radiance_cpu_time_us, &radiance_visibility_available, &radiance_pending);
 	R_EmissiveBounceStats (
-		&bounce_direct_texels, &bounce_samples, &bounce_rays, &bounce_valid_taps, &bounce_invalid_taps, &bounce_logical_bytes,
-		&bounce_allocated_bytes, &bounce_budget_bytes, &bounce_prepare_time_us, &bounce_build_time_us, &bounce_resolve_time_us,
-		&bounce_filter_time_us, &bounce_combine_time_us, &bounce_refresh_cpu_time_us, &bounce_no_ray_refreshes,
-		&bounce_dirty_receiver_surfaces, &bounce_cacheable_direct_epoch,
-		&bounce_cacheable_epoch, &bounce_transient_direct_epoch, &bounce_transient_epoch, &bounce_gpu_time_valid, &bounce_budget_limited,
-		&bounce_pending, &bounce_ready);
-	R_EmissiveBandlimitStats (
-		&bandlimit_active, &bandlimit_budget_limited, &bandlimit_logical_bytes, &bandlimit_allocated_bytes, &bandlimit_peak_bytes);
+		&bounce_direct_texels, &bounce_samples, &bounce_rays, &bounce_valid_taps, &bounce_invalid_taps, &bounce_logical_bytes, &bounce_allocated_bytes,
+		&bounce_budget_bytes, &bounce_prepare_time_us, &bounce_build_time_us, &bounce_resolve_time_us, &bounce_filter_time_us, &bounce_combine_time_us,
+		&bounce_refresh_cpu_time_us, &bounce_no_ray_refreshes, &bounce_dirty_receiver_surfaces, &bounce_cacheable_direct_epoch, &bounce_cacheable_epoch,
+		&bounce_transient_direct_epoch, &bounce_transient_epoch, &bounce_gpu_time_valid, &bounce_budget_limited, &bounce_pending, &bounce_ready);
+	R_EmissiveBandlimitStats (&bandlimit_active, &bandlimit_budget_limited, &bandlimit_logical_bytes, &bandlimit_allocated_bytes, &bandlimit_peak_bytes);
+	R_EmissiveBrushReceiverStats (
+		&brush_receiver_records, &brush_receiver_active, &brush_receiver_ready, &brush_receiver_dirty, &brush_receiver_layers, &brush_receiver_allocated_bytes,
+		&brush_receiver_budget_bytes, &brush_receiver_budget_limited, &brush_receiver_updates, &brush_receiver_dispatches, &brush_receiver_no_ray_dispatches,
+		&brush_receiver_transform_invalidations);
+	R_EmissiveClusteredAliasStats (
+		&clustered_alias_records, &clustered_alias_active, &clustered_alias_ready, &clustered_alias_receivers, &clustered_alias_builds,
+		&clustered_alias_source_evaluations, &clustered_alias_shadow_tests, &clustered_alias_shadow_rejections, &clustered_alias_contributors);
 	GL_EmissiveWorldAccelerationStructureStats (
 		&emissive_world_as_bytes, &emissive_world_as_triangles, &emissive_world_as_build_time_us, &emissive_world_as_build_time_valid,
 		&emissive_world_as_ready);
 	GL_LiveAccelerationStructureStats (&live_as_ready, &live_as_instances);
 	const char *coarse_gpu_time = rs_emissive_coarse_gputime_valid ? va ("%.3f ms", (double)rs_emissive_coarse_gputime_us / 1000.0) : "unavailable";
 	const char *detail_gpu_time = rs_emissive_detail_gputime_valid ? va ("%.3f ms", (double)rs_emissive_detail_gputime_us / 1000.0) : "unavailable";
-	const char *coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
-	const char *detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
-	const char *live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
-	static const char *const debug_names[] = {"off", "coarse", "detail", "validity", "selected", "bounce x32", "band-limit output", "band-limit validity"};
-	const int				 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
-	const int				 detail_workgroups = affected_tiles * EMISSIVE_DETAIL_SCALE * EMISSIVE_DETAIL_SCALE;
-	const uint64_t		 max_source_evaluations = (uint64_t)tile_source_links * 8 * EMISSIVE_DETAIL_SCALE * 8 * EMISSIVE_DETAIL_SCALE;
-	const uint64_t		 bandlimit_rays = bandlimit_active ? max_source_evaluations * EMISSIVE_BANDLIMIT_SAMPLES : 0;
+	const char *brush_receiver_gpu_time =
+		rs_emissive_brush_receiver_gputime_valid ? va ("%.3f ms", (double)rs_emissive_brush_receiver_gputime_us / 1000.0) : "unavailable";
+	const char				*coarse_state = !coarse_lightmaps ? "unavailable" : coarse_pending ? "pending" : "ready";
+	const char				*detail_state = !detail_lightmaps ? "unavailable" : detail_pending ? "pending" : detail_ready ? "ready" : "unbuilt";
+	const char				*live_as_gpu_time = rs_live_as_gputime_valid ? va ("%.3f ms", (double)rs_live_as_gputime_us / 1000.0) : "unavailable";
+	static const char *const debug_names[] = {
+		"off",
+		"coarse",
+		"detail",
+		"validity",
+		"selected",
+		"bounce x32",
+		"band-limit output",
+		"band-limit validity",
+		"stored band-limit detail",
+		"minimum accepted band-limit tap"};
+	const int	   debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, (int)countof (debug_names) - 1);
+	const int	   detail_scale = R_EmissiveDetailScale ();
+	const int	   detail_workgroups = affected_tiles * detail_scale * detail_scale;
+	const uint64_t max_source_evaluations = (uint64_t)tile_source_links * 8 * detail_scale * 8 * detail_scale;
+	const uint64_t bandlimit_rays = bandlimit_active ? max_source_evaluations * EMISSIVE_BANDLIMIT_SAMPLES : 0;
 	Con_Printf (
 		"RT emissives: %s, %d cacheable world surface%s, %d fixture prox%s, %d receiver surface%s, %u CPU bytes, %d coarse lightmap%s, %" PRIu64
 		" logical GPU bytes, %" PRIu64 " allocated GPU bytes, %d uploaded source light%s, %" PRIu64
@@ -1463,25 +1496,44 @@ void R_EmissiveRTStats_f (void)
 		r_emissive_rt.value > 0.0f ? "enabled" : "disabled", num_emissive_world_surfaces, num_emissive_world_surfaces == 1 ? "" : "s",
 		num_emissive_world_fixtures, num_emissive_world_fixtures == 1 ? "y" : "ies", num_emissive_world_receivers, num_emissive_world_receivers == 1 ? "" : "s",
 		(unsigned)(num_emissive_world_surfaces * sizeof (*emissive_world_surfaces) + num_emissive_world_fixtures * sizeof (*emissive_world_fixtures) +
-			num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights)),
+				   num_emissive_world_surface_lights * sizeof (*emissive_world_surface_lights)),
 		coarse_lightmaps, coarse_lightmaps == 1 ? "" : "s", coarse_logical_bytes, coarse_allocated_bytes, emissive_lights, emissive_lights == 1 ? "" : "s",
 		emissive_light_bytes, (double)emissive_prepare_time_us / 1000.0, coarse_gpu_time, coarse_state, debug_names[debug_mode]);
 	Con_Printf (
-		"RT emissive brush ownership: %d cacheable world fixture%s, %d transient-brush-owned, %d unpaired brush source%s, %d ambiguous brush/%d ambiguous world match%s\n",
-		num_emissive_cacheable_world_fixtures, num_emissive_cacheable_world_fixtures == 1 ? "" : "s",
-		num_emissive_transient_brush_owned_fixtures, num_emissive_unpaired_brush_sources, num_emissive_unpaired_brush_sources == 1 ? "" : "s",
-		num_emissive_ambiguous_brush_owners, num_emissive_ambiguous_world_owners,
-		num_emissive_ambiguous_brush_owners + num_emissive_ambiguous_world_owners == 1 ? "" : "es");
+		"RT emissive brush ownership: %d cacheable world fixture%s, %d transient-brush-owned, %d unpaired brush source%s, %d ambiguous brush/%d ambiguous "
+		"world match%s\n",
+		num_emissive_cacheable_world_fixtures, num_emissive_cacheable_world_fixtures == 1 ? "" : "s", num_emissive_transient_brush_owned_fixtures,
+		num_emissive_unpaired_brush_sources, num_emissive_unpaired_brush_sources == 1 ? "" : "s", num_emissive_ambiguous_brush_owners,
+		num_emissive_ambiguous_world_owners, num_emissive_ambiguous_brush_owners + num_emissive_ambiguous_world_owners == 1 ? "" : "es");
 	Con_Printf (
-		"RT emissive detail: %d dense 2x lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
-		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64
-		" tile CPU bytes, %" PRIu64 " tile-list GPU bytes, %d dispatch%s/%d workgroups, %" PRIu64
-		" maximum source evaluation%s, last GPU detail %s, %s%s\n",
-		detail_lightmaps, detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, affected_tiles,
-		total_tiles, affected_tiles == 1 ? "" : "s", total_tiles ? 100.0 * affected_tiles / total_tiles : 0.0, tile_source_links,
-		tile_source_links == 1 ? "" : "s", affected_tiles ? (double)tile_source_links / affected_tiles : 0.0, tile_cpu_bytes, tile_gpu_bytes,
-		tile_dispatches, tile_dispatches == 1 ? "" : "es", detail_workgroups, max_source_evaluations,
-		max_source_evaluations == 1 ? "" : "s", detail_gpu_time, detail_state,
+		"RT emissive brush receivers: %d record%s, %d active, %d ready, %d dirty, %d cropped lightmap layer%s, %" PRIu64 "/%" PRIu64
+		" allocated GPU bytes, %u receiver update%s, %u image dispatch%s (%u transport/%u no-ray radiance), last GPU update %s, %u transform "
+		"invalidation%s%s\n",
+		brush_receiver_records, brush_receiver_records == 1 ? "" : "s", brush_receiver_active, brush_receiver_ready, brush_receiver_dirty,
+		brush_receiver_layers, brush_receiver_layers == 1 ? "" : "s", brush_receiver_allocated_bytes, brush_receiver_budget_bytes, brush_receiver_updates,
+		brush_receiver_updates == 1 ? "" : "s", brush_receiver_dispatches, brush_receiver_dispatches == 1 ? "" : "es",
+		brush_receiver_dispatches - brush_receiver_no_ray_dispatches, brush_receiver_no_ray_dispatches, brush_receiver_gpu_time,
+		brush_receiver_transform_invalidations, brush_receiver_transform_invalidations == 1 ? "" : "s",
+		brush_receiver_budget_limited ? ", budget limited; coarse or inactive fallback" : "");
+	Con_Printf (
+		"RT emissive generalized receivers: alias light limit %d/%d, %d record%s/%d active/%d ready, %u cache build%s, %u no-ray selection%s, "
+		"%u source evaluation%s, %u selected contributor%s, %u bounded world-shadow test%s, %u rejection%s; alias occluders off; "
+		"liquids/sprites/particles remain separate self-emission-only classes\n",
+		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS, clustered_alias_records,
+		clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,
+		clustered_alias_builds == 1 ? "" : "s", clustered_alias_receivers, clustered_alias_receivers == 1 ? "" : "s", clustered_alias_source_evaluations,
+		clustered_alias_source_evaluations == 1 ? "" : "s", clustered_alias_contributors, clustered_alias_contributors == 1 ? "" : "s",
+		clustered_alias_shadow_tests, clustered_alias_shadow_tests == 1 ? "" : "s", clustered_alias_shadow_rejections,
+		clustered_alias_shadow_rejections == 1 ? "" : "s");
+	Con_Printf (
+		"RT emissive detail: requested %dx/active %dx, %d dense lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
+		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64 " tile CPU bytes, %" PRIu64
+		" tile-list GPU bytes, %d dispatch%s/%d workgroups, %" PRIu64 " maximum source evaluation%s, last GPU detail %s, %s%s\n",
+		r_emissive_rt_resolution.value <= 1.0f ? 1 : r_emissive_rt_resolution.value <= 2.0f ? 2 : 4, detail_scale, detail_lightmaps,
+		detail_lightmaps == 1 ? "" : "s", detail_logical_bytes, detail_allocated_bytes, detail_budget_bytes, affected_tiles, total_tiles,
+		affected_tiles == 1 ? "" : "s", total_tiles ? 100.0 * affected_tiles / total_tiles : 0.0, tile_source_links, tile_source_links == 1 ? "" : "s",
+		affected_tiles ? (double)tile_source_links / affected_tiles : 0.0, tile_cpu_bytes, tile_gpu_bytes, tile_dispatches, tile_dispatches == 1 ? "" : "es",
+		detail_workgroups, max_source_evaluations, max_source_evaluations == 1 ? "" : "s", detail_gpu_time, detail_state,
 		detail_budget_limited ? ", budget exceeded; coarse fallback" : "");
 	Con_Printf (
 		"RT emissive band-limit v%d: requested %s, %s, %d deterministic receiver samples, %" PRIu64
@@ -1526,15 +1578,15 @@ void R_EmissiveRTStats_f (void)
 		rs_emissive_radiance_gputime_valid ? va ("%.3f ms", (double)rs_emissive_radiance_gputime_us / 1000.0) : "unavailable",
 		radiance_pending ? ", pending" : "");
 	Con_Printf (
-		"RT emissive bounce: %s, %s resolution (%d world units), strength %.3f, %d ray%s/sample, %u direct texel%s, %u receiver sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
+		"RT emissive bounce: %s, %s resolution (%d world units), strength %.3f, reflectance lift %.3f, %d ray%s/sample, %u direct texel%s, %u receiver sample%s, %u transfer ray%s, %u valid/%u invalid taps, %" PRIu64
 		" logical/%" PRIu64 " allocated GPU bytes, %" PRIu64 " byte budget, %.3f ms CPU prepare, GPU build/resolve/filter/combine %s, "
 		"%u no-ray refresh%s, last refresh %.3f ms CPU / %s GPU over %u receiver surface%s, epochs cacheable %u/%u transient %u/%u%s\n",
 		r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f ? "disabled" :
 			bounce_pending ? "pending" : bounce_ready ? "ready" : bounce_budget_limited ? "direct-only" : "unavailable",
 		CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? "full-coarse" : "half-coarse",
 		CLAMP (0, (int)r_emissive_rt_bounce_resolution.value, 1) ? 16 : 32,
-		CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64),
-		CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 64) == 1 ? "" : "s", bounce_direct_texels,
+		CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), CLAMP (0.0f, r_emissive_rt_bounce_reflectance.value, 1.0f),
+		CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 128), CLAMP (1, (int)r_emissive_rt_bounce_rays.value, 128) == 1 ? "" : "s", bounce_direct_texels,
 		bounce_direct_texels == 1 ? "" : "s", bounce_samples, bounce_samples == 1 ? "" : "s", bounce_rays, bounce_rays == 1 ? "" : "s",
 		bounce_valid_taps, bounce_invalid_taps, bounce_logical_bytes, bounce_allocated_bytes, bounce_budget_bytes,
 		(double)bounce_prepare_time_us / 1000.0,

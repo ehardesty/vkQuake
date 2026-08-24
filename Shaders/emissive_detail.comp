@@ -11,6 +11,7 @@ layout (push_constant) uniform PushConsts
 	uint num_lights;
 	uint first_tile;
 	uint publication_mode;
+	uint coordinate_scale;
 }
 push_constants;
 
@@ -31,7 +32,7 @@ struct emissive_light_t
 	float intensity;
 };
 
-layout (set = 0, binding = 0, rgba16f) uniform writeonly image2D output_image;
+layout (set = 0, binding = 0, rgba16f) uniform image2D output_image;
 layout (set = 0, binding = 1) uniform utexture2D surface_indices;
 layout (std430, set = 0, binding = 2) readonly restrict buffer surfaces_buffer
 {
@@ -73,7 +74,14 @@ layout (std430, set = 0, binding = 10) restrict buffer emissive_visibility_buffe
 {
 	uint emissive_visibility[];
 };
+layout (std430, set = 0, binding = 11) restrict buffer emissive_bandlimit_diag_buffer
+{
+	uint emissive_bandlimit_diag[];
+};
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
+
+ivec2 emissive_bandlimit_diag_coords;
+uint emissive_bandlimit_diag_tile;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
 {
@@ -107,9 +115,28 @@ bool EmissiveBandlimitIsOccluded (const vec3 world_pos, const vec3 normal, const
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
+uint EmissiveBandlimitOcclusionPrimitive (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
+{
+	const vec3 ray_origin = world_pos + normal * 0.25f;
+	const vec3 ray_vector = light_origin - ray_origin;
+	const float ray_distance = length (ray_vector);
+	if (ray_distance <= 2.5f)
+		return 0xFFFFFFFFu;
+
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT (
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_vector / ray_distance, ray_distance - 0.5f);
+	rayQueryProceedEXT (ray_query);
+	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT
+		? rayQueryGetIntersectionPrimitiveIndexEXT (ray_query, true)
+		: 0xFFFFFFFFu;
+}
+
 #include "lightmap_coords.inc"
 #define EMISSIVE_DETAIL_VISIBILITY
 #define EMISSIVE_SOURCE_INDICES
+#define EMISSIVE_BANDLIMIT_DIAGNOSTICS
 #include "emissive_lighting.inc"
 #include "emissive_bandlimit.inc"
 
@@ -117,9 +144,11 @@ layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
 	cache_visibility = !transient_overlay && push_constants.publication_mode != EMISSIVE_PUBLICATION_NO_VISIBILITY;
+	const uint scale = max (push_constants.coordinate_scale, 1u);
+	const uint tile_resolution = 8u * scale;
 	const emissive_tile_t tile = emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z];
 	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
-	const ivec2 coords = tile_coords * 16 + ivec2 (gl_GlobalInvocationID.xy);
+	const ivec2 coords = tile_coords * int (tile_resolution) + ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 	if (transient_overlay && push_constants.publication_mode == EMISSIVE_PUBLICATION_INVALIDATE)
@@ -130,14 +159,14 @@ void main ()
 
 	vec3		 contribution = vec3 (0.0f);
 	float		 validity = 0.0f;
-	const ivec2 coarse_coords = coords / 2;
+	const ivec2 coarse_coords = coords / int (scale);
 	const uint surface_index = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
 	{
 		const surface_t surf = surfaces[surface_index];
 		// Detail coordinates include the raster texel-center offset; remove it exactly once after scaling.
-		const float		s = (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 0.5f;
-		const float		t = (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 0.5f;
+		const float		s = (float (coords.x) + 0.5f) / float (scale) - float (surf.packed_light_st & 0xFFFFu) - 0.5f;
+		const float		t = (float (coords.y) + 0.5f) / float (scale) - float (surf.packed_light_st >> 16) - 0.5f;
 		vec3			tangent;
 		vec3			bitangent;
 		const vec3		world_pos = CalculateWorldPos (surf, s, t, tangent, bitangent);
@@ -148,7 +177,9 @@ void main ()
 		const bool supported = !bandlimited || EmissiveBandlimitPointOnSurface (surf, world_pos, normal);
 		if (supported)
 		{
-			const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+			const uint visibility_texel = gl_GlobalInvocationID.y * tile_resolution + gl_GlobalInvocationID.x;
+			emissive_bandlimit_diag_coords = coords;
+			emissive_bandlimit_diag_tile = push_constants.first_tile + gl_WorkGroupID.z;
 			contribution = bandlimited
 				? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
 				: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
@@ -161,5 +192,27 @@ void main ()
 		contribution += cacheable.rgb;
 	}
 
-	imageStore (output_image, coords, vec4 (contribution, validity));
+	const vec4 output_value = vec4 (contribution, validity);
+	imageStore (output_image, coords, output_value);
+#ifdef EMISSIVE_BANDLIMIT_DIAGNOSTICS
+	if (bandlimited && !transient_overlay && all (lessThanEqual (abs (coords - ivec2 (817, 344)), ivec2 (2))))
+	{
+		memoryBarrierImage ();
+		const uint texel = uint (coords.y - 342) * 5u + uint (coords.x - 815);
+		const uint base = 16u + 40u * 512u + texel * 12u;
+		emissive_bandlimit_diag[base + 0u] = uint (coords.x);
+		emissive_bandlimit_diag[base + 1u] = uint (coords.y);
+		emissive_bandlimit_diag[base + 2u] = surface_index;
+		emissive_bandlimit_diag[base + 3u] = floatBitsToUint (output_value.r);
+		emissive_bandlimit_diag[base + 4u] = floatBitsToUint (output_value.g);
+		emissive_bandlimit_diag[base + 5u] = floatBitsToUint (output_value.b);
+		emissive_bandlimit_diag[base + 6u] = floatBitsToUint (output_value.a);
+		const vec4 stored = imageLoad (output_image, coords);
+		emissive_bandlimit_diag[base + 7u] = floatBitsToUint (stored.r);
+		emissive_bandlimit_diag[base + 8u] = floatBitsToUint (stored.g);
+		emissive_bandlimit_diag[base + 9u] = floatBitsToUint (stored.b);
+		emissive_bandlimit_diag[base + 10u] = floatBitsToUint (stored.a);
+		emissive_bandlimit_diag[base + 11u] = 1u;
+	}
+#endif
 }

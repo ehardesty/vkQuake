@@ -10,6 +10,7 @@ layout (push_constant) uniform PushConsts
 	uint num_lights;
 	uint first_tile;
 	uint publication_mode;
+	uint coordinate_scale;
 }
 push_constants;
 
@@ -82,26 +83,27 @@ layout (local_size_x = 8, local_size_y = 8) in;
 void main ()
 {
 	const bool use_tile = transient_overlay || radiance_update;
+	const uint scale = retained_visibility ? max (push_constants.coordinate_scale, 1u) : 1u;
+	const uint tile_resolution = 8u * scale;
 	const emissive_tile_t tile = use_tile ? emissive_tiles[push_constants.first_tile + gl_WorkGroupID.z] : emissive_tile_t (0, push_constants.num_lights, 0);
 	const ivec2 tile_coords = ivec2 ((tile.packed_tile >> 16) & 0xFFu, tile.packed_tile >> 24);
-	const int tile_scale = retained_visibility ? 16 : 8;
-	const ivec2 coords = use_tile ? tile_coords * tile_scale + ivec2 (gl_GlobalInvocationID.xy) : ivec2 (gl_GlobalInvocationID.xy);
+	const ivec2 coords = use_tile ? tile_coords * int (tile_resolution) + ivec2 (gl_GlobalInvocationID.xy) : ivec2 (gl_GlobalInvocationID.xy);
 	if (any (greaterThanEqual (coords, imageSize (output_image))))
 		return;
 
 	vec3	   contribution = vec3 (0.0f);
 	float	   validity = retained_visibility && !bandlimited ? 1.0f : 0.0f;
-	const ivec2 coarse_coords = retained_visibility ? coords / 2 : coords;
+	const ivec2 coarse_coords = retained_visibility ? coords / int (scale) : coords;
 	const uint surface_index = texelFetch (surface_indices, coarse_coords, 0).x;
 	if (surface_index != 0xFFFFFFFFu && (surface_index & 0x80000000u) == 0u && surface_submodels[surface_index] == 0u)
 	{
 		const surface_t surf = surfaces[surface_index];
 		// Retained-visibility coordinates include the raster texel-center offset; remove it exactly once after scaling.
 		const float		s = retained_visibility
-			? (float (coords.x) + 0.5f) * 0.5f - float (surf.packed_light_st & 0xFFFFu) - 0.5f
+			? (float (coords.x) + 0.5f) / float (scale) - float (surf.packed_light_st & 0xFFFFu) - 0.5f
 			: float (coords.x - int (surf.packed_light_st & 0xFFFFu)) - 0.5f;
 		const float		t = retained_visibility
-			? (float (coords.y) + 0.5f) * 0.5f - float (surf.packed_light_st >> 16) - 0.5f
+			? (float (coords.y) + 0.5f) / float (scale) - float (surf.packed_light_st >> 16) - 0.5f
 			: float (coords.y - int (surf.packed_light_st >> 16)) - 0.5f;
 		vec3			tangent;
 		vec3			bitangent;
@@ -113,7 +115,7 @@ void main ()
 		const bool supported = !bandlimited || EmissiveBandlimitPointOnSurface (surf, world_pos, normal);
 		if (supported)
 		{
-			const uint visibility_texel = gl_GlobalInvocationID.y * 16u + gl_GlobalInvocationID.x;
+			const uint visibility_texel = gl_GlobalInvocationID.y * tile_resolution + gl_GlobalInvocationID.x;
 			contribution = bandlimited
 				? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
 				: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);

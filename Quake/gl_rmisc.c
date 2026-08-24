@@ -36,8 +36,8 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
-	r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution;
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -1598,7 +1598,7 @@ void R_CreateDescriptorSetLayouts ()
 
 	{
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 11);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 12);
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1618,7 +1618,7 @@ void R_CreateDescriptorSetLayouts ()
 		emissive_coarse_layout_bindings[8].descriptorCount = 1;
 		emissive_coarse_layout_bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		emissive_coarse_layout_bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		for (int i = 9; i < 11; ++i)
+		for (int i = 9; i < 12; ++i)
 		{
 			emissive_coarse_layout_bindings[i].binding = num_descriptors++;
 			emissive_coarse_layout_bindings[i].descriptorCount = 1;
@@ -1632,7 +1632,7 @@ void R_CreateDescriptorSetLayouts ()
 		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
 		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
 		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 2;
-		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 8;
+		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 9;
 
 		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
 		if (err != VK_SUCCESS)
@@ -1659,6 +1659,28 @@ void R_CreateDescriptorSetLayouts ()
 		if (err != VK_SUCCESS)
 			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_bounce_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive bounce");
+
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, receiver_bindings, 9);
+		for (int i = 0; i < countof (receiver_bindings); ++i)
+		{
+			receiver_bindings[i].binding = i;
+			receiver_bindings[i].descriptorCount = 1;
+			receiver_bindings[i].descriptorType = i == 0   ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+												  : i == 1 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+														   : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			receiver_bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		}
+		descriptor_set_layout_create_info.bindingCount = countof (receiver_bindings);
+		descriptor_set_layout_create_info.pBindings = receiver_bindings;
+		memset (&vulkan_globals.emissive_brush_receiver_set_layout, 0, sizeof (vulkan_globals.emissive_brush_receiver_set_layout));
+		vulkan_globals.emissive_brush_receiver_set_layout.num_storage_images = 1;
+		vulkan_globals.emissive_brush_receiver_set_layout.num_sampled_images = 1;
+		vulkan_globals.emissive_brush_receiver_set_layout.num_storage_buffers = 7;
+		err = vkCreateDescriptorSetLayout (
+			vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_brush_receiver_set_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_brush_receiver_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive brush receiver");
 	}
 
 	{
@@ -1821,7 +1843,10 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 22 * sizeof (float);
+		// Keep this range compatible with the world layout. R_SetupContext pushes
+		// the shared view constants while the basic pipeline is bound, then world
+		// pipelines consume the same bytes without redundantly uploading them.
+		push_constant_range.size = 24 * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1849,7 +1874,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 22 * sizeof (float);
+		push_constant_range.size = 24 * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -2179,7 +2204,7 @@ void R_CreatePipelineLayouts ()
 
 		VkDescriptorSetLayout bounce_layouts[2] = {vulkan_globals.emissive_bounce_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
 		ZEROED_STRUCT (VkPushConstantRange, bounce_push_range);
-		bounce_push_range.size = 9 * sizeof (uint32_t);
+		bounce_push_range.size = 10 * sizeof (uint32_t);
 		bounce_push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, bounce_layout_info);
 		bounce_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2192,6 +2217,26 @@ void R_CreatePipelineLayouts ()
 			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_bounce_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_bounce_pipeline_layout");
 		vulkan_globals.emissive_bounce_pipeline.layout.push_constant_range = bounce_push_range;
+
+		VkDescriptorSetLayout receiver_layouts[2] = {
+			vulkan_globals.emissive_brush_receiver_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
+		ZEROED_STRUCT (VkPushConstantRange, receiver_push_range);
+		receiver_push_range.size = 20 * sizeof (uint32_t);
+		receiver_push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, receiver_layout_info);
+		receiver_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		receiver_layout_info.setLayoutCount = countof (receiver_layouts);
+		receiver_layout_info.pSetLayouts = receiver_layouts;
+		receiver_layout_info.pushConstantRangeCount = 1;
+		receiver_layout_info.pPushConstantRanges = &receiver_push_range;
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &receiver_layout_info, NULL, &vulkan_globals.emissive_brush_receiver_pipeline.layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.emissive_brush_receiver_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+			"emissive_brush_receiver_pipeline_layout");
+		vulkan_globals.emissive_brush_receiver_pipeline.layout.push_constant_range = receiver_push_range;
 
 		// Update lightmaps RT
 		VkDescriptorSetLayout update_lightmap_rt_descriptor_set_layouts[2] = {
@@ -2607,6 +2652,7 @@ DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
 DECLARE_SHADER_MODULE (emissive_detail_comp);
 DECLARE_SHADER_MODULE (emissive_bounce_comp);
+DECLARE_SHADER_MODULE (emissive_brush_receiver_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
 DECLARE_SHADER_MODULE (mesh_interpolate_comp);
 DECLARE_SHADER_MODULE (skinning_comp);
@@ -3699,10 +3745,10 @@ static void R_CreateWorldPipelines ()
 
 									if (emissive_detail && !fullbright_enabled)
 									{
-										for (int debug_mode = 1; debug_mode <= 7; ++debug_mode)
+										for (int debug_mode = 1; debug_mode <= 9; ++debug_mode)
 										{
 											const int debug_pipeline_index =
-												alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4) + (emissive_bandlimit * 28);
+												alpha_test + (quantize_lm * 2) + ((debug_mode - 1) * 4) + (emissive_bandlimit * 36);
 											specialization_data[5] = debug_mode;
 											specialization_data[6] = (debug_mode > 1 && debug_mode < 5) || debug_mode >= 6;
 											R_CreateGraphicsPipeline (
@@ -4118,6 +4164,8 @@ static void R_CreateUpdateLightmapPipelines ()
 	if (vulkan_globals.ray_query)
 	{
 		R_CreateComputePipeline (&vulkan_globals.emissive_bounce_pipeline, emissive_bounce_comp_module, 0, NULL, "emissive_bounce");
+		R_CreateComputePipeline (
+			&vulkan_globals.emissive_brush_receiver_pipeline, emissive_brush_receiver_comp_module, 0, NULL, "emissive_brush_receiver");
 		R_CreateComputePipeline (&vulkan_globals.emissive_detail_pipeline, emissive_detail_comp_module, 0, NULL, "emissive_detail");
 		const VkSpecializationMapEntry bandlimit_detail_entry = {2, 0, sizeof (uint32_t)};
 		const uint32_t bandlimit_enabled = true;
@@ -4250,6 +4298,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
 	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_bounce_comp, vulkan_globals.ray_query);
+	CREATE_SHADER_MODULE_COND (emissive_brush_receiver_comp, vulkan_globals.ray_query);
 #ifdef _DEBUG
 	CREATE_SHADER_MODULE_COND (ray_debug_comp, vulkan_globals.ray_query);
 #endif
@@ -4328,6 +4377,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
 	DESTROY_SHADER_MODULE (emissive_detail_comp);
 	DESTROY_SHADER_MODULE (emissive_bounce_comp);
+	DESTROY_SHADER_MODULE (emissive_brush_receiver_comp);
 	DESTROY_SHADER_MODULE (ray_debug_comp);
 	DESTROY_SHADER_MODULE (mesh_interpolate_comp);
 	DESTROY_SHADER_MODULE (skinning_comp);
@@ -4590,6 +4640,11 @@ void R_DestroyPipelines (void)
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_bounce_pipeline.handle, NULL);
 		vulkan_globals.emissive_bounce_pipeline.handle = VK_NULL_HANDLE;
 	}
+	if (vulkan_globals.emissive_brush_receiver_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_brush_receiver_pipeline.handle, NULL);
+		vulkan_globals.emissive_brush_receiver_pipeline.handle = VK_NULL_HANDLE;
+	}
 	if (vulkan_globals.emissive_transient_detail_pipeline.handle != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_transient_detail_pipeline.handle, NULL);
@@ -4656,6 +4711,8 @@ void R_Init (void)
 
 	Cmd_AddCommand ("vkmemstats", R_VulkanMemStats_f);
 	Cmd_AddCommand ("r_emissive_rt_stats", R_EmissiveRTStats_f);
+	Cmd_AddCommand ("r_emissive_rt_probe_dump", R_EmissiveBandlimitProbeDump_f);
+	Cmd_AddCommand ("r_emissive_rt_probe_screen", R_EmissiveBandlimitProbeScreen_f);
 
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_lightmap);
@@ -4691,6 +4748,8 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_entdlightscale);
 	Cvar_RegisterVariable (&r_emissive_rt);
 	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_resolution);
+	Cvar_SetCallback (&r_emissive_rt_resolution, R_EmissiveResolutionChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bandlimit);
@@ -4699,10 +4758,13 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_bounce, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce_strength);
 	Cvar_SetCallback (&r_emissive_rt_bounce_strength, R_EmissiveBounceChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_bounce_reflectance);
+	Cvar_SetCallback (&r_emissive_rt_bounce_reflectance, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce_rays);
 	Cvar_SetCallback (&r_emissive_rt_bounce_rays, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bounce_resolution);
 	Cvar_SetCallback (&r_emissive_rt_bounce_resolution, R_EmissiveBounceChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_model_lights);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);

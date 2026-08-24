@@ -205,6 +205,7 @@ SHADER_OBJS = \
 	emissive_coarse_comp.o \
 	emissive_detail_comp.o \
 	emissive_bounce_comp.o \
+	emissive_brush_receiver_comp.o \
 	mesh_interpolate_comp.o \
 	skinning_comp.o \
 	skinning_8_comp.o

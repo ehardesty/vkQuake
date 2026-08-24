@@ -18,6 +18,12 @@ push_constants;
 layout (set = 0, binding = 0) uniform sampler2D diffuse_tex;
 layout (set = 1, binding = 0) uniform sampler2D fullbright_tex;
 
+struct EmissiveClusteredLight
+{
+	vec4 direction;
+	vec4 color;
+};
+
 layout (set = 2, binding = 0) uniform UBO
 {
 	mat4  model_matrix;
@@ -26,6 +32,8 @@ layout (set = 2, binding = 0) uniform UBO
 	vec3  light_color;
 	float entalpha;
 	uint  flags;
+	uint  num_emissive_lights;
+	EmissiveClusteredLight emissive_lights[4];
 }
 ubo;
 

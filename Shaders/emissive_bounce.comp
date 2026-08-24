@@ -16,6 +16,7 @@ layout (push_constant) uniform PushConsts
 	uint rays_per_sample;
 	float strength;
 	float max_distance;
+	float reflectance_lift;
 	uint first;
 	int offset_x;
 	int offset_y;
@@ -159,7 +160,10 @@ void ResolveBounce ()
 	{
 		const uint logical = bounce_taps[sample_index * push_constants.rays_per_sample + tap];
 		if (logical != BOUNCE_TAP_INVALID)
-			sum += reflectance_values[logical].rgb * direct_values[logical].rgb;
+		{
+			const vec3 reflectance = mix (reflectance_values[logical].rgb, vec3 (1.0f), push_constants.reflectance_lift);
+			sum += reflectance * direct_values[logical].rgb;
+		}
 	}
 	bounce_values[sample_index] = vec4 (sum / float (push_constants.rays_per_sample), 0.0f);
 }

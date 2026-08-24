@@ -189,7 +189,7 @@ typedef struct vulkan_memory_s
 } vulkan_memory_t;
 
 #define WORLD_PIPELINE_COUNT				128
-#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 56
+#define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 72
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -470,6 +470,7 @@ typedef struct
 	vulkan_pipeline_t		 emissive_transient_pipeline;
 	vulkan_pipeline_t		 emissive_transient_detail_pipeline;
 	vulkan_pipeline_t		 emissive_bounce_pipeline;
+	vulkan_pipeline_t		 emissive_brush_receiver_pipeline;
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -496,6 +497,7 @@ typedef struct
 	vulkan_desc_set_layout_t lightmap_compute_set_layout;
 	vulkan_desc_set_layout_t emissive_compute_set_layout;
 	vulkan_desc_set_layout_t emissive_bounce_set_layout;
+	vulkan_desc_set_layout_t emissive_brush_receiver_set_layout;
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	VkDescriptorSet			 bmodel_instances_desc_set;
@@ -613,6 +615,8 @@ extern uint32_t		   rs_emissive_detail_gputime_us;
 extern qboolean		   rs_emissive_detail_gputime_valid;
 extern uint32_t		   rs_emissive_transient_gputime_us;
 extern qboolean		   rs_emissive_transient_gputime_valid;
+extern uint32_t		   rs_emissive_brush_receiver_gputime_us;
+extern qboolean		   rs_emissive_brush_receiver_gputime_valid;
 extern uint32_t		   rs_emissive_radiance_gputime_us;
 extern qboolean		   rs_emissive_radiance_gputime_valid;
 extern uint32_t		   rs_emissive_bounce_refresh_gputime_us;
@@ -671,7 +675,6 @@ extern int gl_lightmap_format;
 #define LM_CULL_BLOCK_W 128
 #define LM_CULL_BLOCK_H 256
 
-#define EMISSIVE_DETAIL_SCALE 2
 #define EMISSIVE_BANDLIMIT_SAMPLES 4
 #define EMISSIVE_BANDLIMIT_VERSION 2
 
@@ -760,6 +763,14 @@ typedef struct emissive_light_s
 } emissive_light_t;
 COMPILE_TIME_ASSERT (emissive_light_t, sizeof (emissive_light_t) == 32);
 
+#define EMISSIVE_CLUSTERED_LIGHTS 4
+typedef struct emissive_clustered_light_s
+{
+	vec4_t direction;
+	vec4_t color;
+} emissive_clustered_light_t;
+COMPILE_TIME_ASSERT (emissive_clustered_light_t, sizeof (emissive_clustered_light_t) == 32);
+
 typedef struct emissive_surface_light_s
 {
 	uint32_t surface;
@@ -772,8 +783,9 @@ typedef struct emissive_compute_push_constants_s
 	uint32_t num_lights;
 	uint32_t first_tile;
 	uint32_t publication_mode;
+	uint32_t coordinate_scale;
 } emissive_compute_push_constants_t;
-COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 12);
+COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 16);
 
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
@@ -783,9 +795,11 @@ void R_EmissiveDetailLightmapStats (
 	int *count, uint64_t *logical_bytes, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited, qboolean *pending,
 	qboolean *as_active, qboolean *ready);
 void R_EmissiveDetailCompleted (void);
+int	 R_EmissiveDetailScale (void);
 void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us, uint32_t filter_time_us, uint32_t combine_time_us, qboolean valid);
 void R_EmissiveBounceChanged_f (cvar_t *var);
 void R_EmissiveBandlimitChanged_f (cvar_t *var);
+void R_EmissiveResolutionChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
 void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltexture_t **detail);
@@ -827,6 +841,9 @@ void GL_EndEmissiveBounceRefreshTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveTransientTimestamp (void);
 void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_generation);
+void GL_ResetEmissiveBrushReceiverTimestamp (void);
+void GL_BeginEmissiveBrushReceiverTimestamp (cb_context_t *cbx);
+void GL_EndEmissiveBrushReceiverTimestamp (cb_context_t *cbx);
 void GL_ResetEmissiveRadianceTimestamp (void);
 void GL_BeginEmissiveRadianceTimestamp (cb_context_t *cbx);
 void GL_EndEmissiveRadianceTimestamp (cb_context_t *cbx);
@@ -865,10 +882,23 @@ void R_EmissiveRTNewMap (void);
 void		  R_EmissiveRTPrepareNewMap (void);
 void R_EmissiveRTChanged_f (cvar_t *var);
 void R_EmissiveRTStats_f (void);
+void R_EmissiveBandlimitProbeDump_f (void);
+void R_EmissiveBandlimitProbeScreen_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
 void R_UpdateTransientEmissiveSources (void);
+void		  R_UpdateEmissiveBrushReceivers (void);
+qboolean	  R_EmissiveBrushReceiverActive (entity_t *entity);
+qboolean	  R_EmissiveBrushReceiverTextures (
+	entity_t *entity, int lightmap, gltexture_t **coarse, gltexture_t **detail, gltexture_t **surface_indices, uint32_t atlas_offset[2]);
+void R_EmissiveBrushReceiverStats (
+	int *records, int *active, int *ready, int *dirty, int *layers, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited,
+	uint32_t *updates, uint32_t *dispatches, uint32_t *no_ray_dispatches, uint32_t *transform_invalidations);
+int R_EmissiveClusteredAliasLights (const entity_t *entity, emissive_clustered_light_t lights[EMISSIVE_CLUSTERED_LIGHTS]);
+void R_EmissiveClusteredAliasStats (
+	int *records, int *active, int *ready, uint32_t *receivers, uint32_t *builds, uint32_t *source_evaluations, uint32_t *shadow_tests,
+	uint32_t *shadow_rejections, uint32_t *contributors);
 void		  R_UpdateEmissiveLightstyles (void);
 void R_LatchEmissiveResolvedTextures (void);
 void R_InvalidateTransientEmissiveLights (void);

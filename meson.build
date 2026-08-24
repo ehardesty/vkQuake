@@ -52,6 +52,7 @@ shaders = [
     'Shaders/emissive_coarse.comp',
     'Shaders/emissive_detail.comp',
     'Shaders/emissive_bounce.comp',
+    'Shaders/emissive_brush_receiver.comp',
     'Shaders/mesh_interpolate.comp',
     'Shaders/skinning.comp',
 ]

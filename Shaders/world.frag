@@ -17,6 +17,8 @@ layout (push_constant) uniform PushConsts
 	vec3  fog_color;
 	float fog_density;
 	float alpha;
+	uint  instance_base;
+	ivec2 emissive_atlas_offset;
 }
 push_constants;
 

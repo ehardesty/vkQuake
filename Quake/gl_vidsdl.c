@@ -150,43 +150,48 @@ static qboolean			emissive_radiance_timestamps_written[DOUBLE_BUFFERED];
 static qboolean			emissive_bounce_timestamps_written[DOUBLE_BUFFERED];
 static qboolean			emissive_bounce_refresh_timestamps_written[DOUBLE_BUFFERED];
 static uint32_t			emissive_transient_detail_generations[DOUBLE_BUFFERED];
+static qboolean			emissive_brush_receiver_timestamps_written[DOUBLE_BUFFERED];
 static qboolean			live_as_timestamps_written[DOUBLE_BUFFERED];
 
-#define TIMESTAMP_QUERY_COUNT				 21
-#define TIMESTAMP_QUERY_FRAME_START		 0
-#define TIMESTAMP_QUERY_FRAME_END		 1
-#define TIMESTAMP_QUERY_EMISSIVE_START	 2
+#define TIMESTAMP_QUERY_COUNT				 23
+#define TIMESTAMP_QUERY_FRAME_START			 0
+#define TIMESTAMP_QUERY_FRAME_END			 1
+#define TIMESTAMP_QUERY_EMISSIVE_START		 2
 #define TIMESTAMP_QUERY_EMISSIVE_END		 3
-#define TIMESTAMP_QUERY_DETAIL_START	 4
-#define TIMESTAMP_QUERY_DETAIL_END		 5
-#define TIMESTAMP_QUERY_LIVE_AS_START	 6
-#define TIMESTAMP_QUERY_LIVE_AS_END		 7
-#define TIMESTAMP_QUERY_TRANSIENT_START	 8
-#define TIMESTAMP_QUERY_TRANSIENT_END	 9
+#define TIMESTAMP_QUERY_DETAIL_START		 4
+#define TIMESTAMP_QUERY_DETAIL_END			 5
+#define TIMESTAMP_QUERY_LIVE_AS_START		 6
+#define TIMESTAMP_QUERY_LIVE_AS_END			 7
+#define TIMESTAMP_QUERY_TRANSIENT_START		 8
+#define TIMESTAMP_QUERY_TRANSIENT_END		 9
 #define TIMESTAMP_QUERY_RADIANCE_START		 10
 #define TIMESTAMP_QUERY_RADIANCE_END		 11
 #define TIMESTAMP_QUERY_BOUNCE_START		 12
-#define TIMESTAMP_QUERY_BOUNCE_TRANSFER_END 13
-#define TIMESTAMP_QUERY_BOUNCE_RESOLVE_END  14
+#define TIMESTAMP_QUERY_BOUNCE_TRANSFER_END	 13
+#define TIMESTAMP_QUERY_BOUNCE_RESOLVE_END	 14
 #define TIMESTAMP_QUERY_BOUNCE_FILTER_END	 15
 #define TIMESTAMP_QUERY_BOUNCE_COARSE_END	 16
-#define TIMESTAMP_QUERY_BOUNCE_DETAIL_START 17
+#define TIMESTAMP_QUERY_BOUNCE_DETAIL_START	 17
 #define TIMESTAMP_QUERY_BOUNCE_DETAIL_END	 18
 #define TIMESTAMP_QUERY_BOUNCE_REFRESH_START 19
 #define TIMESTAMP_QUERY_BOUNCE_REFRESH_END	 20
+#define TIMESTAMP_QUERY_BRUSH_RECEIVER_START 21
+#define TIMESTAMP_QUERY_BRUSH_RECEIVER_END	 22
 
-uint32_t rs_emissive_coarse_gputime_us;
-qboolean rs_emissive_coarse_gputime_valid;
-uint32_t rs_emissive_detail_gputime_us;
-qboolean rs_emissive_detail_gputime_valid;
-uint32_t rs_emissive_transient_gputime_us;
-qboolean rs_emissive_transient_gputime_valid;
+uint32_t				rs_emissive_coarse_gputime_us;
+qboolean				rs_emissive_coarse_gputime_valid;
+uint32_t				rs_emissive_detail_gputime_us;
+qboolean				rs_emissive_detail_gputime_valid;
+uint32_t				rs_emissive_transient_gputime_us;
+qboolean				rs_emissive_transient_gputime_valid;
+uint32_t				rs_emissive_brush_receiver_gputime_us;
+qboolean				rs_emissive_brush_receiver_gputime_valid;
 uint32_t				rs_emissive_radiance_gputime_us;
 qboolean				rs_emissive_radiance_gputime_valid;
 uint32_t				rs_emissive_bounce_refresh_gputime_us;
 qboolean				rs_emissive_bounce_refresh_gputime_valid;
-uint32_t rs_live_as_gputime_us;
-qboolean rs_live_as_gputime_valid;
+uint32_t				rs_live_as_gputime_us;
+qboolean				rs_live_as_gputime_valid;
 static VkFramebuffer	main_framebuffers[NUM_COLOR_BUFFERS];
 static VkSemaphore		image_aquired_semaphores[DOUBLE_BUFFERED];
 static VkSemaphore		draw_complete_semaphores[MAX_SWAP_CHAIN_IMAGES];
@@ -3426,8 +3431,7 @@ void GL_BeginEmissiveTransientTimestamp (cb_context_t *cbx)
 	{
 		vkCmdResetQueryPool (cbx->cb, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_TRANSIENT_START, 2);
 		vkCmdWriteTimestamp (
-			cbx->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool,
-			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_TRANSIENT_START);
+			cbx->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_TRANSIENT_START);
 	}
 }
 
@@ -3443,11 +3447,36 @@ void GL_EndEmissiveTransientTimestamp (cb_context_t *cbx, uint32_t detail_genera
 	if (timestamp_query_pool != VK_NULL_HANDLE)
 	{
 		vkCmdWriteTimestamp (
-			cbx->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool,
-			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_TRANSIENT_END);
+			cbx->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_TRANSIENT_END);
 	}
 	emissive_transient_timestamps_written[current_cb_index] = true;
 	emissive_transient_detail_generations[current_cb_index] = detail_generation;
+}
+
+void GL_BeginEmissiveBrushReceiverTimestamp (cb_context_t *cbx)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+	{
+		vkCmdResetQueryPool (cbx->cb, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BRUSH_RECEIVER_START, 2);
+		vkCmdWriteTimestamp (
+			cbx->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool,
+			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BRUSH_RECEIVER_START);
+	}
+}
+
+void GL_ResetEmissiveBrushReceiverTimestamp (void)
+{
+	memset (emissive_brush_receiver_timestamps_written, 0, sizeof (emissive_brush_receiver_timestamps_written));
+	rs_emissive_brush_receiver_gputime_valid = false;
+}
+
+void GL_EndEmissiveBrushReceiverTimestamp (cb_context_t *cbx)
+{
+	if (timestamp_query_pool != VK_NULL_HANDLE)
+		vkCmdWriteTimestamp (
+			cbx->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool,
+			(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BRUSH_RECEIVER_END);
+	emissive_brush_receiver_timestamps_written[current_cb_index] = true;
 }
 
 void GL_BeginEmissiveRadianceTimestamp (cb_context_t *cbx)
@@ -3595,12 +3624,11 @@ void GL_BeginRenderingTask (void *unused)
 		{
 			uint64_t timestamps[2];
 			if (vkGetQueryPoolResults (
-					vulkan_globals.device, timestamp_query_pool,
-					(current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BOUNCE_REFRESH_START, 2, sizeof (timestamps), timestamps,
-					sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+					vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BOUNCE_REFRESH_START, 2,
+					sizeof (timestamps), timestamps, sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
 			{
-				rs_emissive_bounce_refresh_gputime_us = (uint32_t)((double)(timestamps[1] - timestamps[0]) *
-					(double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+				rs_emissive_bounce_refresh_gputime_us =
+					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_bounce_refresh_gputime_valid = true;
 			}
 		}
@@ -3626,6 +3654,22 @@ void GL_BeginRenderingTask (void *unused)
 			R_TransientEmissiveDetailCompleted (emissive_transient_detail_generations[current_cb_index]);
 			emissive_transient_detail_generations[current_cb_index] = 0;
 		}
+	}
+	if (emissive_brush_receiver_timestamps_written[current_cb_index])
+	{
+		if (timestamp_query_pool != VK_NULL_HANDLE)
+		{
+			uint64_t timestamps[2];
+			if (vkGetQueryPoolResults (
+					vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_BRUSH_RECEIVER_START, 2,
+					sizeof (timestamps), timestamps, sizeof (uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+			{
+				rs_emissive_brush_receiver_gputime_us =
+					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+				rs_emissive_brush_receiver_gputime_valid = true;
+			}
+		}
+		emissive_brush_receiver_timestamps_written[current_cb_index] = false;
 	}
 	if (emissive_radiance_timestamps_written[current_cb_index])
 	{

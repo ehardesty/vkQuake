@@ -1,0 +1,131 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "globals.inc"
+
+layout (push_constant) uniform PushConsts
+{
+	uint cacheable_count;
+	uint transient_count;
+	uint coordinate_scale;
+	uint atlas_offset_x;
+	uint atlas_offset_y;
+	uint receiver_instance_id;
+	uint source_count;
+	uint radiance_only;
+	vec4 transform[3];
+}
+push_constants;
+
+struct emissive_light_t
+{
+	vec3  origin;
+	float radius;
+	vec3  color;
+	float intensity;
+};
+
+layout (set = 0, binding = 0, rgba16f) uniform writeonly image2D output_image;
+layout (set = 0, binding = 1) uniform utexture2D surface_indices;
+layout (std430, set = 0, binding = 2) readonly restrict buffer surfaces_buffer { surface_t surfaces[]; };
+layout (std430, set = 0, binding = 3) readonly restrict buffer world_verts_buffer { world_vert_t world_verts[]; };
+layout (std430, set = 0, binding = 4) readonly restrict buffer cacheable_lights_buffer { emissive_light_t cacheable_lights[]; };
+layout (std430, set = 0, binding = 5) readonly restrict buffer modulations_buffer { float cacheable_modulations[]; };
+layout (std430, set = 0, binding = 6) readonly restrict buffer transient_lights_buffer { emissive_light_t transient_lights[]; };
+layout (std430, set = 0, binding = 7) readonly restrict buffer source_indices_buffer { uint source_indices[]; };
+layout (std430, set = 0, binding = 8) restrict buffer visibility_buffer { uint retained_visibility[]; };
+layout (set = 1, binding = 0) uniform accelerationStructureEXT world_tlas;
+
+#include "lightmap_coords.inc"
+
+bool EmissiveBrushReceiverOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
+{
+	const vec3 ray_origin = world_pos + normal * 0.25f;
+	const vec3 ray_vector = light_origin - ray_origin;
+	const float ray_distance = length (ray_vector);
+	if (ray_distance <= 2.5f)
+		return false;
+
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT (
+		ray_query, world_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_vector / ray_distance, ray_distance - 0.5f);
+	while (rayQueryProceedEXT (ray_query)) {}
+	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
+vec3 EmissiveBrushReceiverLight (
+	const emissive_light_t light, const float modulation, const vec3 world_pos, const vec3 normal, const bool trace_visibility, inout bool visible)
+{
+	const vec3 light_vector = light.origin - world_pos;
+	const float distance = length (light_vector);
+	if (distance >= light.radius)
+		return vec3 (0.0f);
+	const vec3 direction = light_vector / max (distance, 0.001f);
+	const float lambert = max (dot (normal, direction), 0.0f);
+	if (lambert <= 0.0f)
+		return vec3 (0.0f);
+	if (trace_visibility)
+		visible = !EmissiveBrushReceiverOccluded (world_pos, normal, light.origin);
+	if (!visible || modulation <= 0.0f)
+		return vec3 (0.0f);
+	const float falloff = max (1.0f - distance / light.radius, 0.0f);
+	return modulation * light.intensity * falloff * lambert * light.color;
+}
+
+layout (local_size_x = 8, local_size_y = 8) in;
+void main ()
+{
+	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy);
+	if (any (greaterThanEqual (coords, imageSize (output_image))))
+		return;
+	const uint visibility_index = uint (coords.y * imageSize (output_image).x + coords.x);
+	const uint scale = max (push_constants.coordinate_scale, 1u);
+	const ivec2 local_coarse = coords / int (scale);
+	const uint surface_index = texelFetch (surface_indices, local_coarse, 0).x;
+	if (surface_index == 0xFFFFFFFFu || (surface_index & 0x80000000u) != 0u)
+	{
+		if (push_constants.radiance_only == 0u)
+			retained_visibility[visibility_index] = 0u;
+		imageStore (output_image, coords, vec4 (0.0f));
+		return;
+	}
+
+	const surface_t surf = surfaces[surface_index];
+	const vec2 atlas_offset = vec2 (push_constants.atlas_offset_x, push_constants.atlas_offset_y);
+	const vec2 surface_st = (vec2 (coords) + 0.5f) / float (scale) + atlas_offset - 0.5f -
+		vec2 (float (surf.packed_light_st & 0xFFFFu), float (surf.packed_light_st >> 16));
+	vec3 tangent;
+	vec3 bitangent;
+	const vec3 model_pos = CalculateWorldPos (surf, surface_st.x, surface_st.y, tangent, bitangent);
+	vec3 model_normal = vec3 (surf.normal_x, surf.normal_y, surf.normal_z);
+	if (((surf.packed_tex_edgecount >> 15) & 1u) != 0u)
+		model_normal = -model_normal;
+	const vec4 position = vec4 (model_pos, 1.0f);
+	const vec4 direction = vec4 (model_normal, 0.0f);
+	const vec3 world_pos = vec3 (
+		dot (push_constants.transform[0], position), dot (push_constants.transform[1], position), dot (push_constants.transform[2], position));
+	const vec3 world_normal = normalize (vec3 (
+		dot (push_constants.transform[0], direction), dot (push_constants.transform[1], direction), dot (push_constants.transform[2], direction)));
+
+	uint visibility_mask = push_constants.radiance_only != 0u ? retained_visibility[visibility_index] : 0u;
+	vec3 contribution = vec3 (0.0f);
+	for (uint source = 0u; source < push_constants.source_count; ++source)
+	{
+		const uint encoded_index = source_indices[source];
+		const bool transient = (encoded_index & 0x80000000u) != 0u;
+		const uint light_index = encoded_index & 0x7FFFFFFFu;
+		const emissive_light_t light = transient ? transient_lights[light_index] : cacheable_lights[light_index];
+		const float modulation = transient ? 1.0f : cacheable_modulations[light_index];
+		bool visible = (visibility_mask & (1u << source)) != 0u;
+		contribution += EmissiveBrushReceiverLight (
+			light, modulation, world_pos, world_normal, push_constants.radiance_only == 0u, visible);
+		if (visible)
+			visibility_mask |= 1u << source;
+	}
+	if (push_constants.radiance_only == 0u)
+		retained_visibility[visibility_index] = visibility_mask;
+	imageStore (output_image, coords, vec4 (max (contribution, 0.0f), 1.0f));
+}

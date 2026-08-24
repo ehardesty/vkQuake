@@ -11,6 +11,12 @@ layout (push_constant) uniform PushConsts
 }
 push_constants;
 
+struct EmissiveClusteredLight
+{
+	vec4 direction;
+	vec4 color;
+};
+
 layout (set = 2, binding = 0) uniform UBO
 {
 	mat4  model_matrix;
@@ -19,6 +25,8 @@ layout (set = 2, binding = 0) uniform UBO
 	vec3  light_color;
 	float entalpha;
 	uint  flags;
+	uint  num_emissive_lights;
+	EmissiveClusteredLight emissive_lights[4];
 }
 ubo;
 
@@ -47,6 +55,14 @@ float r_avertexnormal_dot (vec3 vertexnormal) // from MH
 		return 1.0 + dot;
 }
 
+vec3 AliasEmissiveLighting (const vec3 normal)
+{
+	vec3 result = vec3 (0.0f);
+	for (uint i = 0; i < ubo.num_emissive_lights; ++i)
+		result += ubo.emissive_lights[i].color.rgb * max (dot (normal, ubo.emissive_lights[i].direction.xyz), 0.0f);
+	return result;
+}
+
 void main ()
 {
 	out_texcoord = in_texcoord;
@@ -73,7 +89,8 @@ void main ()
 	{
 		float dot1 = r_avertexnormal_dot (in_pose1_normal);
 		float dot2 = r_avertexnormal_dot (in_pose2_normal);
-		out_color = vec4 (ubo.light_color * mix (dot1, dot2, ubo.blend_factor), 1.0);
+		const vec3 normal = normalize (mix (in_pose1_normal, in_pose2_normal, ubo.blend_factor));
+		out_color = vec4 (ubo.light_color * mix (dot1, dot2, ubo.blend_factor) + AliasEmissiveLighting (normal), 1.0);
 	}
 	else
 		out_color = vec4 (ubo.light_color, 1.0f);

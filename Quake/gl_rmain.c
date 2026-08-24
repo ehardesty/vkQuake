@@ -1532,6 +1532,7 @@ void R_RenderView (
 		Sys_Error ("R_RenderView: NULL worldmodel");
 
 	R_UpdateTransientEmissiveSources ();
+	R_UpdateEmissiveBrushReceivers ();
 
 	if (scr_speeds.value)
 		rs_frame_starttime = Sys_DoubleTime ();

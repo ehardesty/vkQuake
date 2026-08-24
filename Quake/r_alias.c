@@ -49,6 +49,9 @@ typedef struct
 	float	 light_color[3];
 	float	 entalpha;
 	uint32_t flags;
+	uint32_t num_emissive_lights;
+	uint32_t padding[2];
+	emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS];
 } aliasubo_t;
 
 typedef struct
@@ -59,8 +62,31 @@ typedef struct
 	float	 light_color[3];
 	float	 entalpha;
 	uint32_t flags;
+	uint32_t num_emissive_lights;
+	uint32_t padding[2];
+	emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS];
 	uint32_t joints_offsets[2];
+	uint32_t end_padding[2];
 } md5ubo_t;
+
+typedef struct
+{
+	float	 model_matrix[16];
+	float	 shade_vector[3];
+	float	 blend_factor;
+	float	 light_color[3];
+	float	 entalpha;
+	uint32_t flags;
+	uint32_t joints_offsets[2];
+} md5debugubo_t;
+
+COMPILE_TIME_ASSERT (aliasubo_lights_offset, offsetof (aliasubo_t, emissive_lights) == 112);
+COMPILE_TIME_ASSERT (aliasubo_size, sizeof (aliasubo_t) == 240);
+COMPILE_TIME_ASSERT (md5ubo_lights_offset, offsetof (md5ubo_t, emissive_lights) == 112);
+COMPILE_TIME_ASSERT (md5ubo_joints_offset, offsetof (md5ubo_t, joints_offsets) == 240);
+COMPILE_TIME_ASSERT (md5ubo_size, sizeof (md5ubo_t) == 256);
+COMPILE_TIME_ASSERT (md5debugubo_joints_offset, offsetof (md5debugubo_t, joints_offsets) == 100);
+COMPILE_TIME_ASSERT (md5debugubo_size, sizeof (md5debugubo_t) == 108);
 
 /*
 =============
@@ -91,7 +117,8 @@ Based on code by MH from RMQEngine
 */
 static void GL_DrawAliasFrame (
 	cb_context_t *cbx, entity_t *e, aliashdr_t *paliashdr, lerpdata_t lerpdata, gltexture_t *tx, gltexture_t *fb, float model_matrix[16], float entity_alpha,
-	qboolean alphatest, vec3_t shadevector, vec3_t lightcolor, int showtris)
+	qboolean alphatest, vec3_t shadevector, vec3_t lightcolor, const emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS],
+	int num_emissive_lights, int showtris)
 {
 	vulkan_pipeline_t pipeline;
 
@@ -154,6 +181,10 @@ static void GL_DrawAliasFrame (
 		ubo->blend_factor = blend;
 		memcpy (ubo->light_color, lightcolor, 3 * sizeof (float));
 		ubo->flags = (fb != NULL) ? 0x1 : 0x0;
+		ubo->num_emissive_lights = num_emissive_lights;
+		memset (ubo->padding, 0, sizeof (ubo->padding));
+		if (num_emissive_lights > 0)
+			memcpy (ubo->emissive_lights, emissive_lights, num_emissive_lights * sizeof (*emissive_lights));
 
 		if (r_fullbright_cheatsafe || (r_lightmap_cheatsafe && r_fullbright.value))
 			ubo->flags |= 0x2;
@@ -189,6 +220,10 @@ static void GL_DrawAliasFrame (
 		ubo->blend_factor = blend;
 		memcpy (ubo->light_color, lightcolor, 3 * sizeof (float));
 		ubo->flags = (fb != NULL) ? 0x1 : 0x0;
+		ubo->num_emissive_lights = num_emissive_lights;
+		memset (ubo->padding, 0, sizeof (ubo->padding));
+		if (num_emissive_lights > 0)
+			memcpy (ubo->emissive_lights, emissive_lights, num_emissive_lights * sizeof (*emissive_lights));
 		if (r_fullbright_cheatsafe || (r_lightmap_cheatsafe && r_fullbright.value))
 			ubo->flags |= 0x2;
 		ubo->entalpha = entity_alpha;
@@ -543,6 +578,8 @@ void R_DrawAliasModel (cb_context_t *cbx, entity_t *e, int *aliaspolys)
 	//
 	vec3_t shadevector, lightcolor;
 	R_SetupAliasLighting (e, &shadevector, &lightcolor);
+	emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS];
+	const int num_emissive_lights = R_EmissiveClusteredAliasLights (e, emissive_lights);
 
 	// Draw each surface of the model independently:
 	for (aliashdr_t *hdr = paliashdr; hdr != NULL; hdr = hdr->nextsurface)
@@ -595,7 +632,8 @@ void R_DrawAliasModel (cb_context_t *cbx, entity_t *e, int *aliaspolys)
 		//
 		// draw it
 		//
-		GL_DrawAliasFrame (cbx, e, hdr, lerpdata, tx, fb, model_matrix, entalpha, alphatest, shadevector, lightcolor, false);
+		GL_DrawAliasFrame (
+			cbx, e, hdr, lerpdata, tx, fb, model_matrix, entalpha, alphatest, shadevector, lightcolor, emissive_lights, num_emissive_lights, false);
 
 		// update polycounts
 		*aliaspolys += hdr->numtris;
@@ -657,10 +695,13 @@ void R_DrawAliasModel_ShowTris (cb_context_t *cbx, entity_t *e)
 
 	vec3_t shadevector = {0.0f, 0.0f, 0.0f};
 	vec3_t lightcolor = {0.0f, 0.0f, 0.0f};
+	emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS];
+	memset (emissive_lights, 0, sizeof (emissive_lights));
 	// Draw each surface of the model independently:
 	for (aliashdr_t *hdr = paliashdr; hdr != NULL; hdr = hdr->nextsurface)
 	{
-		GL_DrawAliasFrame (cbx, e, hdr, lerpdata, nulltexture, nulltexture, model_matrix, 0.0f, false, shadevector, lightcolor, r_showtris.value);
+		GL_DrawAliasFrame (
+			cbx, e, hdr, lerpdata, nulltexture, nulltexture, model_matrix, 0.0f, false, shadevector, lightcolor, emissive_lights, 0, r_showtris.value);
 	}
 }
 
@@ -711,7 +752,7 @@ void R_DrawAliasModel_ShowSkel (cb_context_t *cbx, entity_t *e)
 	VkBuffer		uniform_buffer;
 	uint32_t		uniform_offset;
 	VkDescriptorSet ubo_set;
-	md5ubo_t	   *ubo = (md5ubo_t *)R_UniformAllocate (sizeof (md5ubo_t), &uniform_buffer, &uniform_offset, &ubo_set);
+	md5debugubo_t *ubo = (md5debugubo_t *)R_UniformAllocate (sizeof (md5debugubo_t), &uniform_buffer, &uniform_offset, &ubo_set);
 
 	memcpy (ubo->model_matrix, model_matrix, 16 * sizeof (float));
 	ubo->shade_vector[0] = 0.0f;

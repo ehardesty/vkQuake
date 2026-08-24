@@ -12,6 +12,7 @@ layout (push_constant) uniform PushConsts
 	float fog_density;
 	float alpha;
 	uint  instance_base; // 0: identity transforms, else buffer base offset + 1
+	ivec2 emissive_atlas_offset;
 }
 push_constants;
 
