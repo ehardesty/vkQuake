@@ -151,6 +151,7 @@ Dynamic vertex/index & uniform buffer
 #define NUM_DYNAMIC_BUFFERS					   2
 #define GARBAGE_FRAME_COUNT					   3
 #define MAX_UNIFORM_ALLOC					   2048
+#define MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS 27
 
 static uint32_t		   current_dyn_vertex_buffer_size = INITIAL_DYNAMIC_VERTEX_BUFFER_SIZE_KB * 1024;
 static uint32_t		   current_dyn_index_buffer_size = INITIAL_DYNAMIC_INDEX_BUFFER_SIZE_KB * 1024;
@@ -1848,7 +1849,7 @@ void R_CreatePipelineLayouts ()
 		// Keep this range compatible with the world layout. R_SetupContext pushes
 		// the shared view constants while the basic pipeline is bound, then world
 		// pipelines consume the same bytes without redundantly uploading them.
-		push_constant_range.size = 27 * sizeof (float);
+		push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1876,7 +1877,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 27 * sizeof (float);
+		push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1902,7 +1903,9 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 22 * sizeof (float);
+		// R_SetupContext pushes the shared view constants through the basic layout.
+		// Keep this range identical so binding an alias pipeline preserves them.
+		push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1930,7 +1933,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 22 * sizeof (float);
+		push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1959,7 +1962,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 27 * sizeof (float);
+		push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
