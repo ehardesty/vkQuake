@@ -36,7 +36,7 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
@@ -4752,6 +4752,7 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_resolution, R_EmissiveResolutionChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_occluders);
 	Cvar_SetCallback (&r_emissive_rt_occluders, R_EmissiveOccludersChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_external_bsp);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bandlimit);

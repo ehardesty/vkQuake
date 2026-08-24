@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 
 int gl_lightmap_format;
@@ -4385,10 +4385,33 @@ typedef struct emissive_brush_receiver_bounds_s
 	qboolean used;
 } emissive_brush_receiver_bounds_t;
 
+static int R_EmissiveBrushReceiverSurfaceBase (const qmodel_t *model)
+{
+	if (!model)
+		return -1;
+	if (model->name[0] == '*' && cl.worldmodel && model->surfaces == cl.worldmodel->surfaces)
+		return model->firstmodelsurface;
+
+	int surface_base = 0;
+	for (int model_index = 1; model_index < MAX_MODELS; ++model_index)
+	{
+		const qmodel_t *const candidate = cl.model_precache[model_index];
+		if (!candidate)
+			break;
+		if (candidate->name[0] == '*')
+			continue;
+		if (candidate == model)
+			return surface_base + model->firstmodelsurface;
+		surface_base += candidate->numsurfaces;
+	}
+	return -1;
+}
+
 static qboolean R_BuildEmissiveBrushReceiverLayers (emissive_brush_receiver_t *receiver)
 {
 	qmodel_t *const model = receiver->model;
-	if (!cl.worldmodel || model->surfaces != cl.worldmodel->surfaces || model->firstmodelsurface <= 0 || model->nummodelsurfaces <= 0)
+	const int surface_base = R_EmissiveBrushReceiverSurfaceBase (model);
+	if (!cl.worldmodel || surface_base < 0 || model->nummodelsurfaces <= 0 || surface_base + model->nummodelsurfaces > num_surfaces)
 		return false;
 
 	emissive_brush_receiver_bounds_t *const bounds = Mem_Alloc (lightmap_count * sizeof (*bounds));
@@ -4480,36 +4503,35 @@ static qboolean R_BuildEmissiveBrushReceiverLayers (emissive_brush_receiver_t *r
 			const msurface_t *const surface = &first_surface[surface_index];
 			if ((surface->flags & SURF_DRAWTILED) || surface->lightmaptexturenum != lightmap)
 				continue;
-			const ptrdiff_t world_surface_index = surface - cl.worldmodel->surfaces;
-			if (world_surface_index < 0 || world_surface_index >= num_surfaces)
-				continue;
+			const int gpu_surface_index = surface_base + surface_index;
 			const int width = (surface->extents[0] >> 4) + 1;
 			const int height = (surface->extents[1] >> 4) + 1;
 			for (int t = 0; t < height; ++t)
 				for (int s = 0; s < width; ++s)
 					indices[(surface->light_t - layer_bounds->min_t + t) * layer->width + surface->light_s - layer_bounds->min_s + s] =
-						(uint32_t)world_surface_index;
+						(uint32_t)gpu_surface_index;
 		}
 		char name[64];
-		q_snprintf (name, sizeof (name), "emissive_receiver_indices_%08x_%04i_%03i", receiver->receiver_instance_id, atoi (model->name + 1), lightmap);
+		const uint32_t model_hash = COM_HashBlock (model->name, strlen (model->name));
+		q_snprintf (name, sizeof (name), "emissive_receiver_indices_%08x_%08x_%03i", receiver->receiver_instance_id, model_hash, lightmap);
 		layer->surface_indices_texture = TexMgr_LoadImage (
-			cl.worldmodel, name, layer->width, layer->height, SRC_SURF_INDICES, (byte *)indices, "", (src_offset_t)indices, TEXPREF_NEAREST | TEXPREF_NOPICMIP);
+			model, name, layer->width, layer->height, SRC_SURF_INDICES, (byte *)indices, "", (src_offset_t)indices, TEXPREF_NEAREST | TEXPREF_NOPICMIP);
 		Mem_Free (indices);
-		q_snprintf (name, sizeof (name), "emissive_receiver_coarse_%08x_%04i_%03i", receiver->receiver_instance_id, atoi (model->name + 1), lightmap);
+		q_snprintf (name, sizeof (name), "emissive_receiver_coarse_%08x_%08x_%03i", receiver->receiver_instance_id, model_hash, lightmap);
 		layer->coarse_texture =
-			TexMgr_LoadImage (cl.worldmodel, name, layer->width, layer->height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
-		q_snprintf (name, sizeof (name), "emissive_receiver_visibility_%08x_%04i_%03i", receiver->receiver_instance_id, atoi (model->name + 1), lightmap);
+			TexMgr_LoadImage (model, name, layer->width, layer->height, SRC_RGBA16F, NULL, "", 0, TEXPREF_LINEAR | TEXPREF_NOPICMIP);
+		q_snprintf (name, sizeof (name), "emissive_receiver_visibility_%08x_%08x_%03i", receiver->receiver_instance_id, model_hash, lightmap);
 		R_CreateBuffer (
 			&layer->visibility_buffers[0], &layer->visibility_memories[0], (uint64_t)layer->width * layer->height * sizeof (uint32_t), visibility_usage,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, name);
 		if (allocate_detail)
 		{
-			q_snprintf (name, sizeof (name), "emissive_receiver_detail_%08x_%04i_%03i", receiver->receiver_instance_id, atoi (model->name + 1), lightmap);
+			q_snprintf (name, sizeof (name), "emissive_receiver_detail_%08x_%08x_%03i", receiver->receiver_instance_id, model_hash, lightmap);
 			layer->detail_texture = TexMgr_LoadImage (
-				cl.worldmodel, name, layer->width * R_EmissiveDetailScale (), layer->height * R_EmissiveDetailScale (), SRC_RGBA16F, NULL, "", 0,
+				model, name, layer->width * R_EmissiveDetailScale (), layer->height * R_EmissiveDetailScale (), SRC_RGBA16F, NULL, "", 0,
 				TEXPREF_LINEAR | TEXPREF_NOPICMIP);
 			q_snprintf (
-				name, sizeof (name), "emissive_receiver_detail_visibility_%08x_%04i_%03i", receiver->receiver_instance_id, atoi (model->name + 1), lightmap);
+				name, sizeof (name), "emissive_receiver_detail_visibility_%08x_%08x_%03i", receiver->receiver_instance_id, model_hash, lightmap);
 			R_CreateBuffer (
 				&layer->visibility_buffers[1], &layer->visibility_memories[1],
 				(uint64_t)layer->width * R_EmissiveDetailScale () * layer->height * R_EmissiveDetailScale () * sizeof (uint32_t), visibility_usage,
@@ -4607,8 +4629,10 @@ static uint32_t R_EmissiveBrushReceiverSourceSignature (
 static void R_UpdateEmissiveBrushReceiverEntity (entity_t *entity, uint32_t receiver_instance_id)
 {
 	qmodel_t *const model = entity->model;
-	if (!model || model->needload || model->type != mod_brush || model->name[0] != '*' || model->surfaces != cl.worldmodel->surfaces ||
-		ENTALPHA_DECODE (entity->alpha) != 1.0f)
+	if (!model || model->needload || model->type != mod_brush || ENTALPHA_DECODE (entity->alpha) != 1.0f)
+		return;
+	const qboolean inline_bsp = model->name[0] == '*' && model->surfaces == cl.worldmodel->surfaces;
+	if (!inline_bsp && r_emissive_rt_external_bsp.value <= 0.0f)
 		return;
 
 	vec3_t entity_angles;

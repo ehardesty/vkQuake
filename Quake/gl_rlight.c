@@ -38,6 +38,7 @@ extern cvar_t gl_fullbrights;
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_resolution = {"r_emissive_rt_resolution", "2", CVAR_NONE};
 cvar_t r_emissive_rt_occluders = {"r_emissive_rt_occluders", "0", CVAR_NONE};
+cvar_t r_emissive_rt_external_bsp = {"r_emissive_rt_external_bsp", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
@@ -1516,6 +1517,7 @@ void R_EmissiveRTStats_f (void)
 		brush_receiver_dispatches - brush_receiver_no_ray_dispatches, brush_receiver_no_ray_dispatches, brush_receiver_gpu_time,
 		brush_receiver_transform_invalidations, brush_receiver_transform_invalidations == 1 ? "" : "s",
 		brush_receiver_budget_limited ? ", budget limited; coarse or inactive fallback" : "");
+	Con_Printf ("RT emissive brush receiver policy: inline BSP on, external BSP %s\n", r_emissive_rt_external_bsp.value > 0.0f ? "on" : "off");
 	Con_Printf (
 		"RT emissive generalized receivers: alias light limit %d/%d, %d record%s/%d active/%d ready, %u cache build%s, %u no-ray selection%s, "
 		"%u source evaluation%s, %u selected contributor%s, %u bounded world/brush-shadow test%s, %u rejection%s; surface occluder tier %d; "
