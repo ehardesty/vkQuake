@@ -117,6 +117,9 @@ vec4 WorldFragmentColor ()
 		vec3 fullbright = texture (fullbright_tex, in_texcoords.xy).rgb;
 		frag_color.rgb += fullbright;
 	}
+#ifdef EMISSIVE_ADD
+	frag_color.rgb += diffuse.rgb * push_constants.emissive_add;
+#endif
 
 	float fog = exp (-push_constants.fog_density * push_constants.fog_density * in_fog_frag_coord * in_fog_frag_coord);
 	fog = clamp (fog, 0.0, 1.0);

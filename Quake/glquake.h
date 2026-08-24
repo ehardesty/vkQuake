@@ -190,6 +190,7 @@ typedef struct vulkan_memory_s
 
 #define WORLD_PIPELINE_COUNT				128
 #define WORLD_EMISSIVE_DEBUG_PIPELINE_COUNT 72
+#define LIQUID_EMISSIVE_PIPELINE_COUNT		4
 // slot layout of the alias/md5 pipeline arrays: 0..3 encode alpha test/blend, 4..5 are the r_showtris variants
 #define MODEL_PIPELINE_ALPHA_TEST_BIT	   1
 #define MODEL_PIPELINE_ALPHA_BLEND_BIT	   2
@@ -413,6 +414,10 @@ typedef struct
 	vulkan_pipeline_t		 world_wboit_pipelines[WORLD_PIPELINE_COUNT];
 	vulkan_pipeline_t		 world_mboit_moment_pipelines[WORLD_PIPELINE_COUNT];
 	vulkan_pipeline_t		 world_mboit_composite_pipelines[WORLD_PIPELINE_COUNT];
+	vulkan_pipeline_t		 liquid_emissive_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][LIQUID_EMISSIVE_PIPELINE_COUNT];
+	vulkan_pipeline_t		 liquid_emissive_wboit_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
+	vulkan_pipeline_t		 liquid_emissive_mboit_moment_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
+	vulkan_pipeline_t		 liquid_emissive_mboit_composite_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
 	vulkan_pipeline_layout_t world_pipeline_layout;
 	vulkan_pipeline_t		 raster_tex_warp_pipeline;
 	vulkan_pipeline_t		 particle_pipeline;
@@ -809,6 +814,7 @@ void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us
 void R_EmissiveBounceChanged_f (cvar_t *var);
 void R_EmissiveBandlimitChanged_f (cvar_t *var);
 void R_EmissiveResolutionChanged_f (cvar_t *var);
+void	 R_EmissiveLiquidReceiversChanged_f (cvar_t *var);
 void R_EmissiveOccludersChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
@@ -1034,6 +1040,7 @@ void R_DrawWorld_Water (cb_context_t *cbx, qboolean transparent);
 float GL_WaterAlphaForSurface (msurface_t *fa);
 float GL_WaterAlphaForTextureType (textype_t type);
 float GL_WaterAlphaForEntityTextureType (entity_t *ent, textype_t type);
+qboolean R_EmissiveApproximateSurfaceLight (const msurface_t *surface, const entity_t *entity, vec3_t color);
 
 int GL_MemoryTypeFromProperties (uint32_t type_bits, VkFlags requirements_mask, VkFlags preferred_mask);
 

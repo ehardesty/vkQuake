@@ -39,6 +39,7 @@ cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_resolution = {"r_emissive_rt_resolution", "2", CVAR_NONE};
 cvar_t r_emissive_rt_occluders = {"r_emissive_rt_occluders", "0", CVAR_NONE};
 cvar_t r_emissive_rt_external_bsp = {"r_emissive_rt_external_bsp", "0", CVAR_NONE};
+cvar_t r_emissive_rt_liquid_receivers = {"r_emissive_rt_liquid_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_translucent_receivers = {"r_emissive_rt_translucent_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_sprite_receivers = {"r_emissive_rt_sprite_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_particle_receivers = {"r_emissive_rt_particle_receivers", "0", CVAR_NONE};
@@ -1469,6 +1470,13 @@ void R_EmissiveResolutionChanged_f (cvar_t *var)
 		Con_Printf ("RT emissive direct resolution will change from %dx to %dx on the next map load\n", R_EmissiveDetailScale (), requested_scale);
 }
 
+void R_EmissiveLiquidReceiversChanged_f (cvar_t *var)
+{
+	(void)var;
+	if (cl.worldmodel)
+		GL_RebuildIndirectDraws (num_emissive_world_receivers > 0 && r_emissive_rt.value > 0.0f, true);
+}
+
 void R_EmissiveRTStats_f (void)
 {
 	int		 coarse_lightmaps;
@@ -1611,13 +1619,14 @@ void R_EmissiveRTStats_f (void)
 		brush_receiver_transform_invalidations, brush_receiver_transform_invalidations == 1 ? "" : "s",
 		brush_receiver_budget_limited ? ", budget limited; coarse or inactive fallback" : "");
 	Con_Printf (
-		"RT emissive brush receiver policy: inline BSP on, external BSP %s, translucent BSP %s\n",
-		r_emissive_rt_external_bsp.value > 0.0f ? "on" : "off", r_emissive_rt_translucent_receivers.value > 0.0f ? "on" : "off");
+		"RT emissive brush receiver policy: inline BSP on, external BSP %s, translucent BSP %s, liquid %s\n",
+		r_emissive_rt_external_bsp.value > 0.0f ? "on" : "off", r_emissive_rt_translucent_receivers.value > 0.0f ? "on" : "off",
+		r_emissive_rt_liquid_receivers.value > 0.0f ? "on" : "off");
 	Con_Printf (
 		"RT emissive generalized receivers: alias light limit %d/%d, model emitters tier %d (%d active/%d budget rejected), %d record%s/%d active/%d ready, %u "
 		"cache build%s, %u no-ray selection%s, "
 		"%u source evaluation%s, %u selected contributor%s, %u bounded world/brush-shadow test%s, %u rejection%s; surface occluder tier %d; "
-		"sprite receivers %s, classic particle receivers %s; liquids/scripted particles remain separate self-emission-only classes\n",
+		"sprite receivers %s, classic particle receivers %s; scripted particles remain a separate self-emission-only class\n",
 		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS,
 		CLAMP (0, (int)r_emissive_rt_model_emitters.value, 1), num_emissive_generalized_model_sources, num_emissive_generalized_model_rejections,
 		clustered_alias_records, clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,

@@ -33,7 +33,7 @@ extern cvar_t r_showtris;
 extern cvar_t r_simd;
 extern cvar_t gl_zfix;
 extern cvar_t r_gpulightmapupdate;
-extern cvar_t r_emissive_rt, r_emissive_rt_debug;
+extern cvar_t r_emissive_rt, r_emissive_rt_liquid_receivers, r_emissive_rt_debug;
 extern cvar_t vid_filter;
 extern cvar_t vid_palettize;
 
@@ -1156,7 +1156,7 @@ Draw the current batch if non-empty and clears it, ready for more R_BatchSurface
 static void R_FlushBatch (
 	cb_context_t *cbx, qboolean fullbright_enabled, qboolean alpha_test, qboolean alpha_blend, qboolean use_zbias, gltexture_t *lightmap_texture,
 	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, qboolean receiver_detail_ready,
-	uint32_t *brushpasses)
+	const vec3_t emissive_add, uint32_t *brushpasses)
 {
 	if (cbx->num_vbo_indices > 0)
 	{
@@ -1171,7 +1171,17 @@ static void R_FlushBatch (
 										(vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) + (detail_enabled ? 32 : 0) +
 										(bandlimit_enabled ? 64 : 0);
 		vulkan_pipeline_t pipeline;
-		if (emissive_debug)
+		if (emissive_add)
+		{
+			const int liquid_pipeline_index = alpha_blend + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
+			pipeline = R_PipelineForRenderPass (
+				cbx->render_pass_index, vulkan_globals.liquid_emissive_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][liquid_pipeline_index],
+				vulkan_globals.liquid_emissive_wboit_pipelines[liquid_pipeline_index],
+				vulkan_globals.liquid_emissive_mboit_moment_pipelines[liquid_pipeline_index],
+				vulkan_globals.liquid_emissive_mboit_composite_pipelines[liquid_pipeline_index]);
+			R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 24 * sizeof (float), sizeof (vec3_t), emissive_add);
+		}
+		else if (emissive_debug)
 		{
 			const int debug_pipeline_index =
 				alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
@@ -1244,7 +1254,7 @@ using VBOs.
 static void R_BatchSurface (
 	cb_context_t *cbx, msurface_t *s, qboolean fullbright_enabled, qboolean alpha_test, qboolean alpha_blend, qboolean use_zbias, gltexture_t *lightmap_texture,
 	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, qboolean receiver_detail_ready,
-	uint32_t *brushpasses)
+	const vec3_t emissive_add, uint32_t *brushpasses)
 {
 	int num_surf_indices;
 
@@ -1252,8 +1262,8 @@ static void R_BatchSurface (
 
 	if (cbx->num_vbo_indices + num_surf_indices > MAX_BATCH_SIZE)
 		R_FlushBatch (
-			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-			surface_indices_texture, receiver_detail_ready, brushpasses);
+			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture, surface_indices_texture,
+			receiver_detail_ready, emissive_add, brushpasses);
 
 	R_TriangleIndicesForSurf (s, &cbx->vbo_indices[cbx->num_vbo_indices]);
 	cbx->num_vbo_indices += num_surf_indices;
@@ -1269,6 +1279,48 @@ float GL_WaterAlphaForEntityTextureType (entity_t *ent, textype_t type)
 	else
 		entalpha = ENTALPHA_DECODE (ent->alpha);
 	return entalpha;
+}
+
+qboolean R_EmissiveApproximateSurfaceLight (const msurface_t *surface, const entity_t *entity, vec3_t color)
+{
+	color[0] = color[1] = color[2] = 0.0f;
+	if (!surface || !surface->polys || r_emissive_rt_liquid_receivers.value <= 0.0f)
+		return false;
+
+	vec3_t center = {0.0f, 0.0f, 0.0f};
+	for (int vertex = 0; vertex < surface->polys->numverts; ++vertex)
+		VectorAdd (center, surface->polys->verts[vertex], center);
+	VectorScale (center, 1.0f / surface->polys->numverts, center);
+	vec3_t normal;
+	VectorCopy (surface->plane->normal, normal);
+	if (surface->flags & SURF_PLANEBACK)
+		VectorScale (normal, -1.0f, normal);
+
+	if (entity)
+	{
+		float  matrix[16];
+		vec3_t origin, angles;
+		VectorCopy (entity->origin, origin);
+		VectorCopy (entity->angles, angles);
+		angles[0] = -angles[0];
+		IdentityMatrix (matrix);
+		R_RotateForEntity (matrix, origin, angles, entity->netstate.scale);
+		vec3_t transformed, local_normal;
+		VectorCopy (normal, local_normal);
+		for (int row = 0; row < 3; ++row)
+		{
+			transformed[row] = matrix[row] * center[0] + matrix[4 + row] * center[1] + matrix[8 + row] * center[2] + matrix[12 + row];
+			normal[row] = matrix[row] * local_normal[0] + matrix[4 + row] * local_normal[1] + matrix[8 + row] * local_normal[2];
+		}
+		VectorCopy (transformed, center);
+		VectorNormalize (normal);
+	}
+
+	vec3_t to_view;
+	VectorSubtract (r_refdef.vieworg, center, to_view);
+	if (DotProduct (to_view, normal) < 0.0f)
+		VectorScale (normal, -1.0f, normal);
+	return R_EmissiveApproximatePointLight (center, normal, 8, color);
 }
 
 /*
@@ -1359,16 +1411,23 @@ void R_DrawTextureChains_Water (cb_context_t *cbx, qmodel_t *model, entity_t *en
 				{
 					if (alpha_blend)
 						R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 20 * sizeof (float), 1 * sizeof (float), &alpha);
-					R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, &brushpasses);
+					R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, NULL, &brushpasses);
 					lightmap_texture = (s->lightmaptexturenum >= 0) ? lightmaps[s->lightmaptexturenum].texture : greylightmap;
 					lastlightmap = s->lightmaptexturenum;
 				}
-				R_BatchSurface (cbx, s, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, &brushpasses);
+				vec3_t		   emissive_add;
+				const qboolean emissive_receiver = R_EmissiveApproximateSurfaceLight (s, ent, emissive_add);
+				R_BatchSurface (
+					cbx, s, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, emissive_receiver ? emissive_add : NULL, &brushpasses);
+				if (r_emissive_rt_liquid_receivers.value > 0.0f)
+					R_FlushBatch (
+						cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, emissive_receiver ? emissive_add : NULL,
+						&brushpasses);
 			}
 
 			if (alpha_blend)
 				R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 20 * sizeof (float), 1 * sizeof (float), &alpha);
-			R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, &brushpasses);
+			R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, NULL, &brushpasses);
 		}
 	}
 
@@ -1481,7 +1540,7 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 			{
 				R_FlushBatch (
 					cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-					surface_indices_texture, receiver_detail_ready, &brushpasses);
+					surface_indices_texture, receiver_detail_ready, NULL, &brushpasses);
 				lightmap_texture = lightmaps[s->lightmaptexturenum].texture;
 				emissive_texture = surface_emissive_texture;
 				emissive_detail_texture = surface_emissive_detail_texture;
@@ -1496,12 +1555,12 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 			lastlightmap = s->lightmaptexturenum;
 			R_BatchSurface (
 				cbx, s, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-				surface_indices_texture, receiver_detail_ready, &brushpasses);
+				surface_indices_texture, receiver_detail_ready, NULL, &brushpasses);
 		}
 
 		R_FlushBatch (
-			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-			surface_indices_texture, receiver_detail_ready, &brushpasses);
+			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture, surface_indices_texture,
+			receiver_detail_ready, NULL, &brushpasses);
 	}
 
 	Atomic_AddUInt32 (&rs_brushpasses, brushpasses);

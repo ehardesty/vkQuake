@@ -27,7 +27,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_translucent_receivers, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_liquid_receivers,
+	r_emissive_rt_translucent_receivers, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 
 int gl_lightmap_format;
@@ -68,6 +69,7 @@ qboolean indirect_ready = false;
 typedef struct
 {
 	texture_t *texture;
+	msurface_t *surface; // non-NULL for independently lit liquid draws
 	short	   lightmap_idx;
 	byte	   is_bmodel; // for gl_zfix
 	byte	   world_flags;
@@ -76,7 +78,7 @@ typedef struct
 
 #define INDIRECT_WORLD_MODEL		1
 #define INDIRECT_EMISSIVE_INFLUENCE 2
-COMPILE_TIME_ASSERT (indirectdraw_t, sizeof (indirectdraw_t) == 16);
+COMPILE_TIME_ASSERT (indirectdraw_t, sizeof (indirectdraw_t) == 24);
 
 #define MAX_INDIRECT_DRAWS 32768
 static indirectdraw_t indirect_draws[MAX_INDIRECT_DRAWS];
@@ -929,6 +931,8 @@ qboolean R_IndirectBrush (entity_t *e)
 		return false;
 	const qboolean transparent_entity = ENTALPHA_DECODE (e->alpha) != 1.0f;
 	const qboolean has_water = brush_deps_data[e->model->combined_deps].water_count != 0;
+	if (has_water && r_emissive_rt_liquid_receivers.value > 0.0f)
+		return false;
 	// the indirect path only knows global water alpha, so entities with fixed alpha need per-entity drawing
 	const qboolean fixed_alpha_water = e->alpha != ENTALPHA_DEFAULT && has_water;
 	// without OIT, water needs the stable draw order of the texture chains even in indirect mode
@@ -1297,11 +1301,24 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				(transient_emissive_active ? R_TransientEmissiveDetailReady () : detail_ready);
 			const qboolean	  bandlimit_enabled = detail_enabled && R_EmissiveBandlimitActive ();
 			const qboolean	  emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || debug_mode == 5 || detail_enabled);
+			vec3_t			  liquid_emissive_add;
+			const qboolean	  liquid_emissive_receiver =
+				draw_water && indirect_draws[i].surface && R_EmissiveApproximateSurfaceLight (indirect_draws[i].surface, NULL, liquid_emissive_add);
 			int pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 								 (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) + (detail_enabled ? 32 : 0) +
 								 (bandlimit_enabled ? 64 : 0);
 			vulkan_pipeline_t pipeline;
-			if (emissive_debug)
+			if (liquid_emissive_receiver)
+			{
+				const int liquid_pipeline_index = alpha_blend + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
+				pipeline = R_PipelineForRenderPass (
+					cbx->render_pass_index, vulkan_globals.liquid_emissive_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][liquid_pipeline_index],
+					vulkan_globals.liquid_emissive_wboit_pipelines[liquid_pipeline_index],
+					vulkan_globals.liquid_emissive_mboit_moment_pipelines[liquid_pipeline_index],
+					vulkan_globals.liquid_emissive_mboit_composite_pipelines[liquid_pipeline_index]);
+				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 24 * sizeof (float), sizeof (vec3_t), liquid_emissive_add);
+			}
+			else if (emissive_debug)
 			{
 				const int debug_pipeline_index =
 					alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
@@ -1699,17 +1716,19 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 {
 	static int last;
 	int		   i;
+	const qboolean unique_liquid = r_emissive_rt_liquid_receivers.value > 0.0f && (surf->flags & SURF_DRAWTURB);
 	const byte world_flags =
 		(is_world_model ? INDIRECT_WORLD_MODEL : 0) |
 		(is_world_model && emissive_grouping && (surf->emissive_influence || surf->emissive_bounce_influence) ? INDIRECT_EMISSIVE_INFLUENCE : 0);
-	if (last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum && indirect_draws[last].texture == surf->texinfo->texture &&
-		indirect_draws[last].is_bmodel == is_bmodel && indirect_draws[last].world_flags == world_flags)
+	if (!unique_liquid && last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum &&
+		indirect_draws[last].texture == surf->texinfo->texture && indirect_draws[last].is_bmodel == is_bmodel &&
+		indirect_draws[last].world_flags == world_flags)
 	{
 		surf->indirect_idx = last;
 		indirect_draws[last].max_indices += 3 * (surf->numedges - 2);
 		return;
 	}
-	for (i = 0; i < used_indirect_draws; i++)
+	for (i = unique_liquid ? used_indirect_draws : 0; i < used_indirect_draws; i++)
 	{
 		if (indirect_draws[i].lightmap_idx == surf->lightmaptexturenum && indirect_draws[i].texture == surf->texinfo->texture &&
 			indirect_draws[i].is_bmodel == is_bmodel && indirect_draws[i].world_flags == world_flags)
@@ -1727,6 +1746,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 	++used_indirect_draws;
 	surf->indirect_idx = last = i;
 	indirect_draws[i].texture = surf->texinfo->texture;
+	indirect_draws[i].surface = unique_liquid ? surf : NULL;
 	indirect_draws[i].lightmap_idx = surf->lightmaptexturenum;
 	indirect_draws[i].is_bmodel = is_bmodel;
 	indirect_draws[i].world_flags = world_flags;

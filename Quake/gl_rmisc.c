@@ -36,10 +36,10 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_translucent_receivers,
-	r_emissive_rt_sprite_receivers, r_emissive_rt_particle_receivers, r_emissive_rt_model_emitters, r_emissive_rt_debug, r_emissive_rt_bandlimit,
-	r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution,
-	r_emissive_rt_model_lights;
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_liquid_receivers,
+	r_emissive_rt_translucent_receivers, r_emissive_rt_sprite_receivers, r_emissive_rt_particle_receivers, r_emissive_rt_model_emitters, r_emissive_rt_debug,
+	r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays,
+	r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -1848,7 +1848,7 @@ void R_CreatePipelineLayouts ()
 		// Keep this range compatible with the world layout. R_SetupContext pushes
 		// the shared view constants while the basic pipeline is bound, then world
 		// pipelines consume the same bytes without redundantly uploading them.
-		push_constant_range.size = 24 * sizeof (float);
+		push_constant_range.size = 27 * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -1876,7 +1876,7 @@ void R_CreatePipelineLayouts ()
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
-		push_constant_range.size = 24 * sizeof (float);
+		push_constant_range.size = 27 * sizeof (float);
 		push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
 
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
@@ -2620,6 +2620,11 @@ DECLARE_SHADER_MODULE (world_oit_frag);
 DECLARE_SHADER_MODULE (world_mboit_moment_frag);
 DECLARE_SHADER_MODULE (world_mboit_composite_frag);
 DECLARE_SHADER_MODULE (world_mboit_composite_msaa_frag);
+DECLARE_SHADER_MODULE (world_liquid_emissive_frag);
+DECLARE_SHADER_MODULE (world_liquid_emissive_oit_frag);
+DECLARE_SHADER_MODULE (world_liquid_emissive_mboit_moment_frag);
+DECLARE_SHADER_MODULE (world_liquid_emissive_mboit_composite_frag);
+DECLARE_SHADER_MODULE (world_liquid_emissive_mboit_composite_msaa_frag);
 DECLARE_SHADER_MODULE (alias_vert);
 DECLARE_SHADER_MODULE (alias_frag);
 DECLARE_SHADER_MODULE (alias_alphatest_frag);
@@ -3883,6 +3888,89 @@ static void R_CreateWorldPipelines ()
 	}
 }
 
+static void R_CreateLiquidEmissivePipelines (void)
+{
+	pipeline_create_infos_t base, infos;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_TRUE;
+	base.rasterization_state.depthBiasEnable = VK_TRUE;
+	base.dynamic_states[base.dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+	base.vertex_input_state.vertexAttributeDescriptionCount = 3;
+	base.vertex_input_state.pVertexAttributeDescriptions = world_vertex_input_attribute_descriptions;
+	base.vertex_input_state.vertexBindingDescriptionCount = 1;
+	base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
+	base.shader_stages[0].module = world_vert_module;
+
+	VkSpecializationMapEntry entries[5];
+	for (uint32_t i = 0; i < countof (entries); ++i)
+	{
+		entries[i].constantID = i;
+		entries[i].offset = i * sizeof (uint32_t);
+		entries[i].size = sizeof (uint32_t);
+	}
+	uint32_t				   data[5] = {0, 0, 0, 0, vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32};
+	const VkSpecializationInfo specialization = {countof (entries), entries, sizeof (data), data};
+	base.shader_stages[1].pSpecializationInfo = &specialization;
+
+	for (int alpha_blend = 0; alpha_blend < 2; ++alpha_blend)
+	{
+		for (int quantize_lm = 0; quantize_lm < 2; ++quantize_lm)
+		{
+			const int pipeline_index = alpha_blend + quantize_lm * 2;
+			data[2] = alpha_blend;
+			data[3] = quantize_lm;
+			for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+			{
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+				infos.shader_stages[1].module = world_liquid_emissive_frag_module;
+				infos.blend_attachment_states[0].blendEnable = alpha_blend ? VK_TRUE : VK_FALSE;
+				infos.depth_stencil_state.depthWriteEnable = alpha_blend ? VK_FALSE : VK_TRUE;
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.liquid_emissive_pipelines[variant][pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+					va (variant ? "liquid_emissive_main_oit %d" : "liquid_emissive %d", pipeline_index));
+			}
+			if (!alpha_blend)
+				continue;
+
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 1;
+			infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = world_liquid_emissive_oit_frag_module;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetWBOITBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.liquid_emissive_wboit_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+				va ("liquid_emissive_wboit %d", pipeline_index));
+
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 1;
+			infos.color_blend_state.attachmentCount = MBOIT_MOMENT_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = world_liquid_emissive_mboit_moment_frag_module;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetMBOITMomentBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.liquid_emissive_mboit_moment_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+				va ("liquid_emissive_mboit_moment %d", pipeline_index));
+
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 2;
+			infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT ? world_liquid_emissive_mboit_composite_frag_module
+																								 : world_liquid_emissive_mboit_composite_msaa_frag_module;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.liquid_emissive_mboit_composite_pipelines[pipeline_index], &infos, vulkan_globals.world_pipeline_layout,
+				va ("liquid_emissive_mboit_composite %d", pipeline_index));
+		}
+	}
+}
+
 /*
 ===============
 R_CreateAliasPipelines
@@ -4334,6 +4422,11 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (world_oit_frag);
 	CREATE_SHADER_MODULE (world_mboit_moment_frag);
 	CREATE_SHADER_MODULE (world_mboit_composite_frag);
+	CREATE_SHADER_MODULE (world_liquid_emissive_frag);
+	CREATE_SHADER_MODULE (world_liquid_emissive_oit_frag);
+	CREATE_SHADER_MODULE (world_liquid_emissive_mboit_moment_frag);
+	CREATE_SHADER_MODULE (world_liquid_emissive_mboit_composite_frag);
+	CREATE_SHADER_MODULE_COND (world_liquid_emissive_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE_COND (world_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (alias_vert);
 	CREATE_SHADER_MODULE (alias_frag);
@@ -4425,6 +4518,11 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (world_mboit_moment_frag);
 	DESTROY_SHADER_MODULE (world_mboit_composite_frag);
 	DESTROY_SHADER_MODULE (world_mboit_composite_msaa_frag);
+	DESTROY_SHADER_MODULE (world_liquid_emissive_frag);
+	DESTROY_SHADER_MODULE (world_liquid_emissive_oit_frag);
+	DESTROY_SHADER_MODULE (world_liquid_emissive_mboit_moment_frag);
+	DESTROY_SHADER_MODULE (world_liquid_emissive_mboit_composite_frag);
+	DESTROY_SHADER_MODULE (world_liquid_emissive_mboit_composite_msaa_frag);
 	DESTROY_SHADER_MODULE (alias_vert);
 	DESTROY_SHADER_MODULE (alias_frag);
 	DESTROY_SHADER_MODULE (alias_alphatest_frag);
@@ -4499,6 +4597,7 @@ void R_CreatePipelines ()
 	R_CreateSkyPipelines ();
 	R_CreateShowTrisPipelines ();
 	R_CreateWorldPipelines ();
+	R_CreateLiquidEmissivePipelines ();
 	R_CreateAliasPipelines ();
 	R_CreateMD5Pipelines ();
 	R_CreatePostprocessPipelines ();
@@ -4548,6 +4647,20 @@ void R_DestroyPipelines (void)
 			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_emissive_debug_pipelines[variant][i].handle, NULL);
 			vulkan_globals.world_emissive_debug_pipelines[variant][i].handle = VK_NULL_HANDLE;
 		}
+	for (i = 0; i < LIQUID_EMISSIVE_PIPELINE_COUNT; ++i)
+	{
+		for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_emissive_pipelines[variant][i].handle, NULL);
+			vulkan_globals.liquid_emissive_pipelines[variant][i].handle = VK_NULL_HANDLE;
+		}
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_emissive_wboit_pipelines[i].handle, NULL);
+		vulkan_globals.liquid_emissive_wboit_pipelines[i].handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_emissive_mboit_moment_pipelines[i].handle, NULL);
+		vulkan_globals.liquid_emissive_mboit_moment_pipelines[i].handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_emissive_mboit_composite_pipelines[i].handle, NULL);
+		vulkan_globals.liquid_emissive_mboit_composite_pipelines[i].handle = VK_NULL_HANDLE;
+	}
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.raster_tex_warp_pipeline.handle, NULL);
 	vulkan_globals.raster_tex_warp_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.particle_pipeline.handle, NULL);
@@ -4864,6 +4977,8 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_emissive_rt_occluders);
 	Cvar_SetCallback (&r_emissive_rt_occluders, R_EmissiveOccludersChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_external_bsp);
+	Cvar_RegisterVariable (&r_emissive_rt_liquid_receivers);
+	Cvar_SetCallback (&r_emissive_rt_liquid_receivers, R_EmissiveLiquidReceiversChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_translucent_receivers);
 	Cvar_RegisterVariable (&r_emissive_rt_sprite_receivers);
 	Cvar_RegisterVariable (&r_emissive_rt_particle_receivers);

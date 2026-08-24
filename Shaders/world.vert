@@ -13,6 +13,7 @@ layout (push_constant) uniform PushConsts
 	float alpha;
 	uint  instance_base; // 0: identity transforms, else buffer base offset + 1
 	ivec2 emissive_atlas_offset;
+	vec3  emissive_add;
 }
 push_constants;
 
