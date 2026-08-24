@@ -75,14 +75,7 @@ layout (std430, set = 0, binding = 10) restrict buffer emissive_visibility_buffe
 {
 	uint emissive_visibility[];
 };
-layout (std430, set = 0, binding = 11) restrict buffer emissive_bandlimit_diag_buffer
-{
-	uint emissive_bandlimit_diag[];
-};
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
-
-ivec2 emissive_bandlimit_diag_coords;
-uint emissive_bandlimit_diag_tile;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
 {
@@ -116,28 +109,9 @@ bool EmissiveBandlimitIsOccluded (const vec3 world_pos, const vec3 normal, const
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
-uint EmissiveBandlimitOcclusionPrimitive (const vec3 world_pos, const vec3 normal, const vec3 light_origin)
-{
-	const vec3 ray_origin = world_pos + normal * 0.25f;
-	const vec3 ray_vector = light_origin - ray_origin;
-	const float ray_distance = length (ray_vector);
-	if (ray_distance <= 2.5f)
-		return 0xFFFFFFFFu;
-
-	rayQueryEXT ray_query;
-	rayQueryInitializeEXT (
-		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, push_constants.occluder_mask, ray_origin, 2.0f,
-		ray_vector / ray_distance, ray_distance - 0.5f);
-	rayQueryProceedEXT (ray_query);
-	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT
-		? rayQueryGetIntersectionPrimitiveIndexEXT (ray_query, true)
-		: 0xFFFFFFFFu;
-}
-
 #include "lightmap_coords.inc"
 #define EMISSIVE_DETAIL_VISIBILITY
 #define EMISSIVE_SOURCE_INDICES
-#define EMISSIVE_BANDLIMIT_DIAGNOSTICS
 #include "emissive_lighting.inc"
 #include "emissive_bandlimit.inc"
 
@@ -179,8 +153,6 @@ void main ()
 		if (supported)
 		{
 			const uint visibility_texel = gl_GlobalInvocationID.y * tile_resolution + gl_GlobalInvocationID.x;
-			emissive_bandlimit_diag_coords = coords;
-			emissive_bandlimit_diag_tile = push_constants.first_tile + gl_WorkGroupID.z;
 			contribution = bandlimited
 				? CalculateBandlimitedEmissiveContribution (surface_index, surf, s, t, normal, tile.first_source, tile.num_sources, visibility_texel)
 				: CalculateEmissiveContribution (world_pos, normal, tile.first_source, tile.num_sources, visibility_texel);
@@ -193,27 +165,5 @@ void main ()
 		contribution += cacheable.rgb;
 	}
 
-	const vec4 output_value = vec4 (contribution, validity);
-	imageStore (output_image, coords, output_value);
-#ifdef EMISSIVE_BANDLIMIT_DIAGNOSTICS
-	if (bandlimited && !transient_overlay && all (lessThanEqual (abs (coords - ivec2 (817, 344)), ivec2 (2))))
-	{
-		memoryBarrierImage ();
-		const uint texel = uint (coords.y - 342) * 5u + uint (coords.x - 815);
-		const uint base = 16u + 40u * 512u + texel * 12u;
-		emissive_bandlimit_diag[base + 0u] = uint (coords.x);
-		emissive_bandlimit_diag[base + 1u] = uint (coords.y);
-		emissive_bandlimit_diag[base + 2u] = surface_index;
-		emissive_bandlimit_diag[base + 3u] = floatBitsToUint (output_value.r);
-		emissive_bandlimit_diag[base + 4u] = floatBitsToUint (output_value.g);
-		emissive_bandlimit_diag[base + 5u] = floatBitsToUint (output_value.b);
-		emissive_bandlimit_diag[base + 6u] = floatBitsToUint (output_value.a);
-		const vec4 stored = imageLoad (output_image, coords);
-		emissive_bandlimit_diag[base + 7u] = floatBitsToUint (stored.r);
-		emissive_bandlimit_diag[base + 8u] = floatBitsToUint (stored.g);
-		emissive_bandlimit_diag[base + 9u] = floatBitsToUint (stored.b);
-		emissive_bandlimit_diag[base + 10u] = floatBitsToUint (stored.a);
-		emissive_bandlimit_diag[base + 11u] = 1u;
-	}
-#endif
+	imageStore (output_image, coords, vec4 (contribution, validity));
 }

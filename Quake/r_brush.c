@@ -360,9 +360,6 @@ static VkBuffer			   emissive_modulations_buffer;
 static vulkan_memory_t	   emissive_modulations_buffer_memory;
 static VkBuffer			   emissive_visibility_buffer;
 static vulkan_memory_t	   emissive_visibility_buffer_memory;
-static VkBuffer			   emissive_bandlimit_diag_buffer;
-static vulkan_memory_t	   emissive_bandlimit_diag_buffer_memory;
-static uint32_t			  *emissive_bandlimit_diag_mapped;
 static VkBuffer			   emissive_radiance_tiles_buffer;
 static vulkan_memory_t	   emissive_radiance_tiles_buffer_memory;
 static qboolean			   emissive_visibility_available;
@@ -526,29 +523,6 @@ static qboolean			   emissive_bandlimit_budget_limited;
 static uint64_t			   emissive_bandlimit_logical_bytes;
 static uint64_t			   emissive_bandlimit_allocated_bytes;
 static uint64_t			   emissive_bandlimit_peak_bytes;
-#define EMISSIVE_BANDLIMIT_DIAG_HEADER_WORDS 16
-#define EMISSIVE_BANDLIMIT_DIAG_RECORD_WORDS 40
-#define EMISSIVE_BANDLIMIT_DIAG_MAX_RECORDS 512
-#define EMISSIVE_BANDLIMIT_DIAG_TEXEL_WORDS 12
-#define EMISSIVE_BANDLIMIT_DIAG_TEXELS 25
-#define EMISSIVE_BANDLIMIT_DIAG_WORDS                                                                                                        \
-	(EMISSIVE_BANDLIMIT_DIAG_HEADER_WORDS + EMISSIVE_BANDLIMIT_DIAG_RECORD_WORDS * EMISSIVE_BANDLIMIT_DIAG_MAX_RECORDS +                      \
-	 EMISSIVE_BANDLIMIT_DIAG_TEXEL_WORDS * EMISSIVE_BANDLIMIT_DIAG_TEXELS)
-typedef struct emissive_bandlimit_diag_record_s
-{
-	uint32_t surface_index, detail_x, detail_y, logical_tile;
-	uint32_t emitter_slot, light_index, first_source, num_tile_emitters;
-	uint32_t on_surface_mask, in_radius_mask, positive_lambert_mask, visible_mask;
-	uint32_t retained_visibility_mask, visibility_was_reused, usable_sample_count, reserved;
-	float	 sample_weights[4];
-	float	 total_weight, visible_weight, sum_squared_weights, coverage;
-	float	 center_distance, center_falloff, center_lambert, modulation;
-	float	 source_intensity, support_ratio, effective_sample_count, center_visibility;
-	float	 coverage_16, coverage_64, unshadowed_center_luma, emitter_contribution_luma;
-	float	 emitter_contribution_rgb[3];
-	uint32_t center_hit_primitive;
-} emissive_bandlimit_diag_record_t;
-COMPILE_TIME_ASSERT (emissive_bandlimit_diag_record_t, sizeof (emissive_bandlimit_diag_record_t) == EMISSIVE_BANDLIMIT_DIAG_RECORD_WORDS * 4);
 typedef struct emissive_logical_tile_s
 {
 	uint32_t first_source;
@@ -2321,12 +2295,9 @@ void GL_BuildLightmaps (void)
 	GL_ResetEmissiveRadianceTimestamp ();
 	R_FreeBuffer (emissive_modulations_buffer, &emissive_modulations_buffer_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (emissive_visibility_buffer, &emissive_visibility_buffer_memory, &num_vulkan_bmodel_allocations);
-	R_FreeBuffer (emissive_bandlimit_diag_buffer, &emissive_bandlimit_diag_buffer_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_modulations_buffer = VK_NULL_HANDLE;
 	emissive_visibility_buffer = VK_NULL_HANDLE;
-	emissive_bandlimit_diag_buffer = VK_NULL_HANDLE;
-	emissive_bandlimit_diag_mapped = NULL;
 	emissive_radiance_tiles_buffer = VK_NULL_HANDLE;
 	SAFE_FREE (transient_emissive_lights);
 	SAFE_FREE (previous_transient_emissive_lights);
@@ -5190,7 +5161,7 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	image_infos[2].imageView = (cacheable_texture ? cacheable_texture : output_texture)->image_view;
 	image_infos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-	VkDescriptorBufferInfo buffer_infos[9];
+	VkDescriptorBufferInfo buffer_infos[8];
 	memset (buffer_infos, 0, sizeof (buffer_infos));
 	buffer_infos[0].buffer = surface_data_buffer;
 	buffer_infos[0].range = num_surfaces * sizeof (lm_compute_surface_data_t);
@@ -5203,10 +5174,8 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	buffer_infos[5] = source_buffers[2];
 	buffer_infos[6] = source_buffers[3];
 	buffer_infos[7] = source_buffers[4];
-	buffer_infos[8].buffer = emissive_bandlimit_diag_buffer;
-	buffer_infos[8].range = VK_WHOLE_SIZE;
 
-	VkWriteDescriptorSet writes[12];
+	VkWriteDescriptorSet writes[11];
 	memset (writes, 0, sizeof (writes));
 	for (int binding = 0; binding < countof (writes); ++binding)
 	{
@@ -5512,9 +5481,6 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	emissive_modulations_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_visibility_buffer, &emissive_visibility_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_visibility_buffer = VK_NULL_HANDLE;
-	R_FreeBuffer (emissive_bandlimit_diag_buffer, &emissive_bandlimit_diag_buffer_memory, &num_vulkan_bmodel_allocations);
-	emissive_bandlimit_diag_buffer = VK_NULL_HANDLE;
-	emissive_bandlimit_diag_mapped = NULL;
 	R_FreeBuffer (emissive_radiance_tiles_buffer, &emissive_radiance_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_radiance_tiles_buffer = VK_NULL_HANDLE;
 	SAFE_FREE (emissive_light_styles);
@@ -5609,15 +5575,6 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
 		"Emissive source modulations");
 	R_StagingUploadBuffer (emissive_modulations_buffer, modulations_size, (const byte *)emissive_light_modulations);
-	buffer_create_info_t diagnostic_buffer_info = {
-		&emissive_bandlimit_diag_buffer, EMISSIVE_BANDLIMIT_DIAG_WORDS * sizeof (uint32_t), 0,
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, (void **)&emissive_bandlimit_diag_mapped, NULL,
-		"Emissive band-limit diagnostic"};
-	R_CreateBuffers (
-		1, &diagnostic_buffer_info, &emissive_bandlimit_diag_buffer_memory,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-		&num_vulkan_bmodel_allocations, "Emissive band-limit diagnostic");
-	memset (emissive_bandlimit_diag_mapped, 0, EMISSIVE_BANDLIMIT_DIAG_WORDS * sizeof (uint32_t));
 	const size_t tiles_size = num_emissive_logical_tiles * sizeof (*emissive_logical_tiles);
 	if (tiles_size)
 	{
@@ -6711,363 +6668,6 @@ void R_EmissiveOccludersChanged_f (cvar_t *var)
 		GL_RequestAccelerationStructure (RT_AS_CONSUMER_TRANSIENT_EMISSIVES);
 }
 
-static float R_EmissiveBandlimitDiagnosticFloat (uint32_t word)
-{
-	float value;
-	memcpy (&value, &word, sizeof (value));
-	return value;
-}
-
-static uint32_t R_EmissiveBandlimitDiagnosticHitSurface (uint32_t primitive)
-{
-	if (primitive == UINT32_MAX || !cl.worldmodel)
-		return UINT32_MAX;
-	uint32_t first_primitive = 0;
-	for (int i = cl.worldmodel->firstmodelsurface; i < cl.worldmodel->firstmodelsurface + cl.worldmodel->nummodelsurfaces; ++i)
-	{
-		const msurface_t *const surface = &cl.worldmodel->surfaces[i];
-		if (!R_SurfaceInEmissiveWorldAccelerationStructure (surface))
-			continue;
-		const uint32_t num_primitives = surface->numedges > 2 ? (uint32_t)surface->numedges - 2 : 0;
-		if (primitive < first_primitive + num_primitives)
-			return i;
-		first_primitive += num_primitives;
-	}
-	return UINT32_MAX;
-}
-
-static qboolean R_GetEmissiveLightDiagnostic (uint32_t light_index, emissive_light_t *light)
-{
-	if (light_index >= (uint32_t)num_emissive_light_diagnostics)
-		return false;
-	*light = emissive_light_diagnostics[light_index];
-	return true;
-}
-
-typedef struct emissive_screen_probe_hit_s
-{
-	const msurface_t *surface;
-	const qmodel_t	 *model;
-	const entity_t	 *entity;
-	int				  entity_index;
-	int				  static_index;
-	float			  distance;
-	vec3_t			  world_point;
-	vec3_t			  model_point;
-} emissive_screen_probe_hit_t;
-
-static void R_EmissiveScreenProbeTransformPoint (const float matrix[16], const float point[3], vec3_t transformed)
-{
-	transformed[0] = matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12];
-	transformed[1] = matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13];
-	transformed[2] = matrix[2] * point[0] + matrix[6] * point[1] + matrix[10] * point[2] + matrix[14];
-}
-
-static qboolean R_EmissiveScreenProbeRayTriangle (
-	const vec3_t ray_origin, const vec3_t ray_direction, const vec3_t first, const vec3_t second, const vec3_t third, float *distance, float *second_weight,
-	float *third_weight)
-{
-	vec3_t edge1, edge2, p, offset, q;
-	VectorSubtract (second, first, edge1);
-	VectorSubtract (third, first, edge2);
-	CrossProduct (ray_direction, edge2, p);
-	const float determinant = DotProduct (edge1, p);
-	if (fabsf (determinant) < 0.000001f)
-		return false;
-
-	const float inverse_determinant = 1.0f / determinant;
-	VectorSubtract (ray_origin, first, offset);
-	*second_weight = DotProduct (offset, p) * inverse_determinant;
-	if (*second_weight < 0.0f || *second_weight > 1.0f)
-		return false;
-	CrossProduct (offset, edge1, q);
-	*third_weight = DotProduct (ray_direction, q) * inverse_determinant;
-	if (*third_weight < 0.0f || *second_weight + *third_weight > 1.0f)
-		return false;
-	*distance = DotProduct (edge2, q) * inverse_determinant;
-	return *distance > 0.0f;
-}
-
-static void R_EmissiveScreenProbeModel (
-	const vec3_t ray_origin, const vec3_t ray_direction, const qmodel_t *model, const entity_t *entity, int entity_index, int static_index,
-	const float model_matrix[16], emissive_screen_probe_hit_t *hit)
-{
-	for (int i = 0; i < model->nummodelsurfaces; ++i)
-	{
-		const msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
-		if (!surface->polys || surface->polys->numverts < 3)
-			continue;
-
-		const float *const first_model = surface->polys->verts[0];
-		vec3_t			   first_world;
-		R_EmissiveScreenProbeTransformPoint (model_matrix, first_model, first_world);
-		for (int vertex = 1; vertex < surface->polys->numverts - 1; ++vertex)
-		{
-			const float *const second_model = surface->polys->verts[vertex];
-			const float *const third_model = surface->polys->verts[vertex + 1];
-			vec3_t			   second_world, third_world;
-			R_EmissiveScreenProbeTransformPoint (model_matrix, second_model, second_world);
-			R_EmissiveScreenProbeTransformPoint (model_matrix, third_model, third_world);
-
-			float distance, second_weight, third_weight;
-			if (!R_EmissiveScreenProbeRayTriangle (
-					ray_origin, ray_direction, first_world, second_world, third_world, &distance, &second_weight, &third_weight) ||
-				distance >= hit->distance)
-				continue;
-
-			hit->surface = surface;
-			hit->model = model;
-			hit->entity = entity;
-			hit->entity_index = entity_index;
-			hit->static_index = static_index;
-			hit->distance = distance;
-			VectorMA (ray_origin, distance, ray_direction, hit->world_point);
-			for (int axis = 0; axis < 3; ++axis)
-				hit->model_point[axis] =
-					first_model[axis] + second_weight * (second_model[axis] - first_model[axis]) + third_weight * (third_model[axis] - first_model[axis]);
-		}
-	}
-}
-
-static void R_EmissiveScreenProbePrintCandidate (const char *kind, const emissive_screen_probe_hit_t *hit)
-{
-	if (!hit->surface)
-	{
-		Con_Printf ("[DEBUG-RTSEAM] %s candidate: none\n", kind);
-		return;
-	}
-	const uint32_t surface_index = (uint32_t)(hit->surface - cl.worldmodel->surfaces);
-	Con_Printf (
-		"[DEBUG-RTSEAM] %s candidate: model %s entity %d static %d surface %u distance %g world (%g %g %g)\n", kind, hit->model->name, hit->entity_index,
-		hit->static_index, surface_index, hit->distance, hit->world_point[0], hit->world_point[1], hit->world_point[2]);
-}
-
-void R_EmissiveBandlimitProbeScreen_f (void)
-{
-	if (Cmd_Argc () != 5 || !cl.worldmodel)
-	{
-		Con_Printf ("usage: r_emissive_rt_probe_screen <pixel_x> <pixel_y> <image_width> <image_height>\n");
-		return;
-	}
-	const float image_x = atof (Cmd_Argv (1));
-	const float image_y = atof (Cmd_Argv (2));
-	const float image_width = atof (Cmd_Argv (3));
-	const float image_height = atof (Cmd_Argv (4));
-	if (image_width <= 0.0f || image_height <= 0.0f)
-	{
-		Con_Printf ("[DEBUG-RTSEAM] invalid image dimensions\n");
-		return;
-	}
-
-	const float screen_x = 2.0f * image_x / image_width - 1.0f;
-	const float screen_y = 1.0f - 2.0f * image_y / image_height;
-	vec3_t		ray_direction;
-	VectorCopy (vpn, ray_direction);
-	VectorMA (ray_direction, screen_x * tanf (DEG2RAD (r_refdef.fov_x) * 0.5f), vright, ray_direction);
-	VectorMA (ray_direction, screen_y * tanf (DEG2RAD (r_refdef.fov_y) * 0.5f), vup, ray_direction);
-	VectorNormalize (ray_direction);
-
-	emissive_screen_probe_hit_t world_hit = {0}, inline_hit = {0};
-	world_hit.distance = inline_hit.distance = FLT_MAX;
-	float identity[16];
-	IdentityMatrix (identity);
-	R_EmissiveScreenProbeModel (r_refdef.vieworg, ray_direction, cl.worldmodel, NULL, -1, -1, identity, &world_hit);
-
-	for (int i = 0; i < cl.num_entities + cl.num_statics; ++i)
-	{
-		const int			  entity_index = i < cl.num_entities ? i : -1;
-		const int			  static_index = i < cl.num_entities ? -1 : i - cl.num_entities;
-		const entity_t *const entity = entity_index >= 0 ? &cl.entities[entity_index] : cl.static_entities[static_index];
-		const qmodel_t *const model = entity->model;
-		if (!model || model == cl.worldmodel || model->needload || model->type != mod_brush || model->name[0] != '*' || ENTALPHA_DECODE (entity->alpha) <= 0.0f)
-			continue;
-
-		vec3_t origin, angles;
-		VectorCopy (entity->origin, origin);
-		VectorCopy (entity->angles, angles);
-		angles[0] = -angles[0];
-		float model_matrix[16];
-		IdentityMatrix (model_matrix);
-		R_RotateForEntity (model_matrix, origin, angles, entity->netstate.scale);
-		R_EmissiveScreenProbeModel (r_refdef.vieworg, ray_direction, model, entity, entity_index, static_index, model_matrix, &inline_hit);
-	}
-
-	R_EmissiveScreenProbePrintCandidate ("world", &world_hit);
-	R_EmissiveScreenProbePrintCandidate ("inline", &inline_hit);
-	const emissive_screen_probe_hit_t *const hit =
-		!inline_hit.surface || (world_hit.surface && world_hit.distance <= inline_hit.distance) ? &world_hit : &inline_hit;
-	if (!hit->surface)
-	{
-		Con_Printf ("[DEBUG-RTSEAM] screen %.1f,%.1f missed world and inline brush geometry\n", image_x, image_y);
-		return;
-	}
-
-	const msurface_t *const hit_surface = hit->surface;
-	const uint32_t			surface_index = (uint32_t)(hit_surface - cl.worldmodel->surfaces);
-	const int				model_surface = (int)(hit_surface - &hit->model->surfaces[hit->model->firstmodelsurface]);
-	const float local_s = DotProduct (hit->model_point, hit_surface->texinfo->vecs[0]) + hit_surface->texinfo->vecs[0][3] - hit_surface->texturemins[0];
-	const float local_t = DotProduct (hit->model_point, hit_surface->texinfo->vecs[1]) + hit_surface->texinfo->vecs[1][3] - hit_surface->texturemins[1];
-	const int	detail_x = (int)floorf ((local_s + hit_surface->light_s * 16.0f + 8.0f) / 8.0f);
-	const int	detail_y = (int)floorf ((local_t + hit_surface->light_t * 16.0f + 8.0f) / 8.0f);
-	Con_Printf (
-		"[DEBUG-RTSEAM] visible -> owner %s model %s entity %d static %d surface %u model_surface %d texture %s world (%g %g %g) model (%g %g %g) distance %g "
-		"lightmap %d detail %d,%d local %.3f,%.3f cacheable %d emissive %d bounce %d indirect %d flags 0x%x normal (%g %g %g) plane %g\n",
-		hit->model == cl.worldmodel ? "world" : "inline", hit->model->name, hit->entity_index, hit->static_index, surface_index, model_surface,
-		hit_surface->texinfo && hit_surface->texinfo->texture ? hit_surface->texinfo->texture->name : "<none>", hit->world_point[0], hit->world_point[1],
-		hit->world_point[2], hit->model_point[0], hit->model_point[1], hit->model_point[2], hit->distance, hit_surface->lightmaptexturenum, detail_x, detail_y,
-		local_s, local_t, hit_surface->cacheable_emissive_influence, hit_surface->emissive_influence, hit_surface->emissive_bounce_influence,
-		hit_surface->indirect_idx, hit_surface->flags, hit_surface->plane->normal[0], hit_surface->plane->normal[1], hit_surface->plane->normal[2],
-		hit_surface->plane->dist);
-	for (int i = 0; i < num_emissive_logical_tiles; ++i)
-		if (emissive_logical_tiles[i].lightmap == (uint32_t)hit_surface->lightmaptexturenum && emissive_logical_tiles[i].x == (uint32_t)detail_x / 16u &&
-			emissive_logical_tiles[i].y == (uint32_t)detail_y / 16u)
-		{
-			Con_Printf ("[DEBUG-RTSEAM] logical tile %d sources %u:", i, emissive_logical_tiles[i].num_sources);
-			for (uint32_t source = 0; source < emissive_logical_tiles[i].num_sources; ++source)
-				Con_Printf (" %u", emissive_logical_tile_sources[emissive_logical_tiles[i].first_source + source]);
-			Con_Printf ("\n");
-			vec3_t oriented_normal;
-			VectorCopy (hit_surface->plane->normal, oriented_normal);
-			float oriented_plane_dist = hit_surface->plane->dist;
-			if (hit_surface->flags & SURF_PLANEBACK)
-			{
-				VectorScale (oriented_normal, -1.0f, oriented_normal);
-				oriented_plane_dist = -oriented_plane_dist;
-			}
-			for (uint32_t source = 0; source < emissive_logical_tiles[i].num_sources; ++source)
-			{
-				const uint32_t	 light_index = emissive_logical_tile_sources[emissive_logical_tiles[i].first_source + source];
-				emissive_light_t light;
-				if (!R_GetEmissiveLightDiagnostic (light_index, &light))
-					continue;
-				const float	   front_distance = DotProduct (light.origin, oriented_normal) - oriented_plane_dist;
-				const qboolean tile_radius_hit = R_EmissiveLightInfluencesTile (hit_surface, detail_x / 16, detail_y / 16, &light);
-				Con_Printf (
-					"[DEBUG-RTSEAM] source %u origin (%g %g %g) radius %g intensity %g front %g tile_radius_hit %d\n", light_index, light.origin[0],
-					light.origin[1], light.origin[2], light.radius, light.intensity, front_distance, tile_radius_hit);
-			}
-			break;
-		}
-}
-
-static void R_EmissiveBandlimitPrintDiagnosticSurface (uint32_t surface_index, const char *kind)
-{
-	if (!cl.worldmodel || surface_index == UINT32_MAX || surface_index >= (uint32_t)cl.worldmodel->numsurfaces)
-		return;
-	const msurface_t *const surface = &cl.worldmodel->surfaces[surface_index];
-	vec3_t mins, maxs;
-	R_EmissiveBounceSurfaceBounds (surface, mins, maxs);
-	Con_Printf (
-		"RT emissive probe: %s surface %u texture %s bounds (%g %g %g)-(%g %g %g), normal (%g %g %g), lightmap %d @ %d,%d\n",
-		kind, surface_index, surface->texinfo && surface->texinfo->texture ? surface->texinfo->texture->name : "<none>", mins[0], mins[1], mins[2],
-		maxs[0], maxs[1], maxs[2], surface->plane->normal[0], surface->plane->normal[1], surface->plane->normal[2], surface->lightmaptexturenum,
-		surface->light_s, surface->light_t);
-	Con_Printf ("RT emissive probe: %s surface %u polygon has %d vertices", kind, surface_index, surface->polys->numverts);
-	const float *vertex = surface->polys->verts[0];
-	for (int i = 0; i < surface->polys->numverts; ++i, vertex += VERTEXSIZE)
-		Con_Printf ("%s(%g %g %g)", i ? ", " : ": ", vertex[0], vertex[1], vertex[2]);
-	Con_Printf ("\n");
-}
-
-void R_EmissiveBandlimitProbeDump_f (void)
-{
-	if (!emissive_bandlimit_diag_mapped)
-	{
-		Con_Printf ("RT emissive probe: diagnostic buffer unavailable\n");
-		return;
-	}
-	GL_WaitForDeviceIdle ();
-	const uint32_t record_count = q_min (emissive_bandlimit_diag_mapped[1], (uint32_t)EMISSIVE_BANDLIMIT_DIAG_MAX_RECORDS);
-	if (!record_count)
-		Con_Printf ("RT emissive probe: no per-emitter records captured; dumping texel slots\n");
-	char records_path[MAX_OSPATH], texels_path[MAX_OSPATH], tiles_path[MAX_OSPATH];
-	q_snprintf (records_path, sizeof (records_path), "%s/emissive-bandlimit-probe-records.csv", com_gamedir);
-	q_snprintf (texels_path, sizeof (texels_path), "%s/emissive-bandlimit-probe-texels.csv", com_gamedir);
-	q_snprintf (tiles_path, sizeof (tiles_path), "%s/emissive-bandlimit-probe-tiles.csv", com_gamedir);
-	FILE *records = Sys_fopen (records_path, "wt");
-	FILE *texels = Sys_fopen (texels_path, "wt");
-	FILE *tiles = Sys_fopen (tiles_path, "wt");
-	if (!records || !texels || !tiles)
-	{
-		if (records)
-			fclose (records);
-		if (texels)
-			fclose (texels);
-		if (tiles)
-			fclose (tiles);
-		Con_Printf ("RT emissive probe: could not open output files\n");
-		return;
-	}
-	fprintf (records,
-		"surface_index,detail_x,detail_y,logical_tile,emitter_slot,light_index,first_source,num_tile_emitters,on_surface_mask,in_radius_mask,"
-		"positive_lambert_mask,visible_mask,retained_visibility_mask,visibility_was_reused,usable_sample_count,w0,w1,w2,w3,total_weight,"
-		"visible_weight,sum_squared_weights,coverage,center_distance,center_falloff,center_lambert,modulation,source_intensity,support_ratio,"
-		"effective_sample_count,center_visibility,coverage_16,coverage_64,unshadowed_center_luma,emitter_contribution_luma,contribution_r,"
-		"contribution_g,contribution_b,center_hit_primitive,center_hit_surface\n");
-	const emissive_bandlimit_diag_record_t *const captured =
-		(const emissive_bandlimit_diag_record_t *)(emissive_bandlimit_diag_mapped + EMISSIVE_BANDLIMIT_DIAG_HEADER_WORDS);
-	for (uint32_t i = 0; i < record_count; ++i)
-	{
-		const emissive_bandlimit_diag_record_t *const r = &captured[i];
-		fprintf (records,
-			"%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,%u\n",
-			r->surface_index, r->detail_x, r->detail_y, r->logical_tile, r->emitter_slot, r->light_index, r->first_source,
-			r->num_tile_emitters, r->on_surface_mask, r->in_radius_mask, r->positive_lambert_mask, r->visible_mask,
-			r->retained_visibility_mask, r->visibility_was_reused, r->usable_sample_count, r->sample_weights[0], r->sample_weights[1],
-			r->sample_weights[2], r->sample_weights[3], r->total_weight, r->visible_weight, r->sum_squared_weights, r->coverage,
-			r->center_distance, r->center_falloff, r->center_lambert, r->modulation, r->source_intensity, r->support_ratio,
-			r->effective_sample_count, r->center_visibility, r->coverage_16, r->coverage_64, r->unshadowed_center_luma,
-			r->emitter_contribution_luma, r->emitter_contribution_rgb[0], r->emitter_contribution_rgb[1], r->emitter_contribution_rgb[2],
-			r->center_hit_primitive, R_EmissiveBandlimitDiagnosticHitSurface (r->center_hit_primitive));
-	}
-	fprintf (texels, "detail_x,detail_y,surface_index,pre_r,pre_g,pre_b,pre_a,stored_r,stored_g,stored_b,stored_a\n");
-	const uint32_t texel_base =
-		EMISSIVE_BANDLIMIT_DIAG_HEADER_WORDS + EMISSIVE_BANDLIMIT_DIAG_RECORD_WORDS * EMISSIVE_BANDLIMIT_DIAG_MAX_RECORDS;
-	for (uint32_t i = 0; i < EMISSIVE_BANDLIMIT_DIAG_TEXELS; ++i)
-	{
-		const uint32_t *const t = emissive_bandlimit_diag_mapped + texel_base + i * EMISSIVE_BANDLIMIT_DIAG_TEXEL_WORDS;
-		if (!t[11])
-			continue;
-		fprintf (texels, "%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", t[0], t[1], t[2],
-			R_EmissiveBandlimitDiagnosticFloat (t[3]), R_EmissiveBandlimitDiagnosticFloat (t[4]),
-			R_EmissiveBandlimitDiagnosticFloat (t[5]), R_EmissiveBandlimitDiagnosticFloat (t[6]),
-			R_EmissiveBandlimitDiagnosticFloat (t[7]), R_EmissiveBandlimitDiagnosticFloat (t[8]),
-			R_EmissiveBandlimitDiagnosticFloat (t[9]), R_EmissiveBandlimitDiagnosticFloat (t[10]));
-	}
-	fclose (records);
-	fclose (texels);
-	fprintf (tiles, "logical_tile,lightmap,detail_x,detail_y,first_source,num_sources\n");
-	for (int i = 0; i < num_emissive_logical_tiles; ++i)
-		fprintf (tiles, "%d,%u,%u,%u,%u,%u\n", i, emissive_logical_tiles[i].lightmap, emissive_logical_tiles[i].x * 16u,
-			emissive_logical_tiles[i].y * 16u, emissive_logical_tiles[i].first_source, emissive_logical_tiles[i].num_sources);
-	fclose (tiles);
-	R_EmissiveBandlimitPrintDiagnosticSurface (captured[0].surface_index, "receiver");
-	for (uint32_t i = 0; i < record_count; ++i)
-		if (captured[i].center_hit_primitive != UINT32_MAX)
-		{
-			R_EmissiveBandlimitPrintDiagnosticSurface (
-				R_EmissiveBandlimitDiagnosticHitSurface (captured[i].center_hit_primitive), "center-ray blocker");
-			break;
-		}
-	qboolean printed_lights[MAX_DLIGHTS];
-	memset (printed_lights, 0, sizeof (printed_lights));
-	for (uint32_t i = 0; i < record_count; ++i)
-		if (captured[i].light_index < countof (printed_lights) && !printed_lights[captured[i].light_index])
-		{
-			emissive_light_t light;
-			printed_lights[captured[i].light_index] = true;
-			if (R_GetEmissiveLightDiagnostic (captured[i].light_index, &light))
-				Con_Printf (
-					"RT emissive probe: light %u origin (%g %g %g), radius %g, intensity %g, color (%g %g %g)\n",
-					captured[i].light_index, light.origin[0], light.origin[1], light.origin[2], light.radius, light.intensity, light.color[0],
-					light.color[1], light.color[2]);
-		}
-	emissive_bandlimit_diag_mapped[0] = 3u;
-	Con_Printf (
-		"RT emissive probe: wrote %u records, %u dropped, band-limit v%u to %s, %s, and %s\n", record_count,
-		emissive_bandlimit_diag_mapped[2], emissive_bandlimit_diag_mapped[3], records_path, texels_path, tiles_path);
-}
-
 static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 {
 	VkAccelerationStructureKHR direct_tlas = R_EmissiveDirectAccelerationStructure ();
@@ -7104,13 +6704,6 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
 		vulkan_globals.vk_cmd_push_descriptor_set (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 1, 1, &tlas_write);
-		vkCmdFillBuffer (cbx->cb, emissive_bandlimit_diag_buffer, 0, VK_WHOLE_SIZE, 0);
-		ZEROED_STRUCT (VkMemoryBarrier, diagnostic_barrier);
-		diagnostic_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		diagnostic_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		diagnostic_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &diagnostic_barrier, 0, NULL, 0, NULL);
 		if (emissive_visibility_available)
 		{
 			vkCmdFillBuffer (cbx->cb, emissive_visibility_buffer, 0, VK_WHOLE_SIZE, 0);

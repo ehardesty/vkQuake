@@ -1598,7 +1598,7 @@ void R_CreateDescriptorSetLayouts ()
 
 	{
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 12);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 11);
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1618,7 +1618,7 @@ void R_CreateDescriptorSetLayouts ()
 		emissive_coarse_layout_bindings[8].descriptorCount = 1;
 		emissive_coarse_layout_bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		emissive_coarse_layout_bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		for (int i = 9; i < 12; ++i)
+		for (int i = 9; i < 11; ++i)
 		{
 			emissive_coarse_layout_bindings[i].binding = num_descriptors++;
 			emissive_coarse_layout_bindings[i].descriptorCount = 1;
@@ -1632,7 +1632,7 @@ void R_CreateDescriptorSetLayouts ()
 		memset (&vulkan_globals.emissive_compute_set_layout, 0, sizeof (vulkan_globals.emissive_compute_set_layout));
 		vulkan_globals.emissive_compute_set_layout.num_storage_images = 1;
 		vulkan_globals.emissive_compute_set_layout.num_sampled_images = 2;
-		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 9;
+		vulkan_globals.emissive_compute_set_layout.num_storage_buffers = 8;
 
 		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_compute_set_layout.handle);
 		if (err != VK_SUCCESS)
@@ -4711,9 +4711,6 @@ void R_Init (void)
 
 	Cmd_AddCommand ("vkmemstats", R_VulkanMemStats_f);
 	Cmd_AddCommand ("r_emissive_rt_stats", R_EmissiveRTStats_f);
-	Cmd_AddCommand ("r_emissive_rt_probe_dump", R_EmissiveBandlimitProbeDump_f);
-	Cmd_AddCommand ("r_emissive_rt_probe_screen", R_EmissiveBandlimitProbeScreen_f);
-
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_lightmap);
 	Cvar_RegisterVariable (&r_drawentities);

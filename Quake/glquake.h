@@ -884,8 +884,6 @@ void R_EmissiveRTNewMap (void);
 void		  R_EmissiveRTPrepareNewMap (void);
 void R_EmissiveRTChanged_f (cvar_t *var);
 void R_EmissiveRTStats_f (void);
-void R_EmissiveBandlimitProbeDump_f (void);
-void R_EmissiveBandlimitProbeScreen_f (void);
 void R_BuildTopLevelAccelerationStructure (void *unused);
 void R_UpdateAnimatedBLASes (cb_context_t *cbx);
 void R_UpdateEmissiveLightmapsOnly (void);
