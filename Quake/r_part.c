@@ -49,7 +49,14 @@ static float texturescalefactor; // johnfitz -- compensate for apparent size of 
 cvar_t		  r_particles = {"r_particles", "1", CVAR_ARCHIVE};			// johnfitz
 static cvar_t r_quadparticles = {"r_quadparticles", "1", CVAR_ARCHIVE}; // johnfitz
 
-extern cvar_t r_showtris;
+extern cvar_t r_showtris, r_emissive_rt, r_emissive_rt_particle_receivers, gl_fullbrights;
+
+#define EMISSIVE_PARTICLE_RECEIVER_BUDGET 256
+
+static qboolean R_EmissiveParticleReceiversActive (void)
+{
+	return r_emissive_rt_particle_receivers.value > 0.0f && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f;
+}
 
 static VkBuffer particle_index_buffer;
 
@@ -944,14 +951,24 @@ static void R_DrawParticlesFaces (cb_context_t *cbx)
 	VkBuffer	   vertex_buffer;
 	VkDeviceSize   vertex_buffer_offset;
 	basicvertex_t *vertices;
+	const qboolean emissive_receivers = R_EmissiveParticleReceiversActive ();
+	const int vertices_per_particle = r_quadparticles.value ? 4 : 3;
+	VkBuffer emissive_vertex_buffer = VK_NULL_HANDLE;
+	VkDeviceSize emissive_vertex_buffer_offset = 0;
+	vec3_t *emissive_vertices = emissive_receivers
+		? (vec3_t *)R_VertexAllocate (
+			  num_particles * vertices_per_particle * sizeof (vec3_t), &emissive_vertex_buffer, &emissive_vertex_buffer_offset)
+		: NULL;
 	if (r_quadparticles.value)
 		vertices = (basicvertex_t *)R_VertexAllocate (num_particles * 4 * sizeof (basicvertex_t), &vertex_buffer, &vertex_buffer_offset);
 	else
 		vertices = (basicvertex_t *)R_VertexAllocate (num_particles * 3 * sizeof (basicvertex_t), &vertex_buffer, &vertex_buffer_offset);
 
 	int current_vertex = 0;
+	int particle_index = 0;
 	for (p = active_particles; p; p = p->next)
 	{
+		const int first_vertex = current_vertex;
 		// hack a scale up to keep particles from disapearing
 		scale = (p->org[0] - r_origin[0]) * vpn[0] + (p->org[1] - r_origin[1]) * vpn[1] + (p->org[2] - r_origin[2]) * vpn[2];
 		if (scale < 20)
@@ -1012,9 +1029,26 @@ static void R_DrawParticlesFaces (cb_context_t *cbx)
 		vertices[current_vertex].color[2] = c[2];
 		vertices[current_vertex].color[3] = 255;
 		current_vertex++;
+
+		if (emissive_vertices)
+		{
+			vec3_t emissive_add = {0.0f, 0.0f, 0.0f};
+			if (particle_index < EMISSIVE_PARTICLE_RECEIVER_BUDGET)
+				R_EmissiveApproximatePointLight (p->org, vpn, 4, emissive_add);
+			for (int vertex = first_vertex; vertex < current_vertex; ++vertex)
+				VectorCopy (emissive_add, emissive_vertices[vertex]);
+		}
+		++particle_index;
 	}
 
-	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &vertex_buffer, &vertex_buffer_offset);
+	if (emissive_vertices)
+	{
+		const VkBuffer buffers[2] = {vertex_buffer, emissive_vertex_buffer};
+		const VkDeviceSize offsets[2] = {vertex_buffer_offset, emissive_vertex_buffer_offset};
+		vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 2, buffers, offsets);
+	}
+	else
+		vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &vertex_buffer, &vertex_buffer_offset);
 	if (r_quadparticles.value)
 	{
 		vulkan_globals.vk_cmd_bind_index_buffer (cbx->cb, particle_index_buffer, 0, VK_INDEX_TYPE_UINT16);
@@ -1032,11 +1066,13 @@ R_DrawParticles -- johnfitz -- moved all non-drawing code to CL_RunParticles
 void R_DrawParticles (cb_context_t *cbx)
 {
 	R_BeginDebugUtilsLabel (cbx, "Particles");
-	R_BindPipeline (
-		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
+	const qboolean emissive_receivers = R_EmissiveParticleReceiversActive ();
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
 		R_PipelineForRenderPass (
-			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
-			vulkan_globals.particle_mboit_composite_pipeline));
+			cbx->render_pass_index, emissive_receivers ? vulkan_globals.particle_emissive_pipeline : vulkan_globals.particle_pipeline,
+			emissive_receivers ? vulkan_globals.particle_emissive_oit_pipeline : vulkan_globals.particle_oit_pipeline,
+			emissive_receivers ? vulkan_globals.particle_emissive_mboit_moment_pipeline : vulkan_globals.particle_mboit_moment_pipeline,
+			emissive_receivers ? vulkan_globals.particle_emissive_mboit_composite_pipeline : vulkan_globals.particle_mboit_composite_pipeline));
 	vulkan_globals.vk_cmd_bind_descriptor_sets (
 		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &particletexture->descriptor_set, 0, NULL);
 

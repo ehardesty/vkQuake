@@ -7,6 +7,8 @@ vec4 BasicFragmentColor ()
 #endif
 #if EMISSIVE_ADD
 	frag_color.rgb += frag_color.rgb * max (push_constants.emissive_add.rgb, vec3 (0.0f));
+#elif EMISSIVE_VERTEX
+	frag_color.rgb += frag_color.rgb * max (in_emissive, vec3 (0.0f));
 #endif
 
 	float fog = exp (-push_constants.fog_density * push_constants.fog_density * in_fog_frag_coord * in_fog_frag_coord);

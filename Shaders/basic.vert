@@ -13,10 +13,16 @@ push_constants;
 layout (location = 0) in vec3 in_position;
 layout (location = 1) in vec2 in_texcoord;
 layout (location = 2) in vec4 in_color;
+#if EMISSIVE_VERTEX
+layout (location = 3) in vec3 in_emissive;
+#endif
 
 layout (location = 0) out vec4 out_texcoord;
 layout (location = 1) out vec4 out_color;
 layout (location = 2) out float out_fog_frag_coord;
+#if EMISSIVE_VERTEX
+layout (location = 3) out vec3 out_emissive;
+#endif
 
 out gl_PerVertex
 {
@@ -29,4 +35,7 @@ void main ()
 	out_texcoord = vec4 (in_texcoord.xy, 0.0f, 0.0f);
 	out_color = in_color;
 	out_fog_frag_coord = gl_Position.w;
+#if EMISSIVE_VERTEX
+	out_emissive = in_emissive;
+#endif
 }

@@ -416,10 +416,14 @@ typedef struct
 	vulkan_pipeline_layout_t world_pipeline_layout;
 	vulkan_pipeline_t		 raster_tex_warp_pipeline;
 	vulkan_pipeline_t		 particle_pipeline;
+	vulkan_pipeline_t		 particle_emissive_pipeline;
 	vulkan_pipeline_t		 particle_oit_pipeline;
+	vulkan_pipeline_t		 particle_emissive_oit_pipeline;
 	vulkan_pipeline_t		 particle_post_oit_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 particle_mboit_moment_pipeline;
+	vulkan_pipeline_t		 particle_emissive_mboit_moment_pipeline;
 	vulkan_pipeline_t		 particle_mboit_composite_pipeline;
+	vulkan_pipeline_t		 particle_emissive_mboit_composite_pipeline;
 	vulkan_pipeline_t		 sprite_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 sprite_emissive_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 sprite_oit_pipeline;

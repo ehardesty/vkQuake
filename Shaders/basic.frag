@@ -23,6 +23,9 @@ layout (set = 0, binding = 0) uniform sampler2D tex;
 layout (location = 0) in vec4 in_texcoord;
 layout (location = 1) in vec4 in_color;
 layout (location = 2) in float in_fog_frag_coord;
+#if EMISSIVE_VERTEX
+layout (location = 3) in vec3 in_emissive;
+#endif
 
 #include "basic_common.inc"
 

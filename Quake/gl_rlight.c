@@ -41,6 +41,7 @@ cvar_t r_emissive_rt_occluders = {"r_emissive_rt_occluders", "0", CVAR_NONE};
 cvar_t r_emissive_rt_external_bsp = {"r_emissive_rt_external_bsp", "0", CVAR_NONE};
 cvar_t r_emissive_rt_translucent_receivers = {"r_emissive_rt_translucent_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_sprite_receivers = {"r_emissive_rt_sprite_receivers", "0", CVAR_NONE};
+cvar_t r_emissive_rt_particle_receivers = {"r_emissive_rt_particle_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
@@ -1525,14 +1526,14 @@ void R_EmissiveRTStats_f (void)
 	Con_Printf (
 		"RT emissive generalized receivers: alias light limit %d/%d, %d record%s/%d active/%d ready, %u cache build%s, %u no-ray selection%s, "
 		"%u source evaluation%s, %u selected contributor%s, %u bounded world/brush-shadow test%s, %u rejection%s; surface occluder tier %d; "
-		"sprite receivers %s; liquids/particles remain separate self-emission-only classes\n",
+		"sprite receivers %s, classic particle receivers %s; liquids/scripted particles remain separate self-emission-only classes\n",
 		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS, clustered_alias_records,
 		clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,
 		clustered_alias_builds == 1 ? "" : "s", clustered_alias_receivers, clustered_alias_receivers == 1 ? "" : "s", clustered_alias_source_evaluations,
 		clustered_alias_source_evaluations == 1 ? "" : "s", clustered_alias_contributors, clustered_alias_contributors == 1 ? "" : "s",
 		clustered_alias_shadow_tests, clustered_alias_shadow_tests == 1 ? "" : "s", clustered_alias_shadow_rejections,
 		clustered_alias_shadow_rejections == 1 ? "" : "s", CLAMP (0, (int)r_emissive_rt_occluders.value, 2),
-		r_emissive_rt_sprite_receivers.value > 0.0f ? "on" : "off");
+		r_emissive_rt_sprite_receivers.value > 0.0f ? "on" : "off", r_emissive_rt_particle_receivers.value > 0.0f ? "on" : "off");
 	Con_Printf (
 		"RT emissive detail: requested %dx/active %dx, %d dense lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
 		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64 " tile CPU bytes, %" PRIu64
