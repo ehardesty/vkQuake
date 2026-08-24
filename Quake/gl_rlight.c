@@ -42,6 +42,7 @@ cvar_t r_emissive_rt_external_bsp = {"r_emissive_rt_external_bsp", "0", CVAR_NON
 cvar_t r_emissive_rt_translucent_receivers = {"r_emissive_rt_translucent_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_sprite_receivers = {"r_emissive_rt_sprite_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_particle_receivers = {"r_emissive_rt_particle_receivers", "0", CVAR_NONE};
+cvar_t r_emissive_rt_model_emitters = {"r_emissive_rt_model_emitters", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
@@ -215,6 +216,8 @@ static int							num_emissive_entity_candidates_unmatched;
 static int							num_emissive_entity_fallback_sources;
 static int							num_emissive_entity_ambiguous_fallbacks;
 static int							num_emissive_entity_rejected_sources;
+static int							num_emissive_generalized_model_sources;
+static int							num_emissive_generalized_model_rejections;
 static uint32_t						emissive_entity_lump_hash;
 static uint32_t						emissive_entity_discovery_time_us;
 static qboolean						emissive_entity_sources_matched;
@@ -471,6 +474,8 @@ static qboolean R_NormalizeEmissiveColor (vec3_t color)
 	return true;
 }
 
+static void R_TransformEmissivePoint (const float matrix[16], const vec3_t point, vec3_t transformed);
+
 static void R_BuildEmissiveEntitySourceLight (emissive_entity_source_t *source, const entity_t *entity, const emissive_entity_candidate_t *candidate)
 {
 	const emissive_entity_fixture_def_t *const definition = source->definition;
@@ -478,8 +483,71 @@ static void R_BuildEmissiveEntitySourceLight (emissive_entity_source_t *source, 
 	source->light.radius = definition->radius;
 	VectorCopy (candidate && candidate->has_color ? candidate->color : definition->color, source->light.color);
 	const float authored_scale = candidate && candidate->has_light ? candidate->authored_light / 300.0f : 1.0f;
-	source->light.intensity =
-		R_NormalizeEmissiveColor (source->light.color) ? definition->intensity * q_max (0.0f, authored_scale) : 0.0f;
+	source->light.intensity = R_NormalizeEmissiveColor (source->light.color) ? definition->intensity * q_max (0.0f, authored_scale) : 0.0f;
+}
+
+#define EMISSIVE_GENERALIZED_MODEL_MAX_SOURCES 64
+
+/*
+==================
+R_BuildGeneralizedModelEmitter
+
+Reduces the active fullbright skin across all alias/MD5 surfaces to one stable
+entity proxy. This is deliberately a source adapter, not animated triangle
+transport: pose changes do not rebuild an AS and curated fixture definitions
+continue to own any model they recognize.
+==================
+*/
+static qboolean R_BuildGeneralizedModelEmitter (const entity_t *entity, emissive_light_t *light)
+{
+	const int light_effects = EF_MUZZLEFLASH | EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_QEX_QUADLIGHT | EF_QEX_PENTALIGHT;
+	if (!entity || !entity->model || entity->model->needload || entity->model->type != mod_alias || (entity->effects & light_effects) ||
+		(entity->alpha != ENTALPHA_DEFAULT && ENTALPHA_DECODE (entity->alpha) < 1.0f))
+		return false;
+
+	aliashdr_t *const first_header = (aliashdr_t *)Mod_Extradata_CheckSkin (entity->model, entity->skinnum);
+	const int		  anim = (int)(cl.time * 10) & 3;
+	vec3_t			  weighted_color = {0.0f, 0.0f, 0.0f};
+	float			  luminous_weight = 0.0f;
+	float			  total_weight = 0.0f;
+	for (aliashdr_t *header = first_header; header; header = header->nextsurface)
+	{
+		if (header->numskins <= 0)
+			continue;
+		const int	skin = CLAMP (0, entity->skinnum, header->numskins - 1);
+		const float surface_weight = (float)q_max (header->numtris, 1);
+		total_weight += surface_weight;
+		const gltexture_t *const fullbright = header->fbtextures[skin][anim];
+		if (!fullbright || fullbright->fullbright_coverage <= 0.0f)
+			continue;
+		const float weight = surface_weight * fullbright->fullbright_coverage;
+		VectorMA (weighted_color, weight, fullbright->fullbright_color, weighted_color);
+		luminous_weight += weight;
+	}
+	if (luminous_weight <= 0.0f || total_weight <= 0.0f)
+		return false;
+
+	VectorScale (weighted_color, 1.0f / luminous_weight, light->color);
+	if (!R_NormalizeEmissiveColor (light->color))
+		return false;
+
+	vec3_t local_center;
+	VectorAdd (entity->model->mins, entity->model->maxs, local_center);
+	VectorScale (local_center, 0.5f, local_center);
+	float  matrix[16];
+	vec3_t origin, angles;
+	VectorCopy (entity->origin, origin);
+	VectorCopy (entity->angles, angles);
+	IdentityMatrix (matrix);
+	R_RotateForEntity (matrix, origin, angles, entity->netstate.scale);
+	R_TransformEmissivePoint (matrix, local_center, light->origin);
+
+	vec3_t size;
+	VectorSubtract (entity->model->maxs, entity->model->mins, size);
+	const float half_diagonal = 0.5f * VectorLength (size) * ENTSCALE_DECODE (entity->netstate.scale);
+	light->radius = CLAMP (64.0f, half_diagonal * 6.0f, 384.0f);
+	light->intensity = 2.0f * sqrtf (CLAMP (0.0f, luminous_weight / total_weight, 1.0f));
+	return light->intensity > 0.0f;
 }
 
 static qboolean R_EmissiveEntityCandidateLocationMatchesVisual (const emissive_entity_candidate_t *candidate, const entity_t *entity)
@@ -860,6 +928,8 @@ void R_UpdateTransientEmissiveSources (void)
 	emissive_light_t *lights = NULL;
 	int				 count = 0;
 	int				 capacity = 0;
+	num_emissive_generalized_model_sources = 0;
+	num_emissive_generalized_model_rejections = 0;
 
 	if (cl.worldmodel)
 	{
@@ -908,6 +978,26 @@ void R_UpdateTransientEmissiveSources (void)
 			R_BuildEmissiveEntitySourceLight (&source, entity, NULL);
 			if (source.light.intensity > 0.0f)
 				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &source.light);
+		}
+
+		if (r_emissive_rt_model_emitters.value >= 1.0f)
+		{
+			for (int source_index = 0; source_index < cl.num_statics + cl.num_entities - 1; ++source_index)
+			{
+				entity_t *const entity = source_index < cl.num_statics ? cl.static_entities[source_index] : &cl.entities[source_index - cl.num_statics + 1];
+				if (R_EmissiveEntityFallbackDef (entity, NULL))
+					continue;
+				emissive_light_t light;
+				if (!R_BuildGeneralizedModelEmitter (entity, &light))
+					continue;
+				if (num_emissive_generalized_model_sources >= EMISSIVE_GENERALIZED_MODEL_MAX_SOURCES)
+				{
+					++num_emissive_generalized_model_rejections;
+					continue;
+				}
+				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
+				++num_emissive_generalized_model_sources;
+			}
 		}
 	}
 	R_SetTransientEmissiveLights (lights, count);
@@ -1524,11 +1614,13 @@ void R_EmissiveRTStats_f (void)
 		"RT emissive brush receiver policy: inline BSP on, external BSP %s, translucent BSP %s\n",
 		r_emissive_rt_external_bsp.value > 0.0f ? "on" : "off", r_emissive_rt_translucent_receivers.value > 0.0f ? "on" : "off");
 	Con_Printf (
-		"RT emissive generalized receivers: alias light limit %d/%d, %d record%s/%d active/%d ready, %u cache build%s, %u no-ray selection%s, "
+		"RT emissive generalized receivers: alias light limit %d/%d, model emitters tier %d (%d active/%d budget rejected), %d record%s/%d active/%d ready, %u "
+		"cache build%s, %u no-ray selection%s, "
 		"%u source evaluation%s, %u selected contributor%s, %u bounded world/brush-shadow test%s, %u rejection%s; surface occluder tier %d; "
 		"sprite receivers %s, classic particle receivers %s; liquids/scripted particles remain separate self-emission-only classes\n",
-		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS, clustered_alias_records,
-		clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,
+		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS,
+		CLAMP (0, (int)r_emissive_rt_model_emitters.value, 1), num_emissive_generalized_model_sources, num_emissive_generalized_model_rejections,
+		clustered_alias_records, clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,
 		clustered_alias_builds == 1 ? "" : "s", clustered_alias_receivers, clustered_alias_receivers == 1 ? "" : "s", clustered_alias_source_evaluations,
 		clustered_alias_source_evaluations == 1 ? "" : "s", clustered_alias_contributors, clustered_alias_contributors == 1 ? "" : "s",
 		clustered_alias_shadow_tests, clustered_alias_shadow_tests == 1 ? "" : "s", clustered_alias_shadow_rejections,
