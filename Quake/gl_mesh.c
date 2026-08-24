@@ -697,7 +697,7 @@ Handles MDL (PV_QUAKE1), MD3 (PV_QUAKE3), and MD5 (PV_MD5) models.
 */
 void R_AllocateEntityBLAS (entity_t *e)
 {
-	if (!vulkan_globals.ray_query || r_rtshadows.value <= 0)
+	if (!vulkan_globals.ray_query || !GL_AnimatedAccelerationStructureRequired ())
 		return;
 	if (!e->model || e->model->type != mod_alias)
 		return;

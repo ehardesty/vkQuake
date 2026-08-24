@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "gl_heap.h"
 
 extern cvar_t gl_fullbrights, r_drawflat, r_gpulightmapupdate, r_rtshadows;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 
 int gl_lightmap_format;
@@ -415,8 +415,9 @@ typedef struct emissive_brush_receiver_push_constants_s
 	uint32_t atlas_offset_x, atlas_offset_y, receiver_instance_id;
 	uint32_t source_count, radiance_only;
 	vec4_t	 transform[3];
+	uint32_t occluder_mask;
 } emissive_brush_receiver_push_constants_t;
-COMPILE_TIME_ASSERT (emissive_brush_receiver_push_constants_t, sizeof (emissive_brush_receiver_push_constants_t) == 80);
+COMPILE_TIME_ASSERT (emissive_brush_receiver_push_constants_t, sizeof (emissive_brush_receiver_push_constants_t) == 84);
 static emissive_brush_receiver_t *emissive_brush_receivers;
 static int						  emissive_brush_receiver_count, emissive_brush_receiver_capacity;
 static uint32_t					  emissive_brush_receiver_source_generation = 1;
@@ -606,6 +607,8 @@ static int						num_transient_emissive_total_tiles;
 static qmodel_t				   *transient_emissive_tile_surface_worldmodel;
 static void						R_EnsureTransientEmissiveResources (void);
 static qboolean					R_TransientEmissiveDetailAvailable (void);
+static VkAccelerationStructureKHR R_EmissiveDirectAccelerationStructure (void);
+static uint32_t					R_EmissiveOccluderMask (void);
 static void						R_EmissiveBounceSurfaceBounds (const msurface_t *surface, vec3_t mins, vec3_t maxs);
 static qboolean					R_SurfaceInEmissiveWorldAccelerationStructure (const msurface_t *surface);
 static void						R_DeleteEmissiveBounceResources (void);
@@ -4006,7 +4009,7 @@ void R_EmissiveDetailLightmapStats (
 	*budget_limited = emissive_detail_budget_limited;
 	*pending = emissive_detail_pending || emissive_detail_building;
 	*as_active = emissive_detail_building ||
-		(emissive_detail_pending && emissive_world_tlas != VK_NULL_HANDLE && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f);
+		(emissive_detail_pending && R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f);
 	*ready = emissive_detail_ready;
 }
 
@@ -4724,7 +4727,8 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 		receiver->model = model;
 	}
 	receiver->active = true;
-	if (receiver->ready && receiver->source_generation == emissive_brush_receiver_source_generation &&
+	if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) == 0 && receiver->ready &&
+		receiver->source_generation == emissive_brush_receiver_source_generation &&
 		!memcmp (receiver->origin, entity->origin, sizeof (receiver->origin)) && !memcmp (receiver->angles, entity->angles, sizeof (receiver->angles)) &&
 		receiver->scale == entity->netstate.scale)
 		return;
@@ -4779,14 +4783,22 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 		const qboolean				  transient = (candidate->source_index & 0x80000000u) != 0u;
 		const uint32_t				  source_index = candidate->source_index & 0x7FFFFFFFu;
 		const emissive_light_t *const source = transient ? &transient_emissive_lights[source_index] : &emissive_cacheable_lights[source_index];
-		trace_t						  trace;
 		vec3_t						  light_origin;
 		VectorCopy (source->origin, light_origin);
-		memset (&trace, 0, sizeof (trace));
-		trace.fraction = 1.0f;
 		Atomic_IncrementUInt32 (&emissive_clustered_alias_shadow_tests);
-		SV_RecursiveHullCheck (cl.worldmodel->hulls, center, light_origin, &trace, CONTENTMASK_ANYSOLID);
-		candidate->visible = !trace.allsolid && trace.fraction >= 0.999f;
+		if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0)
+		{
+			vec3_t impact, normal;
+			candidate->visible = CL_TraceLine (center, light_origin, impact, normal, NULL) >= 0.999f;
+		}
+		else
+		{
+			trace_t trace;
+			memset (&trace, 0, sizeof (trace));
+			trace.fraction = 1.0f;
+			SV_RecursiveHullCheck (cl.worldmodel->hulls, center, light_origin, &trace, CONTENTMASK_ANYSOLID);
+			candidate->visible = !trace.allsolid && trace.fraction >= 0.999f;
+		}
 		if (!candidate->visible)
 			Atomic_IncrementUInt32 (&emissive_clustered_alias_shadow_rejections);
 	}
@@ -4803,6 +4815,19 @@ void R_UpdateEmissiveBrushReceivers (void)
 	if (!cl.worldmodel || !vulkan_globals.ray_query || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f ||
 		(!num_emissive_lights && !num_transient_emissive_lights))
 		return;
+	const int occluder_tier = CLAMP (0, (int)r_emissive_rt_occluders.value, 2);
+	if (occluder_tier > 0)
+	{
+		if (!emissive_detail_building && num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ())
+			emissive_detail_pending = true;
+		if (num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ())
+			transient_emissive_detail_pending = true;
+		for (int i = 0; i < emissive_brush_receiver_count; ++i)
+		{
+			emissive_brush_receivers[i].dirty = true;
+			emissive_brush_receivers[i].radiance_only = false;
+		}
+	}
 	const qboolean alias_receivers_enabled = R_EmissiveAliasLightLimit () > 0;
 	for (int i = 1; i < cl.num_entities; ++i)
 	{
@@ -5002,10 +5027,11 @@ static VkDescriptorSet R_AllocateEmissiveBrushReceiverDescriptorSet (
 
 static void R_UpdateEmissiveBrushReceiverLightmaps (cb_context_t *cbx)
 {
+	VkAccelerationStructureKHR direct_tlas = R_EmissiveDirectAccelerationStructure ();
 	qboolean dirty = false;
 	for (int i = 0; i < emissive_brush_receiver_count; ++i)
 		dirty |= emissive_brush_receivers[i].active && emissive_brush_receivers[i].dirty;
-	if (!dirty || emissive_world_tlas == VK_NULL_HANDLE || vulkan_globals.emissive_brush_receiver_pipeline.handle == VK_NULL_HANDLE ||
+	if (!dirty || direct_tlas == VK_NULL_HANDLE || vulkan_globals.emissive_brush_receiver_pipeline.handle == VK_NULL_HANDLE ||
 		(!num_emissive_lights && !num_transient_emissive_lights))
 		return;
 
@@ -5017,7 +5043,7 @@ static void R_UpdateEmissiveBrushReceiverLightmaps (cb_context_t *cbx)
 	ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
 	tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 	tlas_info.accelerationStructureCount = 1;
-	tlas_info.pAccelerationStructures = &emissive_world_tlas;
+	tlas_info.pAccelerationStructures = &direct_tlas;
 	ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
 	tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	tlas_write.pNext = &tlas_info;
@@ -5068,6 +5094,7 @@ static void R_UpdateEmissiveBrushReceiverLightmaps (cb_context_t *cbx)
 				constants.source_count = receiver->source_count;
 				constants.radiance_only = receiver->radiance_only;
 				memcpy (constants.transform, receiver->transform, sizeof (constants.transform));
+				constants.occluder_mask = R_EmissiveOccluderMask ();
 				R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 				vkCmdDispatch (cbx->cb, (output->width + 7) / 8, (output->height + 7) / 8, 1);
 				Atomic_IncrementUInt32 (&emissive_brush_receiver_dispatches);
@@ -6643,6 +6670,20 @@ qboolean R_EmissiveBandlimitActive (void)
 	return emissive_bandlimit_active;
 }
 
+void R_EmissiveOccludersChanged_f (cvar_t *var)
+{
+	(void)var;
+	if (!cl.worldmodel)
+		return;
+	R_InvalidateEmissiveBrushReceiverSources ();
+	emissive_detail_pending = num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ();
+	emissive_detail_building = emissive_detail_ready = false;
+	transient_emissive_detail_pending = num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ();
+	transient_emissive_detail_ready = false;
+	if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0 && r_emissive_rt.value > 0.0f)
+		GL_RequestAccelerationStructure (RT_AS_CONSUMER_TRANSIENT_EMISSIVES);
+}
+
 static float R_EmissiveBandlimitDiagnosticFloat (uint32_t word)
 {
 	float value;
@@ -7002,12 +7043,13 @@ void R_EmissiveBandlimitProbeDump_f (void)
 
 static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 {
+	VkAccelerationStructureKHR direct_tlas = R_EmissiveDirectAccelerationStructure ();
 	qboolean *const pending = detail ? &emissive_detail_pending : &emissive_coarse_pending;
 	if (!detail && emissive_bounce_debug_pending && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f)
 		R_DispatchEmissiveBounceDebug (cbx);
 	if (!*pending || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
-	if (detail && emissive_world_tlas == VK_NULL_HANDLE)
+	if (detail && direct_tlas == VK_NULL_HANDLE)
 		return;
 
 	const qboolean bandlimited = detail && emissive_bandlimit_active;
@@ -7025,7 +7067,7 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 		ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
 		tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 		tlas_info.accelerationStructureCount = 1;
-		tlas_info.pAccelerationStructures = &emissive_world_tlas;
+		tlas_info.pAccelerationStructures = &direct_tlas;
 
 		ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
 		tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -7054,7 +7096,7 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	}
 	emissive_compute_push_constants_t push_constants = {
 		num_emissive_lights, 0, detail && !emissive_visibility_available ? EMISSIVE_PUBLICATION_NO_VISIBILITY : EMISSIVE_PUBLICATION_UPDATE,
-		detail ? R_EmissiveDetailScale () : 1};
+		detail ? R_EmissiveDetailScale () : 1, R_EmissiveOccluderMask ()};
 	if (!detail)
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (push_constants), &push_constants);
 
@@ -7166,7 +7208,7 @@ static void R_DispatchEmissiveRadianceTiles (cb_context_t *cbx, qboolean detail,
 			   : (overlay ? &vulkan_globals.emissive_radiance_overlay_pipeline : &vulkan_globals.emissive_radiance_pipeline);
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 	emissive_compute_push_constants_t push_constants = {
-		num_emissive_lights, 0, EMISSIVE_PUBLICATION_UPDATE, detail ? R_EmissiveDetailScale () : 1};
+		num_emissive_lights, 0, EMISSIVE_PUBLICATION_UPDATE, detail ? R_EmissiveDetailScale () : 1, R_EmissiveOccluderMask ()};
 	int								  logical_tile = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -7342,6 +7384,7 @@ static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean det
 
 static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail, qboolean invalidate)
 {
+	VkAccelerationStructureKHR direct_tlas = R_EmissiveDirectAccelerationStructure ();
 	const qboolean bandlimited = detail && emissive_bandlimit_active;
 	const vulkan_pipeline_t *const pipeline = detail
 		? (bandlimited ? &vulkan_globals.emissive_bandlimit_transient_pipeline : &vulkan_globals.emissive_transient_detail_pipeline)
@@ -7349,12 +7392,12 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 	if (detail)
 	{
-		if (emissive_world_tlas == VK_NULL_HANDLE)
+		if (direct_tlas == VK_NULL_HANDLE)
 			return;
 		ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
 		tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 		tlas_info.accelerationStructureCount = 1;
-		tlas_info.pAccelerationStructures = &emissive_world_tlas;
+		tlas_info.pAccelerationStructures = &direct_tlas;
 		ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
 		tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		tlas_write.pNext = &tlas_info;
@@ -7366,7 +7409,7 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 
 	emissive_compute_push_constants_t push_constants = {
 		num_transient_emissive_lights, 0, invalidate ? EMISSIVE_PUBLICATION_INVALIDATE : EMISSIVE_PUBLICATION_UPDATE,
-		detail ? R_EmissiveDetailScale () : 1};
+		detail ? R_EmissiveDetailScale () : 1, R_EmissiveOccluderMask ()};
 	int logical_tile = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -7456,7 +7499,7 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		}
 		transient_emissive_pending = false;
 	}
-	else if (transient_emissive_detail_pending && emissive_world_tlas != VK_NULL_HANDLE &&
+	else if (transient_emissive_detail_pending && R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE &&
 		(!num_emissive_lights || transient_emissive_detail_cache_copied))
 	{
 		R_DispatchTransientEmissiveTiles (cbx, true, false);
@@ -7804,7 +7847,7 @@ static void GL_BuildEmissiveWorldAccelerationStructure (void)
 	instance->transform.matrix[0][0] = 1.0f;
 	instance->transform.matrix[1][1] = 1.0f;
 	instance->transform.matrix[2][2] = 1.0f;
-	instance->mask = 0xFF;
+	instance->mask = 0x01;
 	instance->flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR | VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 	instance->accelerationStructureReference = emissive_world_blas_address;
 	R_StagingEndCopy ();
@@ -7823,7 +7866,7 @@ static void GL_BuildEmissiveWorldAccelerationStructure (void)
 		}
 		vkDestroyQueryPool (vulkan_globals.device, build_timestamp_query_pool, NULL);
 	}
-	if (r_rtshadows.value <= 0 || r_gpulightmapupdate.value <= 0)
+	if (!GL_LiveAccelerationStructureRequired ())
 		R_FreeASScratchBuffer ();
 	emissive_world_as_triangles = num_triangles;
 	if (emissive_world_as_build_time_valid)
@@ -7953,7 +7996,7 @@ static void GL_BuildBModelAccelerationStructures (void)
 {
 	VkResult err;
 
-	if (!vulkan_globals.ray_query || !r_rtshadows.value || !r_gpulightmapupdate.value || (bmodel_tlas != VK_NULL_HANDLE))
+	if (!vulkan_globals.ray_query || !GL_LiveAccelerationStructureRequired () || (bmodel_tlas != VK_NULL_HANDLE))
 		return;
 
 	// count all tris in all models
@@ -8204,6 +8247,8 @@ void GL_RequestAccelerationStructure (rt_as_consumer_t consumer)
 	case RT_AS_CONSUMER_CACHEABLE_EMISSIVES:
 	case RT_AS_CONSUMER_TRANSIENT_EMISSIVES:
 		GL_BuildEmissiveWorldAccelerationStructure ();
+		if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0)
+			GL_BuildBModelAccelerationStructures ();
 		break;
 	case RT_AS_CONSUMER_RT_SHADOWS:
 		GL_BuildBModelAccelerationStructures ();
@@ -8211,6 +8256,30 @@ void GL_RequestAccelerationStructure (rt_as_consumer_t consumer)
 	default:
 		Sys_Error ("GL_RequestAccelerationStructure: invalid consumer %d", (int)consumer);
 	}
+}
+
+qboolean GL_LiveAccelerationStructureRequired (void)
+{
+	return (r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f) ||
+		(r_emissive_rt.value > 0.0f && CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0);
+}
+
+qboolean GL_AnimatedAccelerationStructureRequired (void)
+{
+	return (r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f) ||
+		(r_emissive_rt.value > 0.0f && CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 1);
+}
+
+static VkAccelerationStructureKHR R_EmissiveDirectAccelerationStructure (void)
+{
+	if (r_emissive_rt.value > 0.0f && CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0 && live_as_instance_count > 0)
+		return bmodel_tlas;
+	return emissive_world_tlas;
+}
+
+static uint32_t R_EmissiveOccluderMask (void)
+{
+	return CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 1 ? 0x03u : 0x01u;
 }
 
 void GL_LiveAccelerationStructureStats (qboolean *ready, uint32_t *instance_count)
@@ -8333,7 +8402,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		instance->transform.matrix[2][2] = model_matrix[10];
 		instance->transform.matrix[2][3] = model_matrix[14];
 		instance->instanceCustomIndex = 0;
-		instance->mask = 0xFF;
+		instance->mask = is_alias ? 0x02 : 0x01;
 		instance->instanceShaderBindingTableRecordOffset = 0;
 		instance->flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR | VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instance->accelerationStructureReference = address;

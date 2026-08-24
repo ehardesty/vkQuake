@@ -12,6 +12,7 @@ layout (push_constant) uniform PushConsts
 	uint first_tile;
 	uint publication_mode;
 	uint coordinate_scale;
+	uint occluder_mask;
 }
 push_constants;
 
@@ -93,7 +94,7 @@ bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 lig
 
 	rayQueryEXT ray_query;
 	rayQueryInitializeEXT (
-		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 0.0f,
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, push_constants.occluder_mask, ray_origin, 0.0f,
 		ray_vector / ray_distance, ray_distance - 0.5f);
 	rayQueryProceedEXT (ray_query);
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -109,7 +110,7 @@ bool EmissiveBandlimitIsOccluded (const vec3 world_pos, const vec3 normal, const
 
 	rayQueryEXT ray_query;
 	rayQueryInitializeEXT (
-		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, push_constants.occluder_mask, ray_origin, 2.0f,
 		ray_vector / ray_distance, ray_distance - 0.5f);
 	rayQueryProceedEXT (ray_query);
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -125,7 +126,7 @@ uint EmissiveBandlimitOcclusionPrimitive (const vec3 world_pos, const vec3 norma
 
 	rayQueryEXT ray_query;
 	rayQueryInitializeEXT (
-		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, push_constants.occluder_mask, ray_origin, 2.0f,
 		ray_vector / ray_distance, ray_distance - 0.5f);
 	rayQueryProceedEXT (ray_query);
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT

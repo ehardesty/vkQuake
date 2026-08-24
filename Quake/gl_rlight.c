@@ -37,6 +37,7 @@ extern cvar_t gl_fullbrights;
 
 cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
 cvar_t r_emissive_rt_resolution = {"r_emissive_rt_resolution", "2", CVAR_NONE};
+cvar_t r_emissive_rt_occluders = {"r_emissive_rt_occluders", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
@@ -1517,14 +1518,14 @@ void R_EmissiveRTStats_f (void)
 		brush_receiver_budget_limited ? ", budget limited; coarse or inactive fallback" : "");
 	Con_Printf (
 		"RT emissive generalized receivers: alias light limit %d/%d, %d record%s/%d active/%d ready, %u cache build%s, %u no-ray selection%s, "
-		"%u source evaluation%s, %u selected contributor%s, %u bounded world-shadow test%s, %u rejection%s; alias occluders off; "
+		"%u source evaluation%s, %u selected contributor%s, %u bounded world/brush-shadow test%s, %u rejection%s; surface occluder tier %d; "
 		"liquids/sprites/particles remain separate self-emission-only classes\n",
 		CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS), EMISSIVE_CLUSTERED_LIGHTS, clustered_alias_records,
 		clustered_alias_records == 1 ? "" : "s", clustered_alias_active, clustered_alias_ready, clustered_alias_builds,
 		clustered_alias_builds == 1 ? "" : "s", clustered_alias_receivers, clustered_alias_receivers == 1 ? "" : "s", clustered_alias_source_evaluations,
 		clustered_alias_source_evaluations == 1 ? "" : "s", clustered_alias_contributors, clustered_alias_contributors == 1 ? "" : "s",
 		clustered_alias_shadow_tests, clustered_alias_shadow_tests == 1 ? "" : "s", clustered_alias_shadow_rejections,
-		clustered_alias_shadow_rejections == 1 ? "" : "s");
+		clustered_alias_shadow_rejections == 1 ? "" : "s", CLAMP (0, (int)r_emissive_rt_occluders.value, 2));
 	Con_Printf (
 		"RT emissive detail: requested %dx/active %dx, %d dense lightmap%s, %" PRIu64 " logical GPU bytes, %" PRIu64 " allocated GPU bytes, %" PRIu64
 		" byte budget, %d/%d affected 8x8 tile%s (%.1f%%), %d tile-source link%s (%.2f/tile), %" PRIu64 " tile CPU bytes, %" PRIu64
@@ -1554,9 +1555,9 @@ void R_EmissiveRTStats_f (void)
 			emissive_world_as_ready ? "ready" : "unavailable", emissive_world_as_triangles, emissive_world_as_triangles == 1 ? "" : "s",
 			emissive_world_as_bytes);
 	Con_Printf (
-		"RT AS consumers: cacheable emissives %s, transient emissives %s (immutable world %s), RT shadows %s (live scene %s, %u instance%s, last %.3f ms CPU / %s GPU)\n",
+		"RT AS consumers: cacheable emissives %s, transient emissives %s (occluder tier %d, immutable world %s), RT shadows %s (live scene %s, %u instance%s, last %.3f ms CPU / %s GPU)\n",
 		detail_as_active ? "active" : "inactive", transient_pending && transient_tiles && vulkan_globals.ray_query ? "active" : "inactive",
-		emissive_world_as_ready ? "resident" : "unavailable",
+		CLAMP (0, (int)r_emissive_rt_occluders.value, 2), emissive_world_as_ready ? "resident" : "unavailable",
 		(vulkan_globals.ray_query && r_rtshadows.value > 0.0f && r_gpulightmapupdate.value > 0.0f) ? "active" : "inactive",
 		live_as_ready ? "ready" : "unavailable", live_as_instances,
 		live_as_instances == 1 ? "" : "s", (double)rs_live_as_cputime_us / 1000.0, live_as_gpu_time);

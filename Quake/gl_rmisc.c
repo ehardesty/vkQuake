@@ -36,7 +36,7 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
@@ -2221,7 +2221,7 @@ void R_CreatePipelineLayouts ()
 		VkDescriptorSetLayout receiver_layouts[2] = {
 			vulkan_globals.emissive_brush_receiver_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
 		ZEROED_STRUCT (VkPushConstantRange, receiver_push_range);
-		receiver_push_range.size = 20 * sizeof (uint32_t);
+		receiver_push_range.size = 21 * sizeof (uint32_t);
 		receiver_push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, receiver_layout_info);
 		receiver_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -4750,6 +4750,8 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt, R_EmissiveRTChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_resolution);
 	Cvar_SetCallback (&r_emissive_rt_resolution, R_EmissiveResolutionChanged_f);
+	Cvar_RegisterVariable (&r_emissive_rt_occluders);
+	Cvar_SetCallback (&r_emissive_rt_occluders, R_EmissiveOccludersChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bandlimit);

@@ -1648,6 +1648,7 @@ void R_RenderView (
 		Task_AddDependency (build_tlas_task, draw_done_task);
 
 		task_handle_t update_lightmaps_task = Task_AllocateAndAssignFunc (R_UpdateLightmapsAndIndirect, NULL, 0);
+		Task_AddDependency (build_tlas_task, update_lightmaps_task);
 		Task_AddDependency (cull_surfaces, update_lightmaps_task);
 		Task_AddDependency (draw_entities_task, update_lightmaps_task);
 		Task_AddDependency (draw_alpha_entities_task, update_lightmaps_task);

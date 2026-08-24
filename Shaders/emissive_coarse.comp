@@ -11,6 +11,7 @@ layout (push_constant) uniform PushConsts
 	uint first_tile;
 	uint publication_mode;
 	uint coordinate_scale;
+	uint occluder_mask;
 }
 push_constants;
 

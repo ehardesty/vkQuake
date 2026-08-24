@@ -16,6 +16,7 @@ layout (push_constant) uniform PushConsts
 	uint source_count;
 	uint radiance_only;
 	vec4 transform[3];
+	uint occluder_mask;
 }
 push_constants;
 
@@ -50,7 +51,7 @@ bool EmissiveBrushReceiverOccluded (const vec3 world_pos, const vec3 normal, con
 
 	rayQueryEXT ray_query;
 	rayQueryInitializeEXT (
-		ray_query, world_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, ray_origin, 2.0f,
+		ray_query, world_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT, push_constants.occluder_mask, ray_origin, 2.0f,
 		ray_vector / ray_distance, ray_distance - 0.5f);
 	while (rayQueryProceedEXT (ray_query)) {}
 	return rayQueryGetIntersectionTypeEXT (ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;

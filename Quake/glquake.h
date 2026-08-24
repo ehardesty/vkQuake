@@ -784,8 +784,9 @@ typedef struct emissive_compute_push_constants_s
 	uint32_t first_tile;
 	uint32_t publication_mode;
 	uint32_t coordinate_scale;
+	uint32_t occluder_mask;
 } emissive_compute_push_constants_t;
-COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 16);
+COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 20);
 
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
@@ -800,6 +801,7 @@ void R_EmissiveBounceCompleted (uint32_t build_time_us, uint32_t resolve_time_us
 void R_EmissiveBounceChanged_f (cvar_t *var);
 void R_EmissiveBandlimitChanged_f (cvar_t *var);
 void R_EmissiveResolutionChanged_f (cvar_t *var);
+void R_EmissiveOccludersChanged_f (cvar_t *var);
 void R_EmissiveBounceDebugChanged_f (cvar_t *var);
 qboolean R_EmissiveBounceDebugReady (void);
 void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltexture_t **detail);
@@ -969,6 +971,8 @@ typedef enum
 } rt_as_consumer_t;
 
 void GL_RequestAccelerationStructure (rt_as_consumer_t consumer);
+qboolean GL_LiveAccelerationStructureRequired (void);
+qboolean GL_AnimatedAccelerationStructureRequired (void);
 void GL_EmissiveWorldAccelerationStructureStats (
 	uint64_t *bytes, uint32_t *triangle_count, uint32_t *build_time_us, qboolean *build_time_valid, qboolean *ready);
 void GL_LiveAccelerationStructureStats (qboolean *ready, uint32_t *instance_count);
