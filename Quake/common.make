@@ -173,6 +173,11 @@ SHADER_OBJS = \
 	basic_mboit_moment_frag.o \
 	basic_mboit_composite_frag.o \
 	basic_mboit_composite_msaa_frag.o \
+	basic_emissive_alphatest_frag.o \
+	basic_emissive_oit_frag.o \
+	basic_emissive_mboit_moment_frag.o \
+	basic_emissive_mboit_composite_frag.o \
+	basic_emissive_mboit_composite_msaa_frag.o \
 	basic_notex_frag.o \
 	basic_vert.o \
 	sky_layer_frag.o \
@@ -336,6 +341,11 @@ $(eval $(call SHADER_VARIANT,basic_oit_frag,basic.frag,-DWBOIT=1))
 $(eval $(call SHADER_VARIANT,basic_mboit_moment_frag,basic.frag,-DMBOIT=1))
 $(eval $(call SHADER_VARIANT,basic_mboit_composite_frag,basic.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1))
 $(eval $(call SHADER_VARIANT,basic_mboit_composite_msaa_frag,basic.frag,-DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
+$(eval $(call SHADER_VARIANT,basic_emissive_alphatest_frag,basic.frag,-DEMISSIVE_ADD=1 -DALPHA_TEST=1))
+$(eval $(call SHADER_VARIANT,basic_emissive_oit_frag,basic.frag,-DEMISSIVE_ADD=1 -DWBOIT=1))
+$(eval $(call SHADER_VARIANT,basic_emissive_mboit_moment_frag,basic.frag,-DEMISSIVE_ADD=1 -DMBOIT=1))
+$(eval $(call SHADER_VARIANT,basic_emissive_mboit_composite_frag,basic.frag,-DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
+$(eval $(call SHADER_VARIANT,basic_emissive_mboit_composite_msaa_frag,basic.frag,-DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
 $(eval $(call SHADER_VARIANT,world_oit_frag,world.frag,-DWBOIT=1))
 $(eval $(call SHADER_VARIANT,world_emissive_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1))
 $(eval $(call SHADER_VARIANT,world_emissive_bandlimit_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1 -DEMISSIVE_BANDLIMIT=1))

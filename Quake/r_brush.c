@@ -4961,6 +4961,55 @@ int R_EmissiveClusteredAliasLights (const entity_t *entity, emissive_clustered_l
 	return num_selected;
 }
 
+qboolean R_EmissiveApproximatePointLight (const vec3_t origin, const vec3_t normal, int source_budget, vec3_t color)
+{
+	color[0] = color[1] = color[2] = 0.0f;
+	if (!cl.worldmodel || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || r_fullbright_cheatsafe || r_lightmap_cheatsafe)
+		return false;
+	const int total_lights = num_emissive_lights + num_transient_emissive_lights;
+	const int evaluated_lights = q_min (total_lights, q_max (0, source_budget));
+	for (int light_index = 0; light_index < evaluated_lights; ++light_index)
+	{
+		const qboolean transient = light_index >= num_emissive_lights;
+		const int source_index = transient ? light_index - num_emissive_lights : light_index;
+		const emissive_light_t *const source = transient ? &transient_emissive_lights[source_index] : &emissive_cacheable_lights[source_index];
+		const float modulation = transient || !emissive_light_modulations ? 1.0f : emissive_light_modulations[source_index];
+		if (modulation <= 0.0f)
+			continue;
+		vec3_t light_vector;
+		VectorSubtract (source->origin, origin, light_vector);
+		const float distance = VectorLength (light_vector);
+		if (distance <= 0.001f || distance >= source->radius)
+			continue;
+		VectorScale (light_vector, 1.0f / distance, light_vector);
+		const float lambert = fabsf (DotProduct (normal, light_vector));
+		if (lambert <= 0.0f)
+			continue;
+		qboolean visible;
+		vec3_t trace_origin, trace_target;
+		VectorCopy (origin, trace_origin);
+		VectorCopy (source->origin, trace_target);
+		if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0)
+		{
+			vec3_t impact, impact_normal;
+			visible = CL_TraceLine (trace_origin, trace_target, impact, impact_normal, NULL) >= 0.999f;
+		}
+		else
+		{
+			trace_t trace;
+			memset (&trace, 0, sizeof (trace));
+			trace.fraction = 1.0f;
+			SV_RecursiveHullCheck (cl.worldmodel->hulls, trace_origin, trace_target, &trace, CONTENTMASK_ANYSOLID);
+			visible = !trace.allsolid && trace.fraction >= 0.999f;
+		}
+		if (!visible)
+			continue;
+		const float scale = modulation * source->intensity * (1.0f - distance / source->radius) * lambert;
+		VectorMA (color, scale, source->color, color);
+	}
+	return color[0] > 0.0f || color[1] > 0.0f || color[2] > 0.0f;
+}
+
 void R_EmissiveClusteredAliasStats (
 	int *records, int *active, int *ready, uint32_t *receivers, uint32_t *builds, uint32_t *source_evaluations, uint32_t *shadow_tests,
 	uint32_t *shadow_rejections, uint32_t *contributors)

@@ -421,9 +421,13 @@ typedef struct
 	vulkan_pipeline_t		 particle_mboit_moment_pipeline;
 	vulkan_pipeline_t		 particle_mboit_composite_pipeline;
 	vulkan_pipeline_t		 sprite_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
+	vulkan_pipeline_t		 sprite_emissive_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 sprite_oit_pipeline;
+	vulkan_pipeline_t		 sprite_emissive_oit_pipeline;
 	vulkan_pipeline_t		 sprite_mboit_moment_pipeline;
+	vulkan_pipeline_t		 sprite_emissive_mboit_moment_pipeline;
 	vulkan_pipeline_t		 sprite_mboit_composite_pipeline;
+	vulkan_pipeline_t		 sprite_emissive_mboit_composite_pipeline;
 	vulkan_pipeline_layout_t sky_pipeline_layout[2]; // one texture (cubemap-like), two textures (animated layers)
 	vulkan_pipeline_t		 sky_stencil_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT][2];
 	vulkan_pipeline_t		 sky_color_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT][2];
@@ -896,6 +900,7 @@ void R_EmissiveBrushReceiverStats (
 	int *records, int *active, int *ready, int *dirty, int *layers, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited,
 	uint32_t *updates, uint32_t *dispatches, uint32_t *no_ray_dispatches, uint32_t *transform_invalidations);
 int R_EmissiveClusteredAliasLights (const entity_t *entity, emissive_clustered_light_t lights[EMISSIVE_CLUSTERED_LIGHTS]);
+qboolean R_EmissiveApproximatePointLight (const vec3_t origin, const vec3_t normal, int source_budget, vec3_t color);
 void R_EmissiveClusteredAliasStats (
 	int *records, int *active, int *ready, uint32_t *receivers, uint32_t *builds, uint32_t *source_evaluations, uint32_t *shadow_tests,
 	uint32_t *shadow_rejections, uint32_t *contributors);

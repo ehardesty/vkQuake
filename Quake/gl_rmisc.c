@@ -36,7 +36,7 @@ extern cvar_t r_fastclear;
 extern cvar_t r_flatlightstyles;
 extern cvar_t r_lerplightstyles;
 extern cvar_t r_entdlightscale;
-extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_translucent_receivers, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
+extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, r_emissive_rt_external_bsp, r_emissive_rt_translucent_receivers, r_emissive_rt_sprite_receivers, r_emissive_rt_debug, r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength,
 	r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays, r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
@@ -2595,6 +2595,11 @@ DECLARE_SHADER_MODULE (basic_oit_frag);
 DECLARE_SHADER_MODULE (basic_mboit_moment_frag);
 DECLARE_SHADER_MODULE (basic_mboit_composite_frag);
 DECLARE_SHADER_MODULE (basic_mboit_composite_msaa_frag);
+DECLARE_SHADER_MODULE (basic_emissive_alphatest_frag);
+DECLARE_SHADER_MODULE (basic_emissive_oit_frag);
+DECLARE_SHADER_MODULE (basic_emissive_mboit_moment_frag);
+DECLARE_SHADER_MODULE (basic_emissive_mboit_composite_frag);
+DECLARE_SHADER_MODULE (basic_emissive_mboit_composite_msaa_frag);
 DECLARE_SHADER_MODULE (basic_alphatest_frag);
 DECLARE_SHADER_MODULE (basic_notex_frag);
 DECLARE_SHADER_MODULE (world_vert);
@@ -3400,6 +3405,10 @@ static void R_CreateSpritesPipelines ()
 		infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
 		R_CreateGraphicsPipeline (
 			&vulkan_globals.sprite_pipeline[variant], &infos, vulkan_globals.basic_pipeline_layout, variant ? "sprite_main_oit" : "sprite");
+		infos.shader_stages[1].module = basic_emissive_alphatest_frag_module;
+		R_CreateGraphicsPipeline (
+			&vulkan_globals.sprite_emissive_pipeline[variant], &infos, vulkan_globals.basic_pipeline_layout,
+			variant ? "sprite_emissive_main_oit" : "sprite_emissive");
 	}
 
 	R_CopyPipelineCreateInfos (&infos, &base);
@@ -3409,6 +3418,8 @@ static void R_CreateSpritesPipelines ()
 	infos.shader_stages[1].module = basic_oit_frag_module;
 	R_SetWBOITBlend (infos.blend_attachment_states);
 	R_CreateGraphicsPipeline (&vulkan_globals.sprite_oit_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_oit");
+	infos.shader_stages[1].module = basic_emissive_oit_frag_module;
+	R_CreateGraphicsPipeline (&vulkan_globals.sprite_emissive_oit_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_emissive_oit");
 
 	R_CopyPipelineCreateInfos (&infos, &base);
 	infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
@@ -3417,6 +3428,9 @@ static void R_CreateSpritesPipelines ()
 	infos.shader_stages[1].module = basic_mboit_moment_frag_module;
 	R_SetMBOITMomentBlend (infos.blend_attachment_states);
 	R_CreateGraphicsPipeline (&vulkan_globals.sprite_mboit_moment_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_mboit_moment");
+	infos.shader_stages[1].module = basic_emissive_mboit_moment_frag_module;
+	R_CreateGraphicsPipeline (
+		&vulkan_globals.sprite_emissive_mboit_moment_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_emissive_mboit_moment");
 
 	R_CopyPipelineCreateInfos (&infos, &base);
 	infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
@@ -3426,6 +3440,11 @@ static void R_CreateSpritesPipelines ()
 		(vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT) ? basic_mboit_composite_frag_module : basic_mboit_composite_msaa_frag_module;
 	R_SetMBOITCompositeBlend (infos.blend_attachment_states);
 	R_CreateGraphicsPipeline (&vulkan_globals.sprite_mboit_composite_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_mboit_composite");
+	infos.shader_stages[1].module = (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
+		? basic_emissive_mboit_composite_frag_module
+		: basic_emissive_mboit_composite_msaa_frag_module;
+	R_CreateGraphicsPipeline (
+		&vulkan_globals.sprite_emissive_mboit_composite_pipeline, &infos, vulkan_globals.basic_pipeline_layout, "sprite_emissive_mboit_composite");
 }
 
 /*
@@ -4241,6 +4260,11 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (basic_mboit_moment_frag);
 	CREATE_SHADER_MODULE (basic_mboit_composite_frag);
 	CREATE_SHADER_MODULE_COND (basic_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (basic_emissive_alphatest_frag);
+	CREATE_SHADER_MODULE (basic_emissive_oit_frag);
+	CREATE_SHADER_MODULE (basic_emissive_mboit_moment_frag);
+	CREATE_SHADER_MODULE (basic_emissive_mboit_composite_frag);
+	CREATE_SHADER_MODULE_COND (basic_emissive_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (basic_alphatest_frag);
 	CREATE_SHADER_MODULE (basic_notex_frag);
 	CREATE_SHADER_MODULE (world_vert);
@@ -4320,6 +4344,11 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (basic_mboit_moment_frag);
 	DESTROY_SHADER_MODULE (basic_mboit_composite_frag);
 	DESTROY_SHADER_MODULE (basic_mboit_composite_msaa_frag);
+	DESTROY_SHADER_MODULE (basic_emissive_alphatest_frag);
+	DESTROY_SHADER_MODULE (basic_emissive_oit_frag);
+	DESTROY_SHADER_MODULE (basic_emissive_mboit_moment_frag);
+	DESTROY_SHADER_MODULE (basic_emissive_mboit_composite_frag);
+	DESTROY_SHADER_MODULE (basic_emissive_mboit_composite_msaa_frag);
 	DESTROY_SHADER_MODULE (basic_alphatest_frag);
 	DESTROY_SHADER_MODULE (basic_notex_frag);
 	DESTROY_SHADER_MODULE (world_vert);
@@ -4507,13 +4536,21 @@ void R_DestroyPipelines (void)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_pipeline[variant].handle, NULL);
 		vulkan_globals.sprite_pipeline[variant].handle = VK_NULL_HANDLE;
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_emissive_pipeline[variant].handle, NULL);
+		vulkan_globals.sprite_emissive_pipeline[variant].handle = VK_NULL_HANDLE;
 	}
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_oit_pipeline.handle, NULL);
 	vulkan_globals.sprite_oit_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_emissive_oit_pipeline.handle, NULL);
+	vulkan_globals.sprite_emissive_oit_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_mboit_moment_pipeline.handle, NULL);
 	vulkan_globals.sprite_mboit_moment_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_emissive_mboit_moment_pipeline.handle, NULL);
+	vulkan_globals.sprite_emissive_mboit_moment_pipeline.handle = VK_NULL_HANDLE;
 	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_mboit_composite_pipeline.handle, NULL);
 	vulkan_globals.sprite_mboit_composite_pipeline.handle = VK_NULL_HANDLE;
+	vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sprite_emissive_mboit_composite_pipeline.handle, NULL);
+	vulkan_globals.sprite_emissive_mboit_composite_pipeline.handle = VK_NULL_HANDLE;
 
 	for (int variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
 	{
@@ -4751,6 +4788,7 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_occluders, R_EmissiveOccludersChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_external_bsp);
 	Cvar_RegisterVariable (&r_emissive_rt_translucent_receivers);
+	Cvar_RegisterVariable (&r_emissive_rt_sprite_receivers);
 	Cvar_RegisterVariable (&r_emissive_rt_debug);
 	Cvar_SetCallback (&r_emissive_rt_debug, R_EmissiveBounceDebugChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_bandlimit);

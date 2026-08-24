@@ -12,6 +12,9 @@ layout (push_constant) uniform PushConsts
 	mat4  mvp;
 	vec3  fog_color;
 	float fog_density;
+#if EMISSIVE_ADD
+	vec4 emissive_add;
+#endif
 }
 push_constants;
 

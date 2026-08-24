@@ -24,10 +24,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
-extern cvar_t r_showtris;
+extern cvar_t r_showtris, r_emissive_rt_sprite_receivers;
 
-static vulkan_pipeline_t R_SpritePipelineForRenderPass (cb_context_t *cbx)
+static vulkan_pipeline_t R_SpritePipelineForRenderPass (cb_context_t *cbx, qboolean emissive)
 {
+	if (emissive)
+		return R_PipelineForRenderPass (
+			cbx->render_pass_index, vulkan_globals.sprite_emissive_pipeline[R_MainPassPipelineVariant (cbx->render_pass_index)],
+			vulkan_globals.sprite_emissive_oit_pipeline, vulkan_globals.sprite_emissive_mboit_moment_pipeline,
+			vulkan_globals.sprite_emissive_mboit_composite_pipeline);
 	return R_PipelineForRenderPass (
 		cbx->render_pass_index, vulkan_globals.sprite_pipeline[R_MainPassPipelineVariant (cbx->render_pass_index)], vulkan_globals.sprite_oit_pipeline,
 		vulkan_globals.sprite_mboit_moment_pipeline, vulkan_globals.sprite_mboit_composite_pipeline);
@@ -102,7 +107,7 @@ static mspriteframe_t *R_GetSpriteFrame (entity_t *currentent)
 R_CreateSpriteVertices
 ================
 */
-static void R_CreateSpriteVertices (entity_t *e, mspriteframe_t *frame, basicvertex_t *vertices)
+static void R_CreateSpriteVertices (entity_t *e, mspriteframe_t *frame, basicvertex_t *vertices, vec3_t receiver_normal)
 {
 	vec3_t	   point, v_forward, v_right, v_up;
 	msprite_t *psprite;
@@ -111,6 +116,7 @@ static void R_CreateSpriteVertices (entity_t *e, mspriteframe_t *frame, basicver
 	float	   scale = ENTSCALE_DECODE (e->netstate.scale);
 
 	psprite = (msprite_t *)Mod_Extradata (e->model);
+	VectorCopy (vpn, receiver_normal);
 
 	switch (psprite->type)
 	{
@@ -142,6 +148,7 @@ static void R_CreateSpriteVertices (entity_t *e, mspriteframe_t *frame, basicver
 		break;
 	case SPR_ORIENTED: // pitch yaw roll are independent of camera
 		AngleVectors (e->angles, v_forward, v_right, v_up);
+		VectorCopy (v_forward, receiver_normal);
 		s_up = v_up;
 		s_right = v_right;
 		break;
@@ -209,13 +216,21 @@ void R_DrawSpriteModel (cb_context_t *cbx, entity_t *e)
 	basicvertex_t  *vertices = (basicvertex_t *)R_VertexAllocate (4 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 	msprite_t	   *psprite;
 	mspriteframe_t *frame = R_GetSpriteFrame (e);
+	vec3_t		   receiver_normal, emissive_add;
 
-	R_CreateSpriteVertices (e, frame, vertices);
+	R_CreateSpriteVertices (e, frame, vertices, receiver_normal);
+	const qboolean emissive = r_emissive_rt_sprite_receivers.value > 0.0f &&
+		R_EmissiveApproximatePointLight (e->origin, receiver_normal, 8, emissive_add);
 
 	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
 	vkCmdBindIndexBuffer (cbx->cb, vulkan_globals.fan_index_buffer, 0, VK_INDEX_TYPE_UINT16);
 
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, R_SpritePipelineForRenderPass (cbx));
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, R_SpritePipelineForRenderPass (cbx, emissive));
+	if (emissive)
+	{
+		const vec4_t emissive_constants = {emissive_add[0], emissive_add[1], emissive_add[2], 0.0f};
+		R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 20 * sizeof (float), sizeof (emissive_constants), emissive_constants);
+	}
 
 	psprite = (msprite_t *)Mod_Extradata (e->model);
 	if (psprite->type == SPR_ORIENTED)
@@ -240,12 +255,13 @@ void R_DrawSpriteModel_ShowTris (cb_context_t *cbx, entity_t *e)
 	basicvertex_t  *vertices = (basicvertex_t *)R_VertexAllocate (4 * sizeof (basicvertex_t), &buffer, &buffer_offset);
 	mspriteframe_t *frame = R_GetSpriteFrame (e);
 
-	R_CreateSpriteVertices (e, frame, vertices);
+	vec3_t receiver_normal;
+	R_CreateSpriteVertices (e, frame, vertices, receiver_normal);
 
 	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
 	vkCmdBindIndexBuffer (cbx->cb, vulkan_globals.fan_index_buffer, 0, VK_INDEX_TYPE_UINT16);
 
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, R_SpritePipelineForRenderPass (cbx));
+	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, R_SpritePipelineForRenderPass (cbx, false));
 
 	if (r_showtris.value == 1)
 		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.showtris_pipeline[R_MainPassPipelineVariant (cbx->render_pass_index)]);
