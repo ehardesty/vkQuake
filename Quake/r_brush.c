@@ -596,6 +596,10 @@ static int					 num_transient_emissive_tiles;
 static int					 num_transient_emissive_tile_sources;
 static qboolean				 transient_emissive_pending;
 static qboolean				 transient_emissive_detail_pending;
+/* Set by occluder movement: the last source-change footprint no longer covers
+ * every receiver whose visibility changed, so the update task rebuilds the
+ * worklist as the union of active influence before dispatching. */
+static qboolean				 transient_emissive_occluder_tiles_pending;
 static qboolean				 transient_emissive_detail_ready;
 /* Generation whose detail was completely recorded into this frame's update
  * command buffer. Lets draw recording select current-generation detail without
@@ -3483,6 +3487,140 @@ static void R_InvalidateTransientEmissiveDetail (void)
 		++transient_emissive_generation;
 }
 
+/* Shared tail for transient tile-list publication: turns a flat-tile worklist into
+ * the working tile array plus per-tile source lists for the current source set.
+ * The caller supplies source-change dirty tiles or, for occluder movement, the
+ * union of active influence; the flat list stays caller-owned, pairs are local. */
+static void R_FinalizeTransientEmissiveTiles (int *flat_tiles, int num_flat_tiles, const int *lightmap_offsets)
+{
+	msurface_t *const first_surface = &cl.worldmodel->surfaces[cl.worldmodel->firstmodelsurface];
+	SAFE_FREE (transient_emissive_tiles);
+	SAFE_FREE (transient_emissive_tile_sources);
+	num_transient_emissive_tiles = 0;
+	num_transient_emissive_tile_sources = 0;
+	if (num_flat_tiles > 1)
+		qsort (flat_tiles, num_flat_tiles, sizeof (*flat_tiles), R_CompareTransientEmissiveTiles);
+	num_transient_emissive_tiles = num_flat_tiles;
+	if (num_transient_emissive_tiles)
+		transient_emissive_tiles = Mem_Alloc (num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
+	int lightmap = 0;
+	for (int tile_index = 0; tile_index < num_flat_tiles; ++tile_index)
+	{
+		const int flat_tile = flat_tiles[tile_index];
+		while (lightmap + 1 < lightmap_count && flat_tile >= lightmap_offsets[lightmap + 1])
+			++lightmap;
+		const gltexture_t *const texture = lightmaps[lightmap].surface_indices_texture;
+		const int tiles_wide = (texture->width + 7) / 8;
+		const int local_tile = flat_tile - lightmap_offsets[lightmap];
+		transient_emissive_tiles[tile_index].first_source = 0;
+		transient_emissive_tiles[tile_index].num_sources = 0;
+		transient_emissive_tiles[tile_index].lightmap = lightmap;
+		transient_emissive_tiles[tile_index].x = local_tile % tiles_wide;
+		transient_emissive_tiles[tile_index].y = local_tile / tiles_wide;
+		transient_emissive_tile_indices[flat_tile] = tile_index;
+	}
+
+	emissive_tile_source_pair_t *pairs = NULL;
+	int num_pairs = 0;
+	int pair_capacity = 0;
+	for (int work_tile = 0; work_tile < num_flat_tiles; ++work_tile)
+	{
+		const int flat_tile = flat_tiles[work_tile];
+		const int tile = transient_emissive_tile_indices[flat_tile];
+		const emissive_logical_tile_t *const logical_tile = &transient_emissive_tiles[tile];
+		for (uint32_t surface_link = transient_emissive_tile_surface_offsets[flat_tile];
+			surface_link < transient_emissive_tile_surface_offsets[flat_tile + 1]; ++surface_link)
+		{
+			const msurface_t *const surface = &first_surface[transient_emissive_tile_surfaces[surface_link]];
+			for (int light_index = 0; light_index < num_transient_emissive_lights; ++light_index)
+				if (R_EmissiveLightInfluencesTile (surface, logical_tile->x, logical_tile->y, &transient_emissive_lights[light_index]))
+				{
+					if (num_pairs == pair_capacity)
+					{
+						pair_capacity = pair_capacity ? pair_capacity * 2 : 1024;
+						pairs = Mem_Realloc (pairs, pair_capacity * sizeof (*pairs));
+					}
+					pairs[num_pairs].tile = tile;
+					pairs[num_pairs].source = light_index;
+					++num_pairs;
+				}
+		}
+	}
+	if (num_pairs > 1)
+		qsort (pairs, num_pairs, sizeof (*pairs), R_CompareEmissiveTileSourcePairs);
+	for (int i = 0; i < num_pairs; ++i)
+		if (!num_transient_emissive_tile_sources || pairs[i].tile != pairs[num_transient_emissive_tile_sources - 1].tile ||
+			pairs[i].source != pairs[num_transient_emissive_tile_sources - 1].source)
+			pairs[num_transient_emissive_tile_sources++] = pairs[i];
+	if (num_transient_emissive_tile_sources)
+		transient_emissive_tile_sources = Mem_Alloc (num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
+	for (int i = 0; i < num_transient_emissive_tile_sources; ++i)
+	{
+		emissive_logical_tile_t *const tile = &transient_emissive_tiles[pairs[i].tile];
+		if (!tile->num_sources)
+			tile->first_source = i;
+		++tile->num_sources;
+		transient_emissive_tile_sources[i] = pairs[i].source;
+	}
+	Mem_Free (pairs);
+}
+
+/* Rebuilds the transient worklist as the union of active influence after an
+ * occluder move: the last source-change footprint no longer covers every
+ * receiver whose visibility changed. Runs in the update task, after the TLAS
+ * task detected the movement, so counts, capacities, and uploads stay ordered. */
+static void R_RebuildTransientEmissiveOccluderTiles (cb_context_t *cbx)
+{
+	int *flat_tiles = NULL;
+	int num_flat_tiles = 0;
+	int flat_capacity = 0;
+	for (int flat_tile = 0; flat_tile < num_transient_emissive_total_tiles; ++flat_tile)
+	{
+		qboolean influenced = false;
+		for (uint32_t surface_link = transient_emissive_tile_surface_offsets[flat_tile];
+			surface_link < transient_emissive_tile_surface_offsets[flat_tile + 1]; ++surface_link)
+			if (transient_emissive_surface_influence_counts[transient_emissive_tile_surfaces[surface_link]] > 0)
+			{
+				influenced = true;
+				break;
+			}
+		if (!influenced)
+			continue;
+		if (num_flat_tiles == flat_capacity)
+		{
+			flat_capacity = flat_capacity ? flat_capacity * 2 : 64;
+			flat_tiles = Mem_Realloc (flat_tiles, flat_capacity * sizeof (*flat_tiles));
+		}
+		flat_tiles[num_flat_tiles++] = flat_tile;
+	}
+	if (!num_flat_tiles)
+	{
+		/* No active influence left: withhold replacement work and let selection fall
+		 * back to direct-only output rather than publishing a vacuous generation. */
+		transient_emissive_detail_pending = false;
+		Mem_Free (flat_tiles);
+		return;
+	}
+	int *const lightmap_offsets = Mem_Alloc (lightmap_count * sizeof (*lightmap_offsets));
+	R_TransientEmissiveLightmapTileOffsets (lightmap_offsets);
+	R_FinalizeTransientEmissiveTiles (flat_tiles, num_flat_tiles, lightmap_offsets);
+	Mem_Free (flat_tiles);
+	Mem_Free (lightmap_offsets);
+	/* Union coverage can exceed the dirty-list capacities the last setter sized. */
+	R_EnsureTransientEmissiveResources ();
+	R_UpdateTransientEmissiveBuffer (
+		cbx->cb, transient_emissive_tiles_buffer, transient_emissive_tiles,
+		num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
+	if (num_transient_emissive_tile_sources)
+		R_UpdateTransientEmissiveBuffer (
+			cbx->cb, transient_emissive_tile_sources_buffer, transient_emissive_tile_sources,
+			num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
+	Con_DPrintf (
+		"RT emissives: occluder refresh rebuilt %d union tile%s with %d source link%s\n", num_transient_emissive_tiles,
+		num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
+		num_transient_emissive_tile_sources == 1 ? "" : "s");
+}
+
 void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, int count)
 {
 	const double start_time = Sys_DoubleTime ();
@@ -3598,74 +3736,7 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 		}
 	}
 
-	SAFE_FREE (transient_emissive_tiles);
-	SAFE_FREE (transient_emissive_tile_sources);
-	num_transient_emissive_tiles = 0;
-	num_transient_emissive_tile_sources = 0;
-	if (num_dirty_tiles > 1)
-		qsort (dirty_tiles, num_dirty_tiles, sizeof (*dirty_tiles), R_CompareTransientEmissiveTiles);
-	num_transient_emissive_tiles = num_dirty_tiles;
-	if (num_transient_emissive_tiles)
-		transient_emissive_tiles = Mem_Alloc (num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
-	int lightmap = 0;
-	for (int tile_index = 0; tile_index < num_dirty_tiles; ++tile_index)
-	{
-		const int flat_tile = dirty_tiles[tile_index];
-		while (lightmap + 1 < lightmap_count && flat_tile >= lightmap_offsets[lightmap + 1])
-			++lightmap;
-		const gltexture_t *const texture = lightmaps[lightmap].surface_indices_texture;
-		const int tiles_wide = (texture->width + 7) / 8;
-		const int local_tile = flat_tile - lightmap_offsets[lightmap];
-		transient_emissive_tiles[tile_index].first_source = 0;
-		transient_emissive_tiles[tile_index].num_sources = 0;
-		transient_emissive_tiles[tile_index].lightmap = lightmap;
-		transient_emissive_tiles[tile_index].x = local_tile % tiles_wide;
-		transient_emissive_tiles[tile_index].y = local_tile / tiles_wide;
-		transient_emissive_tile_indices[flat_tile] = tile_index;
-	}
-
-	emissive_tile_source_pair_t *pairs = NULL;
-	int num_pairs = 0;
-	int pair_capacity = 0;
-	for (int dirty_tile = 0; dirty_tile < num_dirty_tiles; ++dirty_tile)
-	{
-		const int flat_tile = dirty_tiles[dirty_tile];
-		const int tile = transient_emissive_tile_indices[flat_tile];
-		const emissive_logical_tile_t *const logical_tile = &transient_emissive_tiles[tile];
-		for (uint32_t surface_link = transient_emissive_tile_surface_offsets[flat_tile];
-			surface_link < transient_emissive_tile_surface_offsets[flat_tile + 1]; ++surface_link)
-		{
-			const msurface_t *const surface = &first_surface[transient_emissive_tile_surfaces[surface_link]];
-			for (int light_index = 0; light_index < count; ++light_index)
-				if (R_EmissiveLightInfluencesTile (surface, logical_tile->x, logical_tile->y, &transient_emissive_lights[light_index]))
-			{
-				if (num_pairs == pair_capacity)
-				{
-					pair_capacity = pair_capacity ? pair_capacity * 2 : 1024;
-					pairs = Mem_Realloc (pairs, pair_capacity * sizeof (*pairs));
-				}
-				pairs[num_pairs].tile = tile;
-				pairs[num_pairs].source = light_index;
-				++num_pairs;
-			}
-		}
-	}
-	if (num_pairs > 1)
-		qsort (pairs, num_pairs, sizeof (*pairs), R_CompareEmissiveTileSourcePairs);
-	for (int i = 0; i < num_pairs; ++i)
-		if (!num_transient_emissive_tile_sources || pairs[i].tile != pairs[num_transient_emissive_tile_sources - 1].tile ||
-			pairs[i].source != pairs[num_transient_emissive_tile_sources - 1].source)
-			pairs[num_transient_emissive_tile_sources++] = pairs[i];
-	if (num_transient_emissive_tile_sources)
-		transient_emissive_tile_sources = Mem_Alloc (num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
-	for (int i = 0; i < num_transient_emissive_tile_sources; ++i)
-	{
-		emissive_logical_tile_t *const tile = &transient_emissive_tiles[pairs[i].tile];
-		if (!tile->num_sources)
-			tile->first_source = i;
-		++tile->num_sources;
-		transient_emissive_tile_sources[i] = pairs[i].source;
-	}
+	R_FinalizeTransientEmissiveTiles (dirty_tiles, num_dirty_tiles, lightmap_offsets);
 
 	transient_emissive_pending = num_transient_emissive_tiles > 0;
 	transient_emissive_detail_pending = false;
@@ -3692,7 +3763,6 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 		num_direct_classification_changes == 1 ? "" : "s", num_effective_group_changes, num_effective_group_changes == 1 ? "" : "s",
 		num_transient_emissive_tiles, num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
 		num_transient_emissive_tile_sources == 1 ? "" : "s", (double)transient_emissive_cpu_time_us / 1000.0);
-	Mem_Free (pairs);
 	Mem_Free (dirty_tiles);
 	Mem_Free (lightmap_offsets);
 }
@@ -7772,6 +7842,11 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		R_InitializeTransientEmissiveImages (cbx, false);
 	else if (!transient_emissive_detail_cache_copied && R_EmissiveDetailReady ())
 		R_InitializeTransientEmissiveImages (cbx, true);
+	if (transient_emissive_occluder_tiles_pending)
+	{
+		transient_emissive_occluder_tiles_pending = false;
+		R_RebuildTransientEmissiveOccluderTiles (cbx);
+	}
 	const qboolean coarse_publication = transient_emissive_pending;
 	qboolean detail_recorded = false;
 	if (coarse_publication)
@@ -8631,6 +8706,11 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 			 * replacement. Ordered before update-draw consumers by the task graph. */
 			R_InvalidateTransientEmissiveDetail ();
 			transient_emissive_detail_pending = true;
+			transient_emissive_occluder_tiles_pending = true;
+			/* The combined atlas embeds direct detail: deselect it until the no-ray
+			 * refresh scheduled below rebuilds it from the new direct field. */
+			emissive_transient_bounce_epoch = 0;
+			emissive_bounce_transient_refresh_pending = emissive_bounce_ready;
 		}
 		emissive_occluder_receiver_refresh_pending = true;
 	}
