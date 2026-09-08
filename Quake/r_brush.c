@@ -2409,6 +2409,7 @@ void GL_BuildLightmaps (void)
 	transient_emissive_detail_pending = false;
 	transient_emissive_detail_ready = false;
 	transient_emissive_generation = 0;
+	transient_emissive_detail_published_generation = 0;
 	transient_emissive_rejected_publications = 0;
 	transient_emissive_initialized = false;
 	transient_emissive_detail_cache_copied = false;
@@ -3467,6 +3468,19 @@ static uint32_t R_EmissiveLightSeed (const vec3_t origin, float radius)
 	return seed;
 }
 
+/* Shared transport invalidation for transient detail usability: emitter-list
+ * changes, participating occluder changes, and any other transport invalidation
+ * clear both completion-based readiness and same-frame publication, and advance
+ * the generation so in-flight completions cannot reestablish readiness.
+ * Radiance-only changes stay out: modulation never invalidates transport. */
+static void R_InvalidateTransientEmissiveDetail (void)
+{
+	transient_emissive_detail_ready = false;
+	transient_emissive_detail_published_generation = 0;
+	if (++transient_emissive_generation == 0)
+		++transient_emissive_generation;
+}
+
 void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, int count)
 {
 	const double start_time = Sys_DoubleTime ();
@@ -3496,12 +3510,16 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 	{
 		transient_emissive_lights = Mem_Alloc (count * sizeof (*transient_emissive_lights));
 		transient_emissive_light_ids = Mem_Alloc (count * sizeof (*transient_emissive_light_ids));
-		transient_emissive_light_seeds = Mem_Alloc (count * sizeof (*transient_emissive_light_seeds));
+		if (emissive_bandlimit_active)
+		{
+			transient_emissive_light_seeds = Mem_Alloc (count * sizeof (*transient_emissive_light_seeds));
+			for (int i = 0; i < count; ++i)
+				transient_emissive_light_seeds[i] = R_TransientEmissiveSourceSeed (sources[i].id);
+		}
 		for (int i = 0; i < count; ++i)
 		{
 			transient_emissive_light_ids[i] = sources[i].id;
 			transient_emissive_lights[i] = sources[i].light;
-			transient_emissive_light_seeds[i] = R_TransientEmissiveSourceSeed (sources[i].id);
 		}
 	}
 
@@ -4323,9 +4341,10 @@ qboolean R_TransientEmissiveDetailReady (void)
 }
 
 /* Current-generation detail recorded into this frame's update commands, ahead of
- * any same-frame consumer. Draw recording runs after the update task, and all
- * primary command buffers submit on one queue in index order, so a published
- * generation is guaranteed produced before draws execute. */
+ * any same-frame consumer. Draw recording runs after the update task; the
+ * dispatcher's compute-to-compute/fragment image barriers, submitted on one queue
+ * in index order ahead of the draws, guarantee a published generation is produced
+ * before draws execute. Submission order alone is not a memory dependency. */
 qboolean R_TransientEmissiveDetailPublished (void)
 {
 	return transient_emissive_detail_published_generation != 0 &&
@@ -7214,6 +7233,7 @@ void R_UpdateEmissiveLightstyles (void)
 		emissive_radiance_force_all_styled_tiles = false;
 		emissive_detail_pending = emissive_detail_building = emissive_detail_ready = false;
 		transient_emissive_detail_ready = false;
+		transient_emissive_detail_published_generation = 0;
 	}
 	emissive_radiance_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 }
@@ -7245,7 +7265,7 @@ void R_EmissiveOccludersChanged_f (cvar_t *var)
 	emissive_detail_pending = num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable ();
 	emissive_detail_building = emissive_detail_ready = false;
 	transient_emissive_detail_pending = num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ();
-	transient_emissive_detail_ready = false;
+	R_InvalidateTransientEmissiveDetail ();
 	if (CLAMP (0, (int)r_emissive_rt_occluders.value, 2) > 0 && r_emissive_rt.value > 0.0f)
 		GL_RequestAccelerationStructure (RT_AS_CONSUMER_TRANSIENT_EMISSIVES);
 }
