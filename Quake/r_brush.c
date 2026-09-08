@@ -5909,6 +5909,29 @@ static size_t R_TransientEmissiveCapacity (size_t required)
 	return capacity;
 }
 
+static void R_TransientEmissiveSourceBuffers (VkDescriptorBufferInfo source_buffers[6])
+{
+	source_buffers[0].buffer = transient_emissive_lights_buffer;
+	source_buffers[0].offset = 0;
+	source_buffers[0].range = transient_emissive_lights_capacity;
+	source_buffers[1].buffer = transient_emissive_tiles_buffer;
+	source_buffers[1].offset = 0;
+	source_buffers[1].range = transient_emissive_tiles_capacity;
+	source_buffers[2].buffer = transient_emissive_tile_sources_buffer;
+	source_buffers[2].offset = 0;
+	source_buffers[2].range = transient_emissive_tile_sources_capacity;
+	source_buffers[3].buffer = transient_emissive_lights_buffer;
+	source_buffers[3].offset = 0;
+	source_buffers[3].range = transient_emissive_lights_capacity;
+	source_buffers[4].buffer = transient_emissive_lights_buffer;
+	source_buffers[4].offset = 0;
+	source_buffers[4].range = transient_emissive_lights_capacity;
+	source_buffers[5].buffer = transient_emissive_light_seeds_buffer != VK_NULL_HANDLE ? transient_emissive_light_seeds_buffer
+																 : transient_emissive_lights_buffer;
+	source_buffers[5].offset = 0;
+	source_buffers[5].range = VK_WHOLE_SIZE;
+}
+
 static void R_EnsureTransientEmissiveResources (void)
 {
 	const size_t   lights_size = q_max ((size_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights), sizeof (uint32_t));
@@ -6010,16 +6033,8 @@ static void R_EnsureTransientEmissiveResources (void)
 	}
 	if (grow || seeds_grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
 	{
-		const VkDescriptorBufferInfo source_buffers[6] = {
-			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
-			{transient_emissive_tiles_buffer, 0, transient_emissive_tiles_capacity},
-			{transient_emissive_tile_sources_buffer, 0, transient_emissive_tile_sources_capacity},
-			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
-			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
-			{transient_emissive_light_seeds_buffer != VK_NULL_HANDLE ? transient_emissive_light_seeds_buffer
-																 : transient_emissive_lights_buffer,
-			 0, VK_WHOLE_SIZE},
-		};
+		VkDescriptorBufferInfo source_buffers[6];
+		R_TransientEmissiveSourceBuffers (source_buffers);
 		R_FreeTransientEmissiveDescriptorSets ();
 		for (int i = 0; i < lightmap_count; ++i)
 		{
@@ -6037,6 +6052,22 @@ static void R_EnsureTransientEmissiveResources (void)
 			}
 		}
 		R_CreateEmissiveRadianceOverlayDescriptorSets ();
+	}
+	/* Band-limit transient sets are conditional and can go missing independently of
+	 * buffer growth; recreate missing ones whenever the mode needs them so a
+	 * required dispatch is never silently skipped. */
+	if (emissive_bandlimit_active)
+	{
+		VkDescriptorBufferInfo source_buffers[6];
+		R_TransientEmissiveSourceBuffers (source_buffers);
+		for (int i = 0; i < lightmap_count; ++i)
+		{
+			struct lightmap_s *const lightmap = &lightmaps[i];
+			if (!lightmap->emissive_transient_detail_texture || lightmap->emissive_bandlimit_transient_descriptor_set != VK_NULL_HANDLE)
+				continue;
+			lightmap->emissive_bandlimit_transient_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
+				lightmap, lightmap->emissive_transient_detail_texture, lightmap->emissive_detail_texture, source_buffers, "bandlimit transient", i);
+		}
 	}
 }
 
@@ -7754,7 +7785,9 @@ static void R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean det
 	transient_emissive_detail_cache_copied = !num_emissive_lights || R_EmissiveDetailReady ();
 }
 
-static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail, qboolean invalidate)
+/* Returns false when any required lightmap was skipped (missing descriptor set or
+ * texture); publication must only bless fully recorded generations. */
+static qboolean R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail, qboolean invalidate)
 {
 	VkAccelerationStructureKHR direct_tlas = R_EmissiveDirectAccelerationStructure ();
 	const qboolean bandlimited = detail && emissive_bandlimit_active;
@@ -7765,7 +7798,7 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 	if (detail)
 	{
 		if (direct_tlas == VK_NULL_HANDLE)
-			return;
+			return false;
 		ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
 		tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 		tlas_info.accelerationStructureCount = 1;
@@ -7782,6 +7815,7 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 	emissive_compute_push_constants_t push_constants = {
 		num_transient_emissive_lights, 0, invalidate ? EMISSIVE_PUBLICATION_INVALIDATE : EMISSIVE_PUBLICATION_UPDATE,
 		detail ? R_EmissiveDetailScale () : 1, R_EmissiveOccluderMask ()};
+	qboolean recorded = true;
 	int logical_tile = 0;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -7801,7 +7835,10 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 			? lightmap->emissive_transient_detail_texture
 			: lightmap->emissive_transient_texture;
 		if (descriptor_set == VK_NULL_HANDLE || !texture)
+		{
+			recorded = false;
 			continue;
+		}
 		VkImageMemoryBarrier barrier;
 		memset (&barrier, 0, sizeof (barrier));
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -7830,6 +7867,7 @@ static void R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean detail
 			cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 	}
+	return recorded;
 }
 
 static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
@@ -7874,19 +7912,23 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 		vkCmdPipelineBarrier (
 			cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
-		R_DispatchTransientEmissiveTiles (cbx, false, false);
+		const qboolean coarse_ok = R_DispatchTransientEmissiveTiles (cbx, false, false);
 		if (vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
 		{
 			/* The TLAS build precedes lightmap updates, so the current AS is already
 			 * fresh: build this generation's detail inline instead of invalidating it
 			 * and requiring a motion-free frame to make progress. Fall back to
-			 * invalidate-and-defer only when detail cannot build yet. */
+			 * invalidate-and-defer only when detail cannot build yet. Publish only
+			 * fully recorded work; skipped tiles stay coarse until a later change
+			 * rebuilds them, instead of passing off partial output. */
 			if (R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE &&
 				(!num_emissive_lights || transient_emissive_detail_cache_copied))
 			{
-				R_DispatchTransientEmissiveTiles (cbx, true, false);
-				transient_emissive_detail_published_generation = transient_emissive_generation;
-				detail_recorded = true;
+				if (coarse_ok && R_DispatchTransientEmissiveTiles (cbx, true, false))
+				{
+					transient_emissive_detail_published_generation = transient_emissive_generation;
+					detail_recorded = true;
+				}
 			}
 			else
 			{
@@ -7899,10 +7941,14 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 	else if (transient_emissive_detail_pending && R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE &&
 		(!num_emissive_lights || transient_emissive_detail_cache_copied))
 	{
-		R_DispatchTransientEmissiveTiles (cbx, true, false);
+		if (R_DispatchTransientEmissiveTiles (cbx, true, false))
+		{
+			transient_emissive_detail_published_generation = transient_emissive_generation;
+			detail_recorded = true;
+		}
+		/* Pending clears even on partial recording: skipped tiles stay coarse (the
+		 * safe fallback) until a later source change rebuilds them. */
 		transient_emissive_detail_pending = false;
-		transient_emissive_detail_published_generation = transient_emissive_generation;
-		detail_recorded = true;
 	}
 	GL_EndEmissiveTransientTimestamp (cbx, detail_recorded ? transient_emissive_generation : 0);
 	R_EndDebugUtilsLabel (cbx);
