@@ -7683,8 +7683,21 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		R_DispatchTransientEmissiveTiles (cbx, false, false);
 		if (vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
 		{
-			R_DispatchTransientEmissiveTiles (cbx, true, true);
-			transient_emissive_detail_pending = true;
+			/* The TLAS build precedes lightmap updates, so the current AS is already
+			 * fresh: build this generation's detail inline instead of invalidating it
+			 * and requiring a motion-free frame to make progress. Fall back to
+			 * invalidate-and-defer only when detail cannot build yet. */
+			if (R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE &&
+				(!num_emissive_lights || transient_emissive_detail_cache_copied))
+			{
+				R_DispatchTransientEmissiveTiles (cbx, true, false);
+				detail_recorded = true;
+			}
+			else
+			{
+				R_DispatchTransientEmissiveTiles (cbx, true, true);
+				transient_emissive_detail_pending = true;
+			}
 		}
 		transient_emissive_pending = false;
 	}
