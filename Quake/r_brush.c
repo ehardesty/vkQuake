@@ -533,7 +533,7 @@ static qboolean emissive_bounce_recombine_pending;
 static qboolean emissive_bounce_cacheable_refresh_pending, emissive_bounce_transient_refresh_pending;
 static qboolean emissive_bounce_cacheable_force_full_refresh;
 static qboolean emissive_bounce_transient_outputs_initialized, emissive_bounce_transient_force_full_refresh;
-static qboolean emissive_bounce_cacheable_latched, emissive_bounce_transient_latched;
+static qboolean emissive_bounce_cacheable_latched;
 static uint32_t emissive_cacheable_direct_epoch, emissive_cacheable_bounce_epoch;
 static uint32_t emissive_transient_direct_epoch, emissive_transient_bounce_epoch;
 static uint32_t emissive_bounce_no_ray_refreshes;
@@ -593,6 +593,11 @@ static int					 num_transient_emissive_tile_sources;
 static qboolean				 transient_emissive_pending;
 static qboolean				 transient_emissive_detail_pending;
 static qboolean				 transient_emissive_detail_ready;
+/* Generation whose detail was completely recorded into this frame's update
+ * command buffer. Lets draw recording select current-generation detail without
+ * waiting for cross-frame completion; the generation check, not a reset,
+ * invalidates it when sources change. */
+static uint32_t				 transient_emissive_detail_published_generation;
 static uint32_t				 transient_emissive_generation;
 static uint32_t				 transient_emissive_rejected_publications;
 static qboolean				 transient_emissive_initialized;
@@ -1340,7 +1345,9 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			const qboolean	  emissive_enabled = !alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f &&
 											 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
 			const qboolean detail_enabled = emissive_enabled && emissive_detail_texture &&
-				(transient_emissive_active ? R_TransientEmissiveDetailReady () : detail_ready);
+				(transient_emissive_active
+					 ? R_TransientEmissiveDetailReady () || R_TransientEmissiveDetailPublished ()
+					 : detail_ready);
 			const qboolean	  bandlimit_enabled = detail_enabled && R_EmissiveBandlimitActive ();
 			const qboolean	  emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || debug_mode == 5 || detail_enabled);
 			vec3_t			  liquid_emissive_add;
@@ -4285,6 +4292,16 @@ qboolean R_TransientEmissiveDetailReady (void)
 	return transient_emissive_detail_ready;
 }
 
+/* Current-generation detail recorded into this frame's update commands, ahead of
+ * any same-frame consumer. Draw recording runs after the update task, and all
+ * primary command buffers submit on one queue in index order, so a published
+ * generation is guaranteed produced before draws execute. */
+qboolean R_TransientEmissiveDetailPublished (void)
+{
+	return transient_emissive_detail_published_generation != 0 &&
+		transient_emissive_detail_published_generation == transient_emissive_generation;
+}
+
 qboolean R_TransientEmissiveActive (void)
 {
 	return num_transient_emissive_lights > 0;
@@ -4292,7 +4309,7 @@ qboolean R_TransientEmissiveActive (void)
 
 void R_LatchEmissiveResolvedTextures (void)
 {
-	emissive_bounce_cacheable_latched = emissive_bounce_transient_latched = false;
+	emissive_bounce_cacheable_latched = false;
 	if (!emissive_bounce_ready || emissive_bounce_surfaces_buffer == VK_NULL_HANDLE || r_emissive_rt_bounce.value <= 0.0f ||
 		r_emissive_rt_bounce_strength.value <= 0.0f)
 		return;
@@ -4304,16 +4321,6 @@ void R_LatchEmissiveResolvedTextures (void)
 		emissive_bounce_cacheable_latched = cacheable_refresh_ready;
 	else
 		emissive_bounce_cacheable_latched = emissive_cacheable_bounce_epoch == emissive_cacheable_direct_epoch;
-
-	const qboolean transient_refresh = emissive_bounce_transient_refresh_pending ||
-		(transient_emissive_initialized && (emissive_radiance_coarse_pending || emissive_radiance_detail_pending));
-	const qboolean transient_refresh_ready = emissive_bounce_transient_outputs_initialized &&
-		(!R_TransientEmissiveDetailAvailable () || transient_emissive_detail_ready);
-	if (transient_refresh)
-		emissive_bounce_transient_latched = transient_refresh_ready;
-	else
-		emissive_bounce_transient_latched =
-			emissive_bounce_transient_outputs_initialized && emissive_transient_bounce_epoch == emissive_transient_direct_epoch;
 }
 
 void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltexture_t **detail)
@@ -4327,7 +4334,12 @@ void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltex
 	*detail = transient ? lightmap->emissive_transient_detail_texture : lightmap->emissive_detail_texture;
 	if (!emissive_bounce_ready || r_emissive_rt_bounce.value <= 0.0f || r_emissive_rt_bounce_strength.value <= 0.0f)
 		return;
-	const qboolean use_bounce = transient ? emissive_bounce_transient_latched : emissive_bounce_cacheable_latched;
+	/* Transient bounce output is current exactly when its epoch matches the current
+	 * direct input: every refresh re-establishes the match, and a changed field zeroes
+	 * the bounce epoch first. Epochs also match for same-frame refreshes the pre-task
+	 * latch cannot observe. */
+	const qboolean use_bounce = transient ? emissive_transient_bounce_epoch == emissive_transient_direct_epoch
+									: emissive_bounce_cacheable_latched;
 	if (!use_bounce)
 		return;
 	gltexture_t *const bounce_coarse = transient ? lightmap->emissive_transient_bounce_texture : lightmap->emissive_bounce_texture;
@@ -6735,7 +6747,7 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 		*pending = false;
 		return;
 	}
-	if (transient && R_TransientEmissiveDetailAvailable () && !transient_emissive_detail_ready)
+	if (transient && R_TransientEmissiveDetailAvailable () && !transient_emissive_detail_ready && !R_TransientEmissiveDetailPublished ())
 		return;
 	if (!transient && R_EmissiveDetailAvailable () && !emissive_detail_ready)
 		return;
@@ -7664,9 +7676,14 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 	if (coarse_publication)
 	{
 		if (num_transient_emissive_lights)
+		{
 			R_UpdateTransientEmissiveBuffer (
 				cbx->cb, transient_emissive_lights_buffer, transient_emissive_lights,
 				num_transient_emissive_lights * sizeof (*transient_emissive_lights));
+			R_UpdateTransientEmissiveBuffer (
+				cbx->cb, transient_emissive_light_seeds_buffer, transient_emissive_light_seeds,
+				num_transient_emissive_lights * sizeof (*transient_emissive_light_seeds));
+		}
 		R_UpdateTransientEmissiveBuffer (
 			cbx->cb, transient_emissive_tiles_buffer, transient_emissive_tiles,
 			num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
@@ -7691,6 +7708,7 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 				(!num_emissive_lights || transient_emissive_detail_cache_copied))
 			{
 				R_DispatchTransientEmissiveTiles (cbx, true, false);
+				transient_emissive_detail_published_generation = transient_emissive_generation;
 				detail_recorded = true;
 			}
 			else
@@ -7706,6 +7724,7 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 	{
 		R_DispatchTransientEmissiveTiles (cbx, true, false);
 		transient_emissive_detail_pending = false;
+		transient_emissive_detail_published_generation = transient_emissive_generation;
 		detail_recorded = true;
 	}
 	GL_EndEmissiveTransientTimestamp (cbx, detail_recorded ? transient_emissive_generation : 0);

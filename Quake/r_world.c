@@ -1163,7 +1163,9 @@ static void R_FlushBatch (
 		const qboolean emissive_enabled =
 			!alpha_blend && emissive_texture && r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe;
 		const qboolean detail_enabled = emissive_enabled && emissive_detail_texture && (receiver_detail_ready ||
-			(R_TransientEmissiveActive () ? R_TransientEmissiveDetailReady () : R_EmissiveDetailReady ()));
+			(R_TransientEmissiveActive ()
+				 ? R_TransientEmissiveDetailReady () || R_TransientEmissiveDetailPublished ()
+				 : R_EmissiveDetailReady ()));
 		const qboolean bandlimit_enabled = detail_enabled && R_EmissiveBandlimitActive ();
 		const int	  debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 9);
 		const qboolean emissive_debug = emissive_enabled && debug_mode > 0 && (debug_mode == 1 || debug_mode == 5 || detail_enabled);

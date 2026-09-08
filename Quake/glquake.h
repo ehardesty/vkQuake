@@ -865,6 +865,7 @@ void R_EmissiveBounceStats (
 	qboolean *budget_limited, qboolean *pending, qboolean *ready);
 qboolean R_EmissiveDetailReady (void);
 qboolean R_TransientEmissiveDetailReady (void);
+qboolean R_TransientEmissiveDetailPublished (void);
 qboolean R_EmissiveDetailAvailable (void);
 void	 R_SetEmissiveLights (
 	const emissive_light_t *lights, const byte *styles, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
