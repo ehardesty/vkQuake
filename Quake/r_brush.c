@@ -8625,7 +8625,13 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 			(emissive_occluder_full_detail_refresh || num_emissive_occluder_dirty_tiles > 0))
 			emissive_detail_pending = true;
 		if (num_transient_emissive_tiles > 0 && R_TransientEmissiveDetailAvailable ())
+		{
+			/* Participating occluder movement invalidates transient transport exactly
+			 * like an emitter-list change; the pending flag below schedules the
+			 * replacement. Ordered before update-draw consumers by the task graph. */
+			R_InvalidateTransientEmissiveDetail ();
 			transient_emissive_detail_pending = true;
+		}
 		emissive_occluder_receiver_refresh_pending = true;
 	}
 	if (bmodel_tlas == VK_NULL_HANDLE)
