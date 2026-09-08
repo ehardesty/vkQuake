@@ -788,14 +788,23 @@ static void R_ClearEmissiveWorldSurfaces (void)
 	emissive_world_lights_uploaded = false;
 }
 
-static void R_AppendTransientEmissiveLight (emissive_light_t **lights, int *count, int *capacity, const emissive_light_t *light)
+static void R_AppendTransientEmissiveSource (
+	transient_emissive_source_t **sources, int *count, int *capacity, transient_emissive_source_id_t id, const emissive_light_t *light)
 {
 	if (*count == *capacity)
 	{
 		*capacity = *capacity ? *capacity * 2 : 16;
-		*lights = Mem_Realloc (*lights, *capacity * sizeof (**lights));
+		*sources = Mem_Realloc (*sources, *capacity * sizeof (**sources));
 	}
-	(*lights)[(*count)++] = *light;
+	(*sources)[*count].id = id;
+	(*sources)[(*count)++].light = *light;
+}
+
+static int R_CompareTransientEmissiveSources (const void *a_, const void *b_)
+{
+	const transient_emissive_source_t *const a = a_;
+	const transient_emissive_source_t *const b = b_;
+	return R_CompareTransientEmissiveSourceIds (&a->id, &b->id);
 }
 
 static void R_TransformEmissivePoint (const float matrix[16], const vec3_t point, vec3_t transformed)
@@ -1003,9 +1012,9 @@ void R_UpdateTransientEmissiveSources (void)
 	R_MatchEmissiveEntitySources ();
 	if (!sources_were_matched && emissive_entity_sources_matched)
 		R_ActivateEmissiveWorldSurfaceCache ();
-	emissive_light_t *lights = NULL;
-	int				 count = 0;
-	int				 capacity = 0;
+	transient_emissive_source_t *sources = NULL;
+	int					 count = 0;
+	int					 capacity = 0;
 	num_emissive_generalized_model_sources = 0;
 	num_emissive_generalized_model_rejections = 0;
 
@@ -1038,7 +1047,9 @@ void R_UpdateTransientEmissiveSources (void)
 				light.radius = source.definition->radius;
 				VectorCopy (source.color, light.color);
 				light.intensity = source.definition->intensity;
-				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
+				const transient_emissive_source_id_t id = {
+					(uint32_t)entity_index, (uint16_t)def_index, TRANSIENT_EMISSIVE_SOURCE_INLINE_BRUSH, 0};
+				R_AppendTransientEmissiveSource (&sources, &count, &capacity, id, &light);
 			}
 		}
 
@@ -1057,7 +1068,11 @@ void R_UpdateTransientEmissiveSources (void)
 			source.definition = definition;
 			R_BuildEmissiveEntitySourceLight (&source, entity, NULL);
 			if (source.light.intensity > 0.0f)
-				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &source.light);
+			{
+				const transient_emissive_source_id_t id = {
+					(uint32_t)entity_index, 0, TRANSIENT_EMISSIVE_SOURCE_CURATED_ENTITY, 0};
+				R_AppendTransientEmissiveSource (&sources, &count, &capacity, id, &source.light);
+			}
 		}
 
 		if (r_emissive_rt_model_emitters.value >= 1.0f)
@@ -1075,13 +1090,32 @@ void R_UpdateTransientEmissiveSources (void)
 					++num_emissive_generalized_model_rejections;
 					continue;
 				}
-				R_AppendTransientEmissiveLight (&lights, &count, &capacity, &light);
+				const qboolean is_static = source_index < cl.num_statics;
+				/* Dynamic owners are 1-based, keeping owner 0 exclusive to the first static source. */
+				const transient_emissive_source_id_t id = {
+					(uint32_t)(is_static ? source_index : source_index - cl.num_statics + 1), 0,
+					is_static ? TRANSIENT_EMISSIVE_SOURCE_GENERALIZED_STATIC : TRANSIENT_EMISSIVE_SOURCE_GENERALIZED_DYNAMIC, 0};
+				R_AppendTransientEmissiveSource (&sources, &count, &capacity, id, &light);
 				++num_emissive_generalized_model_sources;
 			}
 		}
 	}
-	R_SetTransientEmissiveLights (lights, count);
-	Mem_Free (lights);
+	if (count > 1)
+	{
+		qboolean sorted = true;
+		for (int i = 1; i < count; ++i)
+			if (R_CompareTransientEmissiveSourceIds (&sources[i - 1].id, &sources[i].id) > 0)
+			{
+				sorted = false;
+				break;
+			}
+		if (!sorted)
+			qsort (sources, count, sizeof (*sources), R_CompareTransientEmissiveSources);
+		for (int i = 1; i < count; ++i)
+			assert (R_CompareTransientEmissiveSourceIds (&sources[i - 1].id, &sources[i].id) < 0);
+	}
+	R_SetTransientEmissiveLights (sources, count);
+	Mem_Free (sources);
 }
 
 static const vec3_t *R_EmissiveWorldSurfaceVertex (const qmodel_t *model, const msurface_t *surface, int vertex)

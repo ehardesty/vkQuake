@@ -571,6 +571,8 @@ static int					 num_emissive_logical_tile_sources;
 static qboolean				 emissive_logical_tiles_built;
 static emissive_light_t		*transient_emissive_lights;
 static emissive_light_t		*previous_transient_emissive_lights;
+static transient_emissive_source_id_t *transient_emissive_light_ids;
+static transient_emissive_source_id_t *previous_transient_emissive_light_ids;
 static int					 num_transient_emissive_lights;
 static int					 num_previous_transient_emissive_lights;
 static emissive_logical_tile_t *transient_emissive_tiles;
@@ -1741,6 +1743,11 @@ static void R_AssignWorkgroupBounds (msurface_t *surf, int submodel)
 UpdateIndirectStructs
 ================
 */
+static qboolean R_SurfaceUsesEmissiveAtlas (const msurface_t *surface)
+{
+	return surface->emissive_influence || surface->emissive_bounce_influence;
+}
+
 static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolean is_world_model, qboolean emissive_grouping)
 {
 	static int last;
@@ -1748,7 +1755,7 @@ static void UpdateIndirectStructs (msurface_t *surf, qboolean is_bmodel, qboolea
 	const qboolean unique_liquid = r_emissive_rt_liquid_receivers.value > 0.0f && (surf->flags & SURF_DRAWTURB);
 	const byte world_flags =
 		(is_world_model ? INDIRECT_WORLD_MODEL : 0) |
-		(is_world_model && emissive_grouping && (surf->emissive_influence || surf->emissive_bounce_influence) ? INDIRECT_EMISSIVE_INFLUENCE : 0);
+		(is_world_model && emissive_grouping && R_SurfaceUsesEmissiveAtlas (surf) ? INDIRECT_EMISSIVE_INFLUENCE : 0);
 	if (!unique_liquid && last < used_indirect_draws && indirect_draws[last].lightmap_idx == surf->lightmaptexturenum &&
 		indirect_draws[last].texture == surf->texinfo->texture && indirect_draws[last].is_bmodel == is_bmodel &&
 		indirect_draws[last].world_flags == world_flags)
@@ -2351,6 +2358,8 @@ void GL_BuildLightmaps (void)
 	emissive_radiance_tiles_buffer = VK_NULL_HANDLE;
 	SAFE_FREE (transient_emissive_lights);
 	SAFE_FREE (previous_transient_emissive_lights);
+	SAFE_FREE (transient_emissive_light_ids);
+	SAFE_FREE (previous_transient_emissive_light_ids);
 	SAFE_FREE (transient_emissive_tiles);
 	SAFE_FREE (transient_emissive_tile_sources);
 	SAFE_FREE (transient_emissive_tile_surface_offsets);
@@ -3249,6 +3258,17 @@ static qboolean R_TransientEmissiveLightsEqual (const emissive_light_t *a, const
 	return !memcmp (a, b, sizeof (*a));
 }
 
+static qboolean R_TransientEmissiveSourcesEqual (const transient_emissive_source_t *sources, int count)
+{
+	if (count != num_transient_emissive_lights)
+		return false;
+	for (int i = 0; i < count; ++i)
+		if (R_CompareTransientEmissiveSourceIds (&sources[i].id, &transient_emissive_light_ids[i]) ||
+			!R_TransientEmissiveLightsEqual (&sources[i].light, &transient_emissive_lights[i]))
+			return false;
+	return true;
+}
+
 static int R_CompareTransientEmissiveTiles (const void *a_, const void *b_)
 {
 	const int a = *(const int *)a_;
@@ -3402,29 +3422,39 @@ void R_InvalidateTransientEmissiveLights (void)
 	transient_emissive_force_refresh = true;
 }
 
-void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
+void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, int count)
 {
 	const double start_time = Sys_DoubleTime ();
 	if (!cl.worldmodel || count < 0)
 		return;
-	if (!transient_emissive_force_refresh && count == num_transient_emissive_lights &&
-		(!count || !memcmp (lights, transient_emissive_lights, count * sizeof (*lights))))
+	assert (!count || sources);
+	for (int i = 1; i < count; ++i)
+		assert (R_CompareTransientEmissiveSourceIds (&sources[i - 1].id, &sources[i].id) < 0);
+	if (!transient_emissive_force_refresh && R_TransientEmissiveSourcesEqual (sources, count))
 		return;
 	const qboolean force_refresh = transient_emissive_force_refresh;
 	transient_emissive_force_refresh = false;
 	R_InvalidateEmissiveBrushReceiverSources ();
 
 	SAFE_FREE (previous_transient_emissive_lights);
+	SAFE_FREE (previous_transient_emissive_light_ids);
 	previous_transient_emissive_lights = transient_emissive_lights;
+	previous_transient_emissive_light_ids = transient_emissive_light_ids;
 	num_previous_transient_emissive_lights = num_transient_emissive_lights;
 	transient_emissive_lights = NULL;
+	transient_emissive_light_ids = NULL;
 	num_transient_emissive_lights = count;
 	if (!num_previous_transient_emissive_lights && count)
 		emissive_bounce_transient_force_full_refresh = true;
 	if (count)
 	{
-		transient_emissive_lights = Mem_Alloc (count * sizeof (*lights));
-		memcpy (transient_emissive_lights, lights, count * sizeof (*lights));
+		transient_emissive_lights = Mem_Alloc (count * sizeof (*transient_emissive_lights));
+		transient_emissive_light_ids = Mem_Alloc (count * sizeof (*transient_emissive_light_ids));
+		for (int i = 0; i < count; ++i)
+		{
+			transient_emissive_light_ids[i] = sources[i].id;
+			transient_emissive_lights[i] = sources[i].light;
+		}
 	}
 
 	R_AllocateEmissiveLightmaps ();
@@ -3449,12 +3479,19 @@ void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
 		++transient_emissive_surface_delta_generation;
 	}
 	qboolean regroup = false;
-	const int compared_lights = q_max (count, num_previous_transient_emissive_lights);
+	int old_light_index = 0;
+	int new_light_index = 0;
 	int num_changed_sources = 0;
-	for (int light_index = 0; light_index < compared_lights; ++light_index)
+	int num_direct_classification_changes = 0;
+	int num_effective_group_changes = 0;
+	while (old_light_index < num_previous_transient_emissive_lights || new_light_index < count)
 	{
-		const emissive_light_t *const old_light = light_index < num_previous_transient_emissive_lights ? &previous_transient_emissive_lights[light_index] : NULL;
-		const emissive_light_t *const new_light = light_index < count ? &transient_emissive_lights[light_index] : NULL;
+		const transient_emissive_source_id_t *const old_id =
+			old_light_index < num_previous_transient_emissive_lights ? &previous_transient_emissive_light_ids[old_light_index] : NULL;
+		const transient_emissive_source_id_t *const new_id = new_light_index < count ? &transient_emissive_light_ids[new_light_index] : NULL;
+		const int comparison = !old_id ? 1 : !new_id ? -1 : R_CompareTransientEmissiveSourceIds (old_id, new_id);
+		const emissive_light_t *const old_light = comparison <= 0 ? &previous_transient_emissive_lights[old_light_index++] : NULL;
+		const emissive_light_t *const new_light = comparison >= 0 ? &transient_emissive_lights[new_light_index++] : NULL;
 		if (!force_refresh && old_light && new_light && R_TransientEmissiveLightsEqual (old_light, new_light))
 			continue;
 		++num_changed_sources;
@@ -3484,8 +3521,12 @@ void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
 			surface->cacheable_emissive_influence || transient_emissive_surface_influence_counts[surface_index] > 0;
 		if (surface->emissive_influence != influenced)
 		{
+			const qboolean old_group = R_SurfaceUsesEmissiveAtlas (surface);
 			surface->emissive_influence = influenced;
-			regroup = true;
+			const qboolean group_changed = old_group != R_SurfaceUsesEmissiveAtlas (surface);
+			++num_direct_classification_changes;
+			num_effective_group_changes += group_changed;
+			regroup |= group_changed;
 		}
 	}
 
@@ -3580,8 +3621,11 @@ void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count)
 		GL_RebuildIndirectDraws (true, true);
 	transient_emissive_cpu_time_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 	Con_DPrintf (
-		"RT emissives: %d transient source%s, %d changed; updated %d logical tile%s with %d source link%s in %.3f ms CPU\n", count,
-		count == 1 ? "" : "s", num_changed_sources, num_transient_emissive_tiles, num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
+		"RT emissives: %d transient source%s, %d changed; %d direct classification change%s, %d effective regroup change%s; "
+		"updated %d logical tile%s with %d source link%s in %.3f ms CPU\n",
+		count, count == 1 ? "" : "s", num_changed_sources, num_direct_classification_changes,
+		num_direct_classification_changes == 1 ? "" : "s", num_effective_group_changes, num_effective_group_changes == 1 ? "" : "s",
+		num_transient_emissive_tiles, num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
 		num_transient_emissive_tile_sources == 1 ? "" : "s", (double)transient_emissive_cpu_time_us / 1000.0);
 	Mem_Free (pairs);
 	Mem_Free (dirty_tiles);
@@ -3899,8 +3943,9 @@ static void R_SetEmissiveBounceInfluence (qboolean active)
 			active && surface->lightmaptexturenum >= 0 && R_SurfaceInEmissiveWorldAccelerationStructure (surface);
 		if (surface->emissive_bounce_influence != influenced)
 		{
+			const qboolean old_group = R_SurfaceUsesEmissiveAtlas (surface);
 			surface->emissive_bounce_influence = influenced;
-			regroup = true;
+			regroup |= old_group != R_SurfaceUsesEmissiveAtlas (surface);
 		}
 	}
 	if (regroup && indirect_emissive_grouping)
@@ -4342,6 +4387,8 @@ void R_TransientEmissiveStats (
 	*source_links = num_transient_emissive_tile_sources;
 	*cpu_bytes = (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights) +
 				 (uint64_t)num_previous_transient_emissive_lights * sizeof (*previous_transient_emissive_lights) +
+				 (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_light_ids) +
+				 (uint64_t)num_previous_transient_emissive_lights * sizeof (*previous_transient_emissive_light_ids) +
 				 (uint64_t)num_transient_emissive_tiles * sizeof (*transient_emissive_tiles) +
 				 (uint64_t)num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources) +
 				 (uint64_t)(num_transient_emissive_total_tiles + 1) * sizeof (*transient_emissive_tile_surface_offsets) +

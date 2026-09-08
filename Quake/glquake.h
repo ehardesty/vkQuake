@@ -776,6 +776,40 @@ typedef struct emissive_light_s
 } emissive_light_t;
 COMPILE_TIME_ASSERT (emissive_light_t, sizeof (emissive_light_t) == 32);
 
+typedef enum transient_emissive_source_kind_e
+{
+	TRANSIENT_EMISSIVE_SOURCE_INLINE_BRUSH,
+	TRANSIENT_EMISSIVE_SOURCE_CURATED_ENTITY,
+	TRANSIENT_EMISSIVE_SOURCE_GENERALIZED_STATIC,
+	TRANSIENT_EMISSIVE_SOURCE_GENERALIZED_DYNAMIC
+} transient_emissive_source_kind_t;
+
+typedef struct transient_emissive_source_id_s
+{
+	uint32_t owner;
+	uint16_t slot;
+	byte	 kind;
+	byte	 reserved;
+} transient_emissive_source_id_t;
+COMPILE_TIME_ASSERT (transient_emissive_source_id_t, sizeof (transient_emissive_source_id_t) == 8);
+
+typedef struct transient_emissive_source_s
+{
+	transient_emissive_source_id_t id;
+	emissive_light_t			 light;
+} transient_emissive_source_t;
+COMPILE_TIME_ASSERT (transient_emissive_source_t, sizeof (transient_emissive_source_t) == 40);
+
+static inline int R_CompareTransientEmissiveSourceIds (
+	const transient_emissive_source_id_t *a, const transient_emissive_source_id_t *b)
+{
+	if (a->kind != b->kind)
+		return a->kind < b->kind ? -1 : 1;
+	if (a->owner != b->owner)
+		return a->owner < b->owner ? -1 : 1;
+	return a->slot < b->slot ? -1 : a->slot > b->slot;
+}
+
 #define EMISSIVE_CLUSTERED_LIGHTS 4
 typedef struct emissive_clustered_light_s
 {
@@ -918,7 +952,7 @@ void R_EmissiveClusteredAliasStats (
 void		  R_UpdateEmissiveLightstyles (void);
 void R_LatchEmissiveResolvedTextures (void);
 void R_InvalidateTransientEmissiveLights (void);
-void R_SetTransientEmissiveLights (const emissive_light_t *lights, int count);
+void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, int count);
 qboolean R_TransientEmissiveActive (void);
 void R_UpdateLightmapsAndIndirect (void *unused);
 void R_MarkSurfaces (qboolean use_tasks, task_handle_t before_mark, task_handle_t *store_efrags, task_handle_t *cull_surfaces, task_handle_t *chain_surfaces);
