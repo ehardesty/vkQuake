@@ -66,19 +66,26 @@ typedef enum emissive_proxy_e
 	EMISSIVE_PROXY_POINT
 } emissive_proxy_t;
 
+typedef enum emissive_fixture_family_e
+{
+	EMISSIVE_FIXTURE_FAMILY_NONE,
+	EMISSIVE_FIXTURE_FAMILY_SLIPGATE
+} emissive_fixture_family_t;
+
 typedef struct emissive_texture_def_s
 {
-	const char		*texture;
-	float			 radius;
-	float			 intensity;
-	float			 normal_offset;
-	emissive_proxy_t proxy;
-	qboolean		 shadows;
-	qboolean		 two_sided;
-	qboolean		 derive_color;
-	qboolean		 adjacent_inline_brush_owns_source;
-	vec3_t			 emission_direction;
-	vec3_t			 color;
+	const char				 *texture;
+	float					  radius;
+	float					  intensity;
+	float					  normal_offset;
+	emissive_proxy_t		  proxy;
+	emissive_fixture_family_t fixture_family;
+	qboolean				  shadows;
+	qboolean				  two_sided;
+	qboolean				  derive_color;
+	qboolean				  adjacent_inline_brush_owns_source;
+	vec3_t					  emission_direction;
+	vec3_t					  color;
 } emissive_texture_def_t;
 
 typedef struct emissive_world_surface_s
@@ -172,9 +179,63 @@ typedef struct emissive_entity_source_s
 #define EMISSIVE_ENTITY_ANGLE_TOLERANCE		  1.0f
 
 static const emissive_texture_def_t emissive_texture_defs[] = {
-	{"TLIGHT01", 192.0f, 0.9124f, 16.0f, EMISSIVE_PROXY_POINT, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
-	{"TLIGHT11", 192.0f, 0.7850f, 8.0f, EMISSIVE_PROXY_POINT, true, false, true, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
+	/*
+	 * Untuned prototype fixtures keep their prototype peak-output ratios, anchored
+	 * to validated TLIGHT01 and converted to unit luminance. TLIGHT11 remains independently tuned.
+	 */
+	{"TLIGHT01", 192.0f, 0.9124f, 16.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT02", 224.0f, 1.3043f, 16.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT03", 128.0f, 0.8694f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT07", 128.0f, 1.5611f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TLIGHT11", 192.0f, 0.7850f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, true, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
+	{"CEIL1_1", 96.0f, 0.7538f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"SFLOOR4_4", 144.0f, 1.3956f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TECH03_2", 96.0f, 0.5528f, 6.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"TECH06_2", 96.0f, 0.1913f, 6.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"SLIPLITE",
+	 112.0f,
+	 0.3189f,
+	 8.0f,
+	 EMISSIVE_PROXY_POINT,
+	 EMISSIVE_FIXTURE_FAMILY_SLIPGATE,
+	 true,
+	 false,
+	 true,
+	 false,
+	 {0.0f, 0.0f, 0.0f},
+	 {0.0f, 0.0f, 0.0f}},
+	{"SLIP2", 112.0f, 0.3189f, 8.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_SLIPGATE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"SLIPSIDE",
+	 112.0f,
+	 0.3189f,
+	 8.0f,
+	 EMISSIVE_PROXY_POINT,
+	 EMISSIVE_FIXTURE_FAMILY_SLIPGATE,
+	 true,
+	 false,
+	 true,
+	 false,
+	 {0.0f, 0.0f, 0.0f},
+	 {0.0f, 0.0f, 0.0f}},
+	{"BASEBUTN3", 56.0f, 0.1913f, 4.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"SWITCH_1", 56.0f, 0.1913f, 4.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"COMP1_6", 40.0f, 0.0425f, 2.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"SLIP1", 32.0f, 0.0319f, 2.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
+	{"Z_EXIT", 56.0f, 0.1063f, 4.0f, EMISSIVE_PROXY_POINT, EMISSIVE_FIXTURE_FAMILY_NONE, true, false, true, false, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}},
 };
+
+static qboolean R_EmissiveTextureDefsShareFixture (const emissive_texture_def_t *a, const emissive_texture_def_t *b)
+{
+	return a == b || (a->fixture_family != EMISSIVE_FIXTURE_FAMILY_NONE && a->fixture_family == b->fixture_family);
+}
+
+static qboolean R_IsPrimaryEmissiveTextureDef (const emissive_texture_def_t *definition)
+{
+	for (const emissive_texture_def_t *candidate = emissive_texture_defs; candidate < definition; ++candidate)
+		if (R_EmissiveTextureDefsShareFixture (candidate, definition))
+			return false;
+	return true;
+}
 
 static const emissive_entity_fixture_def_t emissive_entity_fixture_defs[] = {
 	{"light_torch_small_walltorch", "progs/flame.mdl", -1, 0, EMISSIVE_ENTITY_FIXTURE_WALL_TORCH, 192.0f, 2.0480f, {1.0f, 0.48f, 0.18f}},
@@ -759,9 +820,11 @@ static qboolean R_BuildEmissiveBrushSource (
 	float  total_weight = 0.0f;
 	for (int i = 0; i < model->nummodelsurfaces; ++i)
 	{
-		msurface_t *const surface = &model->surfaces[model->firstmodelsurface + i];
-		texture_t *const texture = surface->texinfo ? surface->texinfo->texture : NULL;
-		if (R_CacheableEmissiveTextureDef (texture) != definition || surface->numedges < 3 || (surface->flags & SURF_DRAWTILED))
+		msurface_t *const					surface = &model->surfaces[model->firstmodelsurface + i];
+		texture_t *const					texture = surface->texinfo ? surface->texinfo->texture : NULL;
+		const emissive_texture_def_t *const surface_definition = R_CacheableEmissiveTextureDef (texture);
+		if (!surface_definition || !R_EmissiveTextureDefsShareFixture (surface_definition, definition) || surface->numedges < 3 ||
+			(surface->flags & SURF_DRAWTILED))
 			continue;
 
 		vec3_t center, normal, surface_color;
@@ -870,7 +933,7 @@ static void R_ResolveEmissiveWorldFixtureOwnership (void)
 		for (int definition_index = 0; definition_index < countof (emissive_texture_defs); ++definition_index)
 		{
 			const emissive_texture_def_t *const definition = &emissive_texture_defs[definition_index];
-			if (!definition->adjacent_inline_brush_owns_source)
+			if (!R_IsPrimaryEmissiveTextureDef (definition) || !definition->adjacent_inline_brush_owns_source)
 				continue;
 			emissive_brush_source_t source;
 			if (!R_BuildEmissiveBrushSource (model, definition, &source))
@@ -965,6 +1028,8 @@ void R_UpdateTransientEmissiveSources (void)
 
 			for (int def_index = 0; def_index < countof (emissive_texture_defs); ++def_index)
 			{
+				if (!R_IsPrimaryEmissiveTextureDef (&emissive_texture_defs[def_index]))
+					continue;
 				emissive_brush_source_t source;
 				if (!R_BuildEmissiveBrushSource (model, &emissive_texture_defs[def_index], &source))
 					continue;
@@ -1043,7 +1108,7 @@ static qboolean R_EmissiveWorldSurfacesShareEdge (const qmodel_t *model, const m
 
 static qboolean R_EmissiveWorldSurfacesShareFixture (const qmodel_t *model, const emissive_world_surface_t *a, const emissive_world_surface_t *b)
 {
-	return a->definition == b->definition && R_EmissiveWorldSurfacesShareEdge (model, a->surface, b->surface);
+	return R_EmissiveTextureDefsShareFixture (a->definition, b->definition) && R_EmissiveWorldSurfacesShareEdge (model, a->surface, b->surface);
 }
 
 static void R_EmissiveWorldSurfaceGeometry (const qmodel_t *model, const msurface_t *surface, vec3_t center, vec3_t normal, float *area)
@@ -1140,8 +1205,8 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			fixture->mins[axis] = FLT_MAX;
 			fixture->maxs[axis] = -FLT_MAX;
 		}
-		const gltexture_t *const fullbright = emissive_world_surfaces[group].surface->texinfo->texture->fullbright;
-		R_ResolveEmissiveTextureColor (fixture->definition, fullbright, fixture->color);
+		const gltexture_t *const fixture_fullbright = emissive_world_surfaces[group].surface->texinfo->texture->fullbright;
+		R_ResolveEmissiveTextureColor (fixture->definition, fixture_fullbright, fixture->color);
 
 		for (int i = group; i < num_emissive_world_surfaces; ++i)
 		{
@@ -1151,7 +1216,8 @@ static void R_BuildEmissiveWorldFixtures (qmodel_t *worldmodel)
 			vec3_t center, normal;
 			float  area;
 			R_EmissiveWorldSurfaceGeometry (worldmodel, emissive_world_surfaces[i].surface, center, normal, &area);
-			const float luminous_area = area * fullbright->fullbright_coverage;
+			const gltexture_t *const surface_fullbright = emissive_world_surfaces[i].surface->texinfo->texture->fullbright;
+			const float			 luminous_area = area * surface_fullbright->fullbright_coverage;
 			if (!fixture->num_surfaces)
 				VectorCopy (center, fallback_origin);
 			VectorMA (weighted_origin, luminous_area, center, weighted_origin);
