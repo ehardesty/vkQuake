@@ -8,6 +8,14 @@
 #define BOUNCE_TAP_INVALID 0xFFFFFFFFu
 #define BOUNCE_DEBUG_EXPOSURE 32.0f
 
+/*
+ * coordinate_scale is a mode-specific stride, not one global scale: mode 0
+ * captures direct texels (1), mode 3 filters bounce samples
+ * (bounce_sample_spacing), mode 4 combines detail output (detail scale).
+ * offset/extent bound the exact image-space rectangle every partial
+ * dispatch may write; rounded-up invocations outside it must be rejected so
+ * partial refreshes stay idempotent and cannot double-add into neighbors.
+ */
 layout (push_constant) uniform PushConsts
 {
 	uint mode;
@@ -20,6 +28,8 @@ layout (push_constant) uniform PushConsts
 	uint first;
 	int offset_x;
 	int offset_y;
+	int extent_x;
+	int extent_y;
 }
 push_constants;
 
@@ -68,6 +78,12 @@ vec2 Random2 (uint seed)
 	return vec2 (Hash (seed), Hash (seed ^ 0x9E3779B9u)) * (1.0f / 4294967296.0f);
 }
 
+bool OutsideDispatchRect (ivec2 coords)
+{
+	const ivec2 rel = coords - ivec2 (push_constants.offset_x, push_constants.offset_y);
+	return any (lessThan (rel, ivec2 (0))) || any (greaterThanEqual (rel, ivec2 (push_constants.extent_x, push_constants.extent_y)));
+}
+
 uint LogicalIndex (uint surface_index, ivec2 atlas_coords)
 {
 	const bounce_surface_t meta = bounce_surfaces[surface_index];
@@ -85,6 +101,8 @@ void CaptureDirect ()
 {
 	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
+		return;
+	if (OutsideDispatchRect (coords))
 		return;
 	const uint surface = texelFetch (surface_indices, coords, 0).x;
 	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
@@ -177,6 +195,8 @@ void FilterBounce ()
 	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, textureSize (surface_indices, 0))))
 		return;
+	if (OutsideDispatchRect (coords))
+		return;
 	const uint surface = texelFetch (surface_indices, coords, 0).x;
 	if (surface == BOUNCE_TAP_INVALID || (surface & 0x80000000u) != 0u)
 		return;
@@ -207,6 +227,8 @@ void CombineBounce ()
 {
 	const ivec2 coords = ivec2 (gl_GlobalInvocationID.xy) + ivec2 (push_constants.offset_x, push_constants.offset_y);
 	if (any (greaterThanEqual (coords, imageSize (emissive_image))))
+		return;
+	if (OutsideDispatchRect (coords))
 		return;
 	const ivec2 coarse_coords = coords / int (push_constants.coordinate_scale);
 	const uint surface = texelFetch (surface_indices, coarse_coords, 0).x;

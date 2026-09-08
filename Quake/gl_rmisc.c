@@ -2209,7 +2209,7 @@ void R_CreatePipelineLayouts ()
 
 		VkDescriptorSetLayout bounce_layouts[2] = {vulkan_globals.emissive_bounce_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
 		ZEROED_STRUCT (VkPushConstantRange, bounce_push_range);
-		bounce_push_range.size = 10 * sizeof (uint32_t);
+		bounce_push_range.size = 12 * sizeof (uint32_t);
 		bounce_push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, bounce_layout_info);
 		bounce_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

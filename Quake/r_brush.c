@@ -484,16 +484,25 @@ typedef struct emissive_bounce_sample_s
 {
 	uint32_t surface, packed_st;
 } emissive_bounce_sample_t;
+/*
+ * coordinate_scale carries a mode-specific stride, not one global scale:
+ * mode 0 captures direct texels (1), mode 3 filters bounce samples
+ * (emissive_bounce_sample_spacing), mode 4 combines detail output
+ * (R_EmissiveDetailScale or 1). offset/extent bound the exact image-space
+ * rectangle a partial dispatch may write; modes 1/2 walk samples instead
+ * and leave extent unused. Set both explicitly at every dispatch.
+ */
 typedef struct emissive_bounce_push_constants_s
 {
 	uint32_t mode, count, coordinate_scale, rays_per_sample;
 	float strength, max_distance, reflectance_lift;
 	uint32_t first;
 	int32_t offset_x, offset_y;
+	int32_t extent_x, extent_y;
 } emissive_bounce_push_constants_t;
 COMPILE_TIME_ASSERT (emissive_bounce_surface_t, sizeof (emissive_bounce_surface_t) == 16);
 COMPILE_TIME_ASSERT (emissive_bounce_sample_t, sizeof (emissive_bounce_sample_t) == 8);
-COMPILE_TIME_ASSERT (emissive_bounce_push_constants_t, sizeof (emissive_bounce_push_constants_t) == 40);
+COMPILE_TIME_ASSERT (emissive_bounce_push_constants_t, sizeof (emissive_bounce_push_constants_t) == 48);
 #define EMISSIVE_BOUNCE_MAX_RAYS 128
 #define EMISSIVE_BOUNCE_MEMORY_BUDGET_MB 256
 #define EMISSIVE_BOUNCE_VERSION 2
@@ -528,6 +537,8 @@ static qboolean emissive_bounce_cacheable_latched, emissive_bounce_transient_lat
 static uint32_t emissive_cacheable_direct_epoch, emissive_cacheable_bounce_epoch;
 static uint32_t emissive_transient_direct_epoch, emissive_transient_bounce_epoch;
 static uint32_t emissive_bounce_no_ray_refreshes;
+/* Which direct input direct_values currently holds: 0 = none, 1 = cacheable, 2 = transient. */
+static int emissive_bounce_capture_owner;
 static uint32_t emissive_bounce_dirty_receiver_surfaces;
 static uint32_t emissive_bounce_refresh_cpu_time_us;
 static qboolean emissive_bounce_budget_limited, emissive_bounce_gpu_time_valid, emissive_bounce_admission_attempted;
@@ -3920,6 +3931,7 @@ static void R_DeleteEmissiveBounceResources (void)
 	emissive_bounce_recombine_pending = emissive_bounce_cacheable_refresh_pending = emissive_bounce_transient_refresh_pending = false;
 	emissive_bounce_cacheable_force_full_refresh = false;
 	emissive_bounce_transient_outputs_initialized = emissive_bounce_transient_force_full_refresh = false;
+	emissive_bounce_capture_owner = 0;
 	emissive_cacheable_bounce_epoch = emissive_transient_bounce_epoch = 0;
 	emissive_bounce_no_ray_refreshes = emissive_bounce_dirty_receiver_surfaces = emissive_bounce_refresh_cpu_time_us = 0;
 	emissive_bounce_budget_limited = emissive_bounce_transient_budget_limited = false;
@@ -6475,6 +6487,8 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			emissive_bounce_push_constants_t constants = {4, 0, detail ? R_EmissiveDetailScale () : 1,
 				emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f,
 				R_EmissiveBounceReflectanceLift ()};
+			constants.extent_x = output->width;
+			constants.extent_y = output->height;
 			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 			vkCmdDispatch (cbx->cb, (output->width + 7) / 8, (output->height + 7) / 8, 1);
 			R_PublishEmissiveBounceImage (cbx, output);
@@ -6526,6 +6540,8 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, descriptor_set, 0, NULL);
 			emissive_bounce_push_constants_t constants = {4, 0, R_EmissiveDetailScale (), emissive_bounce_rays_per_sample,
 				CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f, R_EmissiveBounceReflectanceLift ()};
+			constants.extent_x = output->width;
+			constants.extent_y = output->height;
 			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 			vkCmdDispatch (cbx->cb, (output->width + 7) / 8, (output->height + 7) / 8, 1);
 			R_PublishEmissiveBounceImage (cbx, output);
@@ -6541,6 +6557,8 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 		emissive_bounce_push_constants_t constants = {0, 0, 1,
 			emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f,
 			R_EmissiveBounceReflectanceLift ()};
+		constants.extent_x = input->width;
+		constants.extent_y = input->height;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (input->width + 7) / 8, (input->height + 7) / 8, 1);
 		R_PublishEmissiveBounceImage (cbx, input);
@@ -6588,6 +6606,9 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 			continue;
 		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, &lightmap->emissive_bounce_descriptor_set, 0, NULL);
 		constants.mode = 3;
+		constants.offset_x = constants.offset_y = 0;
+		constants.extent_x = lightmap->emissive_texture->width;
+		constants.extent_y = lightmap->emissive_texture->height;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (lightmap->emissive_texture->width + 7) / 8, (lightmap->emissive_texture->height + 7) / 8, 1);
 	}
@@ -6607,6 +6628,9 @@ static void R_DispatchEmissiveBounce (cb_context_t *cbx, qboolean detail)
 		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, descriptor_set, 0, NULL);
 		constants.mode = 4;
 		constants.coordinate_scale = 1;
+		constants.offset_x = constants.offset_y = 0;
+		constants.extent_x = output->width;
+		constants.extent_y = output->height;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (output->width + 7) / 8, (output->height + 7) / 8, 1);
 		R_PublishEmissiveBounceImage (cbx, output);
@@ -6731,6 +6755,12 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 	VkDescriptorSet first_set = VK_NULL_HANDLE;
 	qboolean *const input_transitioned = Mem_Alloc (lightmap_count * sizeof (*input_transitioned));
 	memset (input_transitioned, 0, lightmap_count * sizeof (*input_transitioned));
+	/* direct_values is shared scratch across owners: a partial capture only
+	 * rewrites dirty tiles, so after an owner change the untouched slots still
+	 * hold the other owner's input. Recapture fully on owner change; later
+	 * stages keep their own partial/full choice. */
+	const int capture_owner = transient ? 2 : 1;
+	const qboolean capture_partial = partial && emissive_bounce_capture_owner == capture_owner;
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -6748,19 +6778,24 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 		emissive_bounce_push_constants_t constants = {
 			0, 0, 1, emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f,
 			R_EmissiveBounceReflectanceLift ()};
-		if (partial)
+		if (capture_partial)
 		{
 			for (int tile = 0; tile < num_dirty_tiles; ++tile)
 				if (dirty_tiles[tile].lightmap == i)
 				{
 					constants.offset_x = dirty_tiles[tile].x * 8;
 					constants.offset_y = dirty_tiles[tile].y * 8;
+					constants.extent_x = q_min (8, input->width - constants.offset_x);
+					constants.extent_y = q_min (8, input->height - constants.offset_y);
 					R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 					vkCmdDispatch (cbx->cb, 1, 1, 1);
 				}
 		}
 		else
 		{
+			constants.offset_x = constants.offset_y = 0;
+			constants.extent_x = input->width;
+			constants.extent_y = input->height;
 			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 			vkCmdDispatch (cbx->cb, (input->width + 7) / 8, (input->height + 7) / 8, 1);
 		}
@@ -6772,6 +6807,7 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 		*pending = false;
 		return;
 	}
+	emissive_bounce_capture_owner = capture_owner;
 	ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
 	memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	memory_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -6813,10 +6849,12 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 			const emissive_bounce_surface_t *const meta = &emissive_bounce_surface_metadata[surface_index];
 			const uint32_t width = meta->packed_direct_size & 0xFFFF, height = meta->packed_direct_size >> 16;
 			constants.mode = 3;
-			constants.coordinate_scale = 1;
+			constants.coordinate_scale = emissive_bounce_sample_spacing;
 			constants.first = 0;
 			constants.offset_x = surface->light_s;
 			constants.offset_y = surface->light_t;
+			constants.extent_x = width;
+			constants.extent_y = height;
 			vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout.handle, 0, 1, descriptor_set, 0, NULL);
 			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 			vkCmdDispatch (cbx->cb, (width + 7) / 8, (height + 7) / 8, 1);
@@ -6834,6 +6872,8 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 		constants.mode = 3;
 		constants.first = 0;
 		constants.offset_x = constants.offset_y = 0;
+		constants.extent_x = input->width;
+		constants.extent_y = input->height;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (input->width + 7) / 8, (input->height + 7) / 8, 1);
 	}
@@ -6897,6 +6937,8 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 				constants.coordinate_scale = scale;
 				constants.offset_x = x;
 				constants.offset_y = y;
+				constants.extent_x = width;
+				constants.extent_y = height;
 				R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 				vkCmdDispatch (cbx->cb, (width + 7) / 8, (height + 7) / 8, 1);
 				R_PublishEmissiveBounceImage (cbx, output);
@@ -6924,6 +6966,8 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 			constants.mode = 4;
 			constants.coordinate_scale = detail ? R_EmissiveDetailScale () : 1;
 			constants.offset_x = constants.offset_y = 0;
+			constants.extent_x = output->width;
+			constants.extent_y = output->height;
 			R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 			vkCmdDispatch (cbx->cb, (output->width + 7) / 8, (output->height + 7) / 8, 1);
 			R_PublishEmissiveBounceImage (cbx, output);
@@ -6977,6 +7021,9 @@ static void R_DispatchEmissiveBounceDebug (cb_context_t *cbx)
 		emissive_bounce_push_constants_t constants = {
 			5, 0, 1, emissive_bounce_rays_per_sample, CLAMP (0.0f, r_emissive_rt_bounce_strength.value, 4.0f), 1024.0f,
 			R_EmissiveBounceReflectanceLift ()};
+		constants.offset_x = constants.offset_y = 0;
+		constants.extent_x = texture->width;
+		constants.extent_y = texture->height;
 		R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 		vkCmdDispatch (cbx->cb, (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
 		R_PublishEmissiveBounceImage (cbx, texture);
