@@ -616,6 +616,7 @@ static vulkan_memory_t		 transient_emissive_tiles_buffer_memory;
 static VkBuffer				 transient_emissive_tile_sources_buffer;
 static vulkan_memory_t		 transient_emissive_tile_sources_buffer_memory;
 static size_t				 transient_emissive_lights_capacity;
+static size_t				 transient_emissive_light_seeds_capacity;
 static size_t				 transient_emissive_tiles_capacity;
 static size_t				 transient_emissive_tile_sources_capacity;
 static uint32_t				 transient_emissive_cpu_time_us;
@@ -2424,6 +2425,7 @@ void GL_BuildLightmaps (void)
 	transient_emissive_tiles_buffer = VK_NULL_HANDLE;
 	transient_emissive_tile_sources_buffer = VK_NULL_HANDLE;
 	transient_emissive_lights_capacity = 0;
+	transient_emissive_light_seeds_capacity = 0;
 	transient_emissive_tiles_capacity = 0;
 	transient_emissive_tile_sources_capacity = 0;
 	num_surfaces = 0;
@@ -5841,39 +5843,52 @@ static void R_EnsureTransientEmissiveResources (void)
 	const size_t   lights_size = q_max ((size_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights), sizeof (uint32_t));
 	const size_t   tiles_size = q_max ((size_t)num_transient_emissive_tiles * sizeof (*transient_emissive_tiles), sizeof (uint32_t));
 	const size_t   sources_size = q_max ((size_t)num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources), sizeof (uint32_t));
+	/* Seeds are independent of the other buffers: band limiting can need them with
+	 * no capacity growth, and ordinary growth must never leave a stale seed handle. */
+	const size_t   seeds_required = emissive_bandlimit_active
+						 ? R_TransientEmissiveCapacity (q_max ((size_t)num_transient_emissive_lights * sizeof (uint32_t), sizeof (uint32_t)))
+						 : 0;
+	const qboolean seeds_grow = seeds_required > 0 &&
+		(transient_emissive_light_seeds_buffer == VK_NULL_HANDLE || transient_emissive_light_seeds_capacity < seeds_required);
 	const qboolean grow = lights_size > transient_emissive_lights_capacity || tiles_size > transient_emissive_tiles_capacity ||
 						  sources_size > transient_emissive_tile_sources_capacity;
-	if (grow)
+	if (grow || seeds_grow)
 	{
 		if (transient_emissive_lights_buffer != VK_NULL_HANDLE || emissive_brush_receiver_count)
 			GL_WaitForDeviceIdle ();
 		R_FreeEmissiveBrushReceiverDescriptorSets ();
 		R_FreeTransientEmissiveDescriptorSets ();
-		R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
-		R_FreeBuffer (transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory, &num_vulkan_bmodel_allocations);
-		R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
-		R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
-		transient_emissive_lights_capacity = R_TransientEmissiveCapacity (lights_size);
-		transient_emissive_tiles_capacity = R_TransientEmissiveCapacity (tiles_size);
-		transient_emissive_tile_sources_capacity = R_TransientEmissiveCapacity (sources_size);
-		R_CreateBuffer (
-			&transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, transient_emissive_lights_capacity,
-			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
-			"Transient emissive source lights");
-		if (emissive_bandlimit_active)
+		if (grow)
+		{
+			R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+			R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+			R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
+			transient_emissive_lights_capacity = R_TransientEmissiveCapacity (lights_size);
+			transient_emissive_tiles_capacity = R_TransientEmissiveCapacity (tiles_size);
+			transient_emissive_tile_sources_capacity = R_TransientEmissiveCapacity (sources_size);
 			R_CreateBuffer (
-				&transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory,
-				R_TransientEmissiveCapacity (q_max ((size_t)num_transient_emissive_lights * sizeof (uint32_t), sizeof (uint32_t))),
+				&transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, transient_emissive_lights_capacity,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+				"Transient emissive source lights");
+			R_CreateBuffer (
+				&transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, transient_emissive_tiles_capacity,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+				"Transient emissive logical tiles");
+			R_CreateBuffer (
+				&transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, transient_emissive_tile_sources_capacity,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+				&num_vulkan_bmodel_allocations, NULL, "Transient emissive tile source indices");
+		}
+		if (seeds_grow)
+		{
+			R_FreeBuffer (transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory, &num_vulkan_bmodel_allocations);
+			transient_emissive_light_seeds_buffer = VK_NULL_HANDLE;
+			transient_emissive_light_seeds_capacity = seeds_required;
+			R_CreateBuffer (
+				&transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory, transient_emissive_light_seeds_capacity,
 				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
 				"Transient emissive source sampling seeds");
-		R_CreateBuffer (
-			&transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, transient_emissive_tiles_capacity,
-			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
-			"Transient emissive logical tiles");
-		R_CreateBuffer (
-			&transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, transient_emissive_tile_sources_capacity,
-			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
-			&num_vulkan_bmodel_allocations, NULL, "Transient emissive tile source indices");
+		}
 	}
 
 	qboolean created_texture = false;
@@ -5922,7 +5937,7 @@ static void R_EnsureTransientEmissiveResources (void)
 		transient_emissive_initialized = false;
 		transient_emissive_detail_cache_copied = false;
 	}
-	if (grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
+	if (grow || seeds_grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
 	{
 		const VkDescriptorBufferInfo source_buffers[6] = {
 			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
