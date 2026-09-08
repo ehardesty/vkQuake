@@ -34,23 +34,18 @@ bool EmissiveBandlimitPointOnSurface (const surface_t surf, const vec3 world_pos
 }
 
 /*
- * The sample key must survive source-list compaction: transient light array
- * positions shift when unrelated sources are added or removed, so hash the
- * source's stable transport identity (origin and radius) instead of its
- * packed index. Radiance terms stay out of the key; two sources sharing an
- * exact origin and radius share a pattern.
+ * The sample key must survive source-list compaction and source motion: transient
+ * array positions shift when unrelated sources change, and origins move, so the
+ * caller passes a stable per-source seed built from persistent identity (transient
+ * kind/owner/slot, or immutable cacheable properties). Radiance terms stay out.
  */
 vec2 EmissiveBandlimitOffset (
-	const uint surface_index, const float center_s, const float center_t, const vec3 light_origin, const float light_radius,
-	const uint sample_index)
+	const uint surface_index, const float center_s, const float center_t, const uint light_seed, const uint sample_index)
 {
 	uint key = EmissiveBandlimitHash (surface_index ^ (EMISSIVE_BANDLIMIT_VERSION * 0x9e3779b9u));
 	key = EmissiveBandlimitHash (key ^ floatBitsToUint (center_s));
 	key = EmissiveBandlimitHash (key ^ floatBitsToUint (center_t));
-	key = EmissiveBandlimitHash (key ^ floatBitsToUint (light_origin.x));
-	key = EmissiveBandlimitHash (key ^ floatBitsToUint (light_origin.y));
-	key = EmissiveBandlimitHash (key ^ floatBitsToUint (light_origin.z));
-	key = EmissiveBandlimitHash (key ^ floatBitsToUint (light_radius));
+	key = EmissiveBandlimitHash (key ^ light_seed);
 	key = EmissiveBandlimitHash (key ^ sample_index);
 	const vec2 jitter = vec2 (float (key & 0xFFFFu), float (key >> 16)) / 65536.0f;
 	const vec2 stratum = vec2 (float (sample_index & 1u), float (sample_index >> 1u));
@@ -89,7 +84,7 @@ vec3 CalculateBandlimitedEmissiveContribution (
 		{
 			vec3 tangent;
 			vec3 bitangent;
-			const vec2 offset = EmissiveBandlimitOffset (surface_index, center_s, center_t, light.origin, light.radius, sample_index);
+			const vec2 offset = EmissiveBandlimitOffset (surface_index, center_s, center_t, emissive_seeds[light_index], sample_index);
 			const vec3 world_pos = CalculateWorldPos (surf, center_s + offset.x, center_t + offset.y, tangent, bitangent);
 			if (!EmissiveBandlimitPointOnSurface (surf, world_pos, normal))
 				continue;

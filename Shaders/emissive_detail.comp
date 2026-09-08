@@ -75,6 +75,11 @@ layout (std430, set = 0, binding = 10) restrict buffer emissive_visibility_buffe
 {
 	uint emissive_visibility[];
 };
+/* Stable per-source sampling seeds; read only by the band-limited branch. */
+layout (std430, set = 0, binding = 11) readonly restrict buffer emissive_seeds_buffer
+{
+	uint emissive_seeds[];
+};
 layout (set = 1, binding = 0) uniform accelerationStructureEXT tlas;
 
 bool EmissiveIsOccluded (const vec3 world_pos, const vec3 normal, const vec3 light_origin)

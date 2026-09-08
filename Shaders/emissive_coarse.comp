@@ -73,6 +73,11 @@ layout (std430, set = 0, binding = 10) readonly restrict buffer emissive_visibil
 {
 	uint emissive_visibility[];
 };
+/* Stable per-source sampling seeds; read only by the band-limited branch. */
+layout (std430, set = 0, binding = 11) readonly restrict buffer emissive_seeds_buffer
+{
+	uint emissive_seeds[];
+};
 
 #include "lightmap_coords.inc"
 #define EMISSIVE_OPTIONAL_SOURCE_INDICES

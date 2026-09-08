@@ -348,6 +348,9 @@ static VkBuffer			   lightstyles_scales_buffer;
 static VkBuffer			   lights_buffer;
 static vulkan_memory_t	   emissive_lights_buffer_memory;
 static VkBuffer			   emissive_lights_buffer;
+/* Stable per-source band-limit sampling seeds, parallel to the lights array. */
+static vulkan_memory_t	   emissive_light_seeds_buffer_memory;
+static VkBuffer			   emissive_light_seeds_buffer;
 static vulkan_memory_t	   emissive_tiles_buffer_memory;
 static VkBuffer			   emissive_tiles_buffer;
 static vulkan_memory_t	   emissive_tile_sources_buffer_memory;
@@ -584,6 +587,7 @@ static emissive_light_t		*transient_emissive_lights;
 static emissive_light_t		*previous_transient_emissive_lights;
 static transient_emissive_source_id_t *transient_emissive_light_ids;
 static transient_emissive_source_id_t *previous_transient_emissive_light_ids;
+static uint32_t *transient_emissive_light_seeds;
 static int					 num_transient_emissive_lights;
 static int					 num_previous_transient_emissive_lights;
 static emissive_logical_tile_t *transient_emissive_tiles;
@@ -605,6 +609,8 @@ static qboolean				 transient_emissive_detail_cache_copied;
 static qboolean				 transient_emissive_force_refresh;
 static VkBuffer				 transient_emissive_lights_buffer;
 static vulkan_memory_t		 transient_emissive_lights_buffer_memory;
+static VkBuffer				 transient_emissive_light_seeds_buffer;
+static vulkan_memory_t		 transient_emissive_light_seeds_buffer_memory;
 static VkBuffer				 transient_emissive_tiles_buffer;
 static vulkan_memory_t		 transient_emissive_tiles_buffer_memory;
 static VkBuffer				 transient_emissive_tile_sources_buffer;
@@ -638,7 +644,7 @@ static void						R_FreeEmissiveBandlimitDescriptorSets (void);
 static void						R_FreeEmissiveOccluderDescriptorSets (void);
 static qboolean					R_EnableEmissiveBandlimit (void);
 static void						R_ResetEmissiveBandlimitStats (void);
-static void						R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[5]);
+static void						R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[6]);
 static void						R_InitializeTransientEmissiveImages (cb_context_t *cbx, qboolean detail_only);
 static void						R_AllocateEmissiveBounceDebugLightmaps (void);
 static void						R_InvalidateEmissiveBrushReceiverSources (void);
@@ -2378,6 +2384,7 @@ void GL_BuildLightmaps (void)
 	SAFE_FREE (previous_transient_emissive_lights);
 	SAFE_FREE (transient_emissive_light_ids);
 	SAFE_FREE (previous_transient_emissive_light_ids);
+	SAFE_FREE (transient_emissive_light_seeds);
 	SAFE_FREE (transient_emissive_tiles);
 	SAFE_FREE (transient_emissive_tile_sources);
 	SAFE_FREE (transient_emissive_tile_surface_offsets);
@@ -2408,9 +2415,11 @@ void GL_BuildLightmaps (void)
 	transient_emissive_force_refresh = false;
 	GL_ResetEmissiveTransientTimestamp ();
 	R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+	R_FreeBuffer (transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 	R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
 	transient_emissive_lights_buffer = VK_NULL_HANDLE;
+	transient_emissive_light_seeds_buffer = VK_NULL_HANDLE;
 	transient_emissive_tiles_buffer = VK_NULL_HANDLE;
 	transient_emissive_tile_sources_buffer = VK_NULL_HANDLE;
 	transient_emissive_lights_capacity = 0;
@@ -3440,6 +3449,24 @@ void R_InvalidateTransientEmissiveLights (void)
 	transient_emissive_force_refresh = true;
 }
 
+/* Stable sampling seed from persistent source identity. Array positions shift
+ * under compaction and origins move, so neither may feed the sample hash. */
+static uint32_t R_TransientEmissiveSourceSeed (transient_emissive_source_id_t id)
+{
+	uint32_t seed = COM_HashBlock (&id.owner, sizeof (id.owner));
+	seed ^= COM_HashBlock (&id.slot, sizeof (id.slot)) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+	seed ^= (uint32_t)id.kind + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+	return seed;
+}
+
+/* Cacheable sources never move, so immutable transport properties seed them. */
+static uint32_t R_EmissiveLightSeed (const vec3_t origin, float radius)
+{
+	uint32_t seed = COM_HashBlock (origin, sizeof (vec3_t));
+	seed ^= COM_HashBlock (&radius, sizeof (radius)) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+	return seed;
+}
+
 void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, int count)
 {
 	const double start_time = Sys_DoubleTime ();
@@ -3456,6 +3483,7 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 
 	SAFE_FREE (previous_transient_emissive_lights);
 	SAFE_FREE (previous_transient_emissive_light_ids);
+	SAFE_FREE (transient_emissive_light_seeds);
 	previous_transient_emissive_lights = transient_emissive_lights;
 	previous_transient_emissive_light_ids = transient_emissive_light_ids;
 	num_previous_transient_emissive_lights = num_transient_emissive_lights;
@@ -3468,10 +3496,12 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 	{
 		transient_emissive_lights = Mem_Alloc (count * sizeof (*transient_emissive_lights));
 		transient_emissive_light_ids = Mem_Alloc (count * sizeof (*transient_emissive_light_ids));
+		transient_emissive_light_seeds = Mem_Alloc (count * sizeof (*transient_emissive_light_seeds));
 		for (int i = 0; i < count; ++i)
 		{
 			transient_emissive_light_ids[i] = sources[i].id;
 			transient_emissive_lights[i] = sources[i].light;
+			transient_emissive_light_seeds[i] = R_TransientEmissiveSourceSeed (sources[i].id);
 		}
 	}
 
@@ -4410,6 +4440,7 @@ void R_TransientEmissiveStats (
 	*tiles = num_transient_emissive_tiles;
 	*source_links = num_transient_emissive_tile_sources;
 	*cpu_bytes = (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_lights) +
+				 (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_light_seeds) +
 				 (uint64_t)num_previous_transient_emissive_lights * sizeof (*previous_transient_emissive_lights) +
 				 (uint64_t)num_transient_emissive_lights * sizeof (*transient_emissive_light_ids) +
 				 (uint64_t)num_previous_transient_emissive_lights * sizeof (*previous_transient_emissive_light_ids) +
@@ -5612,7 +5643,7 @@ R_AllocateEmissiveComputeDescriptorSet
 ==================
 */
 static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
-	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const gltexture_t *cacheable_texture, const VkDescriptorBufferInfo source_buffers[5],
+	const struct lightmap_s *lightmap, const gltexture_t *output_texture, const gltexture_t *cacheable_texture, const VkDescriptorBufferInfo source_buffers[6],
 	const char *kind, int lightmap_index)
 {
 	VkDescriptorSet descriptor_set = R_AllocateDescriptorSet (&vulkan_globals.emissive_compute_set_layout);
@@ -5627,7 +5658,7 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	image_infos[2].imageView = (cacheable_texture ? cacheable_texture : output_texture)->image_view;
 	image_infos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-	VkDescriptorBufferInfo buffer_infos[8];
+	VkDescriptorBufferInfo buffer_infos[9];
 	memset (buffer_infos, 0, sizeof (buffer_infos));
 	buffer_infos[0].buffer = surface_data_buffer;
 	buffer_infos[0].range = num_surfaces * sizeof (lm_compute_surface_data_t);
@@ -5640,8 +5671,9 @@ static VkDescriptorSet R_AllocateEmissiveComputeDescriptorSet (
 	buffer_infos[5] = source_buffers[2];
 	buffer_infos[6] = source_buffers[3];
 	buffer_infos[7] = source_buffers[4];
+	buffer_infos[8] = source_buffers[5];
 
-	VkWriteDescriptorSet writes[11];
+	VkWriteDescriptorSet writes[12];
 	memset (writes, 0, sizeof (writes));
 	for (int binding = 0; binding < countof (writes); ++binding)
 	{
@@ -5728,13 +5760,14 @@ static void R_CreateEmissiveRadianceOverlayDescriptorSets (void)
 	R_FreeEmissiveRadianceOverlayDescriptorSets ();
 	if (emissive_radiance_tiles_buffer == VK_NULL_HANDLE || emissive_lights_buffer == VK_NULL_HANDLE)
 		return;
-	const VkDescriptorBufferInfo source_buffers[5] = {
+	const VkDescriptorBufferInfo source_buffers[6] = {
 		{emissive_lights_buffer, 0, VK_WHOLE_SIZE},
 		{emissive_radiance_tiles_buffer, 0, VK_WHOLE_SIZE},
 		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer, 0,
 		 emissive_tile_sources_buffer != VK_NULL_HANDLE ? VK_WHOLE_SIZE : sizeof (uint32_t)},
 		{emissive_modulations_buffer, 0, VK_WHOLE_SIZE},
 		{emissive_visibility_available ? emissive_visibility_buffer : emissive_modulations_buffer, 0, VK_WHOLE_SIZE},
+		{emissive_light_seeds_buffer, 0, VK_WHOLE_SIZE},
 	};
 	for (int i = 0; i < lightmap_count; ++i)
 	{
@@ -5792,6 +5825,7 @@ static void R_EnsureTransientEmissiveResources (void)
 		R_FreeEmissiveBrushReceiverDescriptorSets ();
 		R_FreeTransientEmissiveDescriptorSets ();
 		R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
+		R_FreeBuffer (transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory, &num_vulkan_bmodel_allocations);
 		R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 		R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
 		transient_emissive_lights_capacity = R_TransientEmissiveCapacity (lights_size);
@@ -5801,6 +5835,11 @@ static void R_EnsureTransientEmissiveResources (void)
 			&transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, transient_emissive_lights_capacity,
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
 			"Transient emissive source lights");
+		R_CreateBuffer (
+			&transient_emissive_light_seeds_buffer, &transient_emissive_light_seeds_buffer_memory,
+			R_TransientEmissiveCapacity (q_max ((size_t)num_transient_emissive_lights * sizeof (uint32_t), sizeof (uint32_t))),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+			"Transient emissive source sampling seeds");
 		R_CreateBuffer (
 			&transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, transient_emissive_tiles_capacity,
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
@@ -5859,12 +5898,13 @@ static void R_EnsureTransientEmissiveResources (void)
 	}
 	if (grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
 	{
-		const VkDescriptorBufferInfo source_buffers[5] = {
+		const VkDescriptorBufferInfo source_buffers[6] = {
 			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
 			{transient_emissive_tiles_buffer, 0, transient_emissive_tiles_capacity},
 			{transient_emissive_tile_sources_buffer, 0, transient_emissive_tile_sources_capacity},
 			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
 			{transient_emissive_lights_buffer, 0, transient_emissive_lights_capacity},
+			{transient_emissive_light_seeds_buffer, 0, VK_WHOLE_SIZE},
 		};
 		R_FreeTransientEmissiveDescriptorSets ();
 		for (int i = 0; i < lightmap_count; ++i)
@@ -5950,6 +5990,8 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 	}
 	R_FreeBuffer (emissive_lights_buffer, &emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_lights_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (emissive_light_seeds_buffer, &emissive_light_seeds_buffer_memory, &num_vulkan_bmodel_allocations);
+	emissive_light_seeds_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_tiles_buffer, &emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
 	emissive_tiles_buffer = VK_NULL_HANDLE;
 	R_FreeBuffer (emissive_occluder_tiles_buffer, &emissive_occluder_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
@@ -6034,6 +6076,16 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		&emissive_lights_buffer, &emissive_lights_buffer_memory, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, "Emissive source lights");
 	R_StagingUploadBuffer (emissive_lights_buffer, size, (const byte *)lights);
+	uint32_t *const seeds = Mem_Alloc (count * sizeof (*seeds));
+	for (int i = 0; i < count; ++i)
+		seeds[i] = R_EmissiveLightSeed (lights[i].origin, lights[i].radius);
+	const size_t seeds_size = count * sizeof (*seeds);
+	R_CreateBuffer (
+		&emissive_light_seeds_buffer, &emissive_light_seeds_buffer_memory, seeds_size,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
+		"Emissive source sampling seeds");
+	R_StagingUploadBuffer (emissive_light_seeds_buffer, seeds_size, (const byte *)seeds);
+	Mem_Free (seeds);
 	emissive_light_styles = Mem_Alloc (count * sizeof (*emissive_light_styles));
 	emissive_light_modulations = Mem_Alloc (count * sizeof (*emissive_light_modulations));
 	qboolean used_styles[MAX_LIGHTSTYLES];
@@ -6099,7 +6151,7 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 			"RT emissives: retained visibility rejected (%" PRIu64 " bytes, %" PRIu64 " byte budget); styled detail uses coarse fallback\n",
 			visibility_required_size, visibility_budget);
 	num_emissive_lights = count;
-	const VkDescriptorBufferInfo source_buffers[5] = {
+	const VkDescriptorBufferInfo source_buffers[6] = {
 		{emissive_lights_buffer, 0, size},
 		{emissive_tiles_buffer != VK_NULL_HANDLE ? emissive_tiles_buffer : emissive_lights_buffer, 0, tiles_size ? tiles_size : sizeof (uint32_t)},
 		{emissive_tile_sources_buffer != VK_NULL_HANDLE ? emissive_tile_sources_buffer : emissive_lights_buffer, 0,
@@ -6107,8 +6159,9 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		{emissive_modulations_buffer, 0, modulations_size},
 		{emissive_visibility_available ? emissive_visibility_buffer : emissive_modulations_buffer, 0,
 		 emissive_visibility_available ? VK_WHOLE_SIZE : modulations_size},
+		{emissive_light_seeds_buffer, 0, VK_WHOLE_SIZE},
 	};
-	VkDescriptorBufferInfo occluder_source_buffers[5];
+	VkDescriptorBufferInfo occluder_source_buffers[6];
 	memcpy (occluder_source_buffers, source_buffers, sizeof (occluder_source_buffers));
 	occluder_source_buffers[1].buffer = emissive_occluder_tiles_buffer != VK_NULL_HANDLE ? emissive_occluder_tiles_buffer : emissive_lights_buffer;
 	occluder_source_buffers[1].range = tiles_size ? tiles_size : sizeof (uint32_t);
@@ -6173,7 +6226,7 @@ static void R_ResetEmissiveBandlimitStats (void)
 	emissive_bandlimit_budget_limited = false;
 }
 
-static void R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[5])
+static void R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInfo source_buffers[6])
 {
 	R_FreeEmissiveBandlimitDescriptorSets ();
 	if (!emissive_bandlimit_active)
@@ -6187,7 +6240,7 @@ static void R_CreateEmissiveBandlimitDescriptorSets (const VkDescriptorBufferInf
 			continue;
 		lightmap->emissive_bandlimit_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 			lightmap, lightmap->emissive_detail_texture, NULL, source_buffers, "bandlimit detail", i);
-		VkDescriptorBufferInfo radiance_buffers[5];
+		VkDescriptorBufferInfo radiance_buffers[6];
 		memcpy (radiance_buffers, source_buffers, sizeof (radiance_buffers));
 		radiance_buffers[1].buffer = emissive_radiance_tiles_buffer != VK_NULL_HANDLE ? emissive_radiance_tiles_buffer : emissive_lights_buffer;
 		radiance_buffers[1].offset = 0;
@@ -7052,7 +7105,7 @@ R_EmissiveLightStats
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending)
 {
 	*count = num_emissive_lights;
-	*allocated_bytes = emissive_lights_buffer_memory.size;
+	*allocated_bytes = emissive_lights_buffer_memory.size + emissive_light_seeds_buffer_memory.size;
 	*pending = emissive_coarse_pending;
 }
 
