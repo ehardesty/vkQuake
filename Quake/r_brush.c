@@ -4356,6 +4356,15 @@ qboolean R_TransientEmissiveActive (void)
 	return num_transient_emissive_lights > 0;
 }
 
+/* Whether world-draw recording must wait for this frame's update task: only when
+ * transient selection or transient bounce output can change under it. Evaluated
+ * while building the task graph, from frame-stable pre-task state. */
+qboolean R_TransientEmissivePublicationNeeded (void)
+{
+	return r_emissive_rt.value > 0.0f && gl_fullbrights.value > 0.0f && R_TransientEmissiveActive () &&
+		(transient_emissive_pending || transient_emissive_detail_pending || emissive_bounce_transient_refresh_pending);
+}
+
 void R_LatchEmissiveResolvedTextures (void)
 {
 	emissive_bounce_cacheable_latched = false;

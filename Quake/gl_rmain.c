@@ -1658,9 +1658,11 @@ void R_RenderView (
 		Task_AddDependency (update_lightmaps_task, draw_done_task);
 
 		// World draws select current-generation transient detail/bounce published by the
-		// update task, so they must record after it. GPU execution order is already fixed
-		// by same-queue submission order; this only orders CPU recording.
-		Task_AddDependency (update_lightmaps_task, draw_world_task);
+		// update task, so when such publication is possible they must record after it.
+		// The dispatcher's image barriers, submitted on one queue in index order, already
+		// order GPU execution; this only orders CPU recording.
+		if (R_TransientEmissivePublicationNeeded ())
+			Task_AddDependency (update_lightmaps_task, draw_world_task);
 
 		if (r_showtris.value)
 		{
