@@ -1,10 +1,15 @@
 #ifdef EMISSIVE_BANDLIMIT
-vec4 SampleBandlimitedEmissiveDetail (const vec2 lightmap_uv, const vec2 detail_uv)
+vec4 SampleBandlimitedEmissiveDetail (const vec2 emissive_texel, const vec2 detail_uv)
 {
 	const ivec2 detail_size = textureSize (emissive_detail_tex, 0);
 	const ivec2 surface_indices_size = textureSize (emissive_surface_indices_tex, 0);
 	const int detail_scale = max (detail_size.x / surface_indices_size.x, 1);
-	const ivec2 receiver_coords = clamp (ivec2 (lightmap_uv * vec2 (surface_indices_size)), ivec2 (0), surface_indices_size - ivec2 (1));
+	// Receiver and tap coordinates share the cropped emissive-atlas space: emissive_texel is
+	// already offset-corrected (lightmap_uv * LMBLOCK - atlas_offset), so flooring it addresses
+	// the same surface-index texel the coarse/detail builders wrote. Deriving the receiver from
+	// lightmap_uv * surface_indices_size instead would rescale into the wrong chart whenever the
+	// cropped atlas is smaller than the full lightmap block.
+	const ivec2 receiver_coords = clamp (ivec2 (floor (emissive_texel)), ivec2 (0), surface_indices_size - ivec2 (1));
 	const uint receiver_surface = texelFetch (emissive_surface_indices_tex, receiver_coords, 0).x;
 	const vec2 detail_texel = detail_uv * vec2 (detail_size) - 0.5f;
 	const ivec2 first_detail_coords = ivec2 (floor (detail_texel));
@@ -78,7 +83,7 @@ vec4 WorldFragmentColor ()
 		vec4 emissive_detail = stored_emissive_detail;
 #ifdef EMISSIVE_BANDLIMIT
 		if (emissive_bandlimit_enabled)
-			emissive_detail = SampleBandlimitedEmissiveDetail (emissive_uv, emissive_uv);
+			emissive_detail = SampleBandlimitedEmissiveDetail (emissive_texel, emissive_uv);
 #endif
 		if (emissive_debug_mode == 2 || emissive_debug_mode == 6)
 			return vec4 (emissive_detail.rgb, 1.0);
