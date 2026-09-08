@@ -1602,6 +1602,9 @@ void R_CreateDescriptorSetLayouts ()
 	{
 		int num_descriptors = 0;
 		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_coarse_layout_bindings, 12);
+		// Binding 11 carries band-limit sampling seeds in this shared layout so classic
+		// pipelines need no layout fork: classic sets bind a fallback buffer and never
+		// read it. Seed buffers themselves are only allocated when band-limit mode is active.
 		emissive_coarse_layout_bindings[0].binding = num_descriptors++;
 		emissive_coarse_layout_bindings[0].descriptorCount = 1;
 		emissive_coarse_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
