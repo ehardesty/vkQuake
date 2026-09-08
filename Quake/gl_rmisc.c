@@ -4941,6 +4941,7 @@ void R_Init (void)
 
 	Cmd_AddCommand ("vkmemstats", R_VulkanMemStats_f);
 	Cmd_AddCommand ("r_emissive_rt_stats", R_EmissiveRTStats_f);
+	Cmd_AddCommand ("r_rt_max_quality", R_RTMaxQuality_f);
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_lightmap);
 	Cvar_RegisterVariable (&r_drawentities);

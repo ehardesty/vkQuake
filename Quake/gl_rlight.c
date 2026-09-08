@@ -1591,6 +1591,47 @@ void R_EmissiveLiquidReceiversChanged_f (cvar_t *var)
 		GL_RebuildIndirectDraws (num_emissive_world_receivers > 0 && r_emissive_rt.value > 0.0f, true);
 }
 
+void R_RTMaxQuality_f (void)
+{
+	if (!vulkan_globals.ray_query)
+	{
+		Con_Printf ("Maximum RT quality is unavailable: this Vulkan device does not support the required ray-query features\n");
+		return;
+	}
+
+	/* Prerequisites and ordinary dynamic-light shadows. */
+	Cvar_SetValueQuick (&gl_fullbrights, 1.0f);
+	Cvar_SetValueQuick (&r_gpulightmapupdate, 1.0f);
+	Cvar_SetValueQuick (&r_rtshadows, 3.0f);
+
+	/* Direct transport quality and complete optional receiver coverage. */
+	Cvar_SetValueQuick (&r_emissive_rt_resolution, 4.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_occluders, 2.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_external_bsp, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_liquid_receivers, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_translucent_receivers, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_sprite_receivers, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_particle_receivers, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_model_emitters, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_bandlimit, 1.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_model_lights, EMISSIVE_CLUSTERED_LIGHTS);
+
+	/* Highest supported bounce sampling without changing artistic energy controls. */
+	Cvar_SetValueQuick (&r_emissive_rt_bounce_rays, 128.0f);
+	Cvar_SetValueQuick (&r_emissive_rt_bounce_resolution, 1.0f);
+	if (r_emissive_rt_bounce_strength.value <= 0.0f)
+		Cvar_SetValueQuick (&r_emissive_rt_bounce_strength, 0.65f);
+	Cvar_SetValueQuick (&r_emissive_rt_bounce, 1.0f);
+
+	Cvar_SetValueQuick (&r_emissive_rt_debug, 0.0f);
+	Cvar_SetValueQuick (&r_emissive_rt, 1.0f);
+
+	Con_Printf (
+		"Maximum RT quality requested: dynamic shadows high, direct 4x band-limited, occluders tier 2, all implemented receivers and emitters, "
+		"4 model lights, bounce full-coarse at 128 rays/sample\n");
+	Con_Printf ("Bounce strength and reflectance remain artistic controls; 4x direct resolution becomes active on the next map load\n");
+}
+
 void R_EmissiveRTStats_f (void)
 {
 	int		 coarse_lightmaps;
