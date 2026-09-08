@@ -1699,7 +1699,6 @@ void R_RenderView (
 		R_SetupViewBeforeMark (NULL);
 		R_MarkSurfaces (use_tasks, INVALID_TASK_HANDLE, NULL, NULL, NULL); // johnfitz -- create texture chains from PVS
 		R_UpdateWarpTextures (NULL);
-		R_DrawWorldTask (0, NULL);
 		R_DrawSkyTask (NULL);
 		R_DrawWaterTask (NULL);
 		R_DrawEntitiesTask (0, NULL);
@@ -1723,6 +1722,10 @@ void R_RenderView (
 		}
 		else
 			R_UpdateEmissiveLightmapsOnly ();
+		// World draws select transient detail/bounce published above; record them after
+		// the updates, matching the tasked path. Recording order does not affect GPU
+		// execution order.
+		R_DrawWorldTask (0, NULL);
 		R_PrintStats ();
 	}
 }
