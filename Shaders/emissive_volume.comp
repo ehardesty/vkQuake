@@ -1,0 +1,125 @@
+#version 460
+#extension GL_ARB_separate_shader_objects : enable
+
+// Fused camera-aligned air-scattering volume for RT-emissive sources.
+// One invocation owns one XY column and integrates all eligible canonical
+// emitters through depth, writing cumulative scattering at depth boundaries.
+// RV2: explicit unshadowed diagnostic mode only (no ray queries); shadowed
+// operation arrives in RV3 behind the same source adapter and radiometry.
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct emissive_light_t
+{
+	vec3  origin;
+	float radius;
+	vec3  color;
+	float intensity;
+};
+
+layout (set = 0, binding = 0, rgba16f) uniform image3D output_image;
+layout (std430, set = 0, binding = 1) readonly restrict buffer cacheable_lights_buffer
+{
+	emissive_light_t cacheable_lights[];
+};
+layout (std430, set = 0, binding = 2) readonly restrict buffer cacheable_modulations_buffer
+{
+	float cacheable_modulations[];
+};
+layout (std430, set = 0, binding = 3) readonly restrict buffer transient_lights_buffer
+{
+	emissive_light_t transient_lights[];
+};
+
+layout (push_constant) uniform PushConsts
+{
+	vec4  camera_origin_zmax; // xyz: camera origin, w: forward-depth extent
+	vec4  cam_forward_tanx;	 // xyz: camera forward (unit), w: tan(fovx / 2)
+	vec4  cam_right_tany;	 // xyz: camera right (unit), w: tan(fovy / 2)
+	vec4  cam_up_fogdensity; // xyz: camera up (unit), w: shader fog density
+	uvec4 counts;			 // x: cacheable sources, y: transient sources, z: depth segments, w: flags
+	vec4  params;			 // x: scattering strength, y: grid nx, z: grid ny, w: reference length
+}
+push_constants;
+
+#define VOLUME_FLAG_SHADOWED 1u
+
+vec3 EvaluateSources (const vec3 sample_pos)
+{
+	vec3 contribution = vec3 (0.0f);
+	for (uint i = 0; i < push_constants.counts.x; ++i)
+	{
+		const emissive_light_t light = cacheable_lights[i];
+		const float modulation = cacheable_modulations[i];
+		if (modulation <= 0.0f || light.intensity <= 0.0f || light.radius <= 0.0f)
+			continue;
+		const vec3	light_vec = light.origin - sample_pos;
+		const float dist = length (light_vec);
+		if (dist >= light.radius)
+			continue;
+		const float radial_falloff = max (1.0f - dist / light.radius, 0.0f);
+		contribution += modulation * light.intensity * radial_falloff * light.color;
+	}
+	for (uint i = 0; i < push_constants.counts.y; ++i)
+	{
+		const emissive_light_t light = transient_lights[i];
+		if (light.intensity <= 0.0f || light.radius <= 0.0f)
+			continue;
+		const vec3	light_vec = light.origin - sample_pos;
+		const float dist = length (light_vec);
+		if (dist >= light.radius)
+			continue;
+		const float radial_falloff = max (1.0f - dist / light.radius, 0.0f);
+		contribution += light.intensity * radial_falloff * light.color;
+	}
+	// Defensive storage guard: nonfinite or absurd inputs must not poison the
+	// volume. Canonical colors above one are valid and pass through untouched.
+	if (!all (lessThan (abs (contribution), vec3 (1e9))))
+		contribution = vec3 (0.0f);
+	return contribution;
+}
+
+void main ()
+{
+	const uint nx = uint (push_constants.params.y);
+	const uint ny = uint (push_constants.params.z);
+	const uvec2 column = gl_GlobalInvocationID.xy;
+	if (column.x >= nx || column.y >= ny)
+		return;
+
+	const float u = (float (column.x) + 0.5f) / float (nx);
+	const float v = (float (column.y) + 0.5f) / float (ny);
+	// Matches the fragment column convention in emissive_volume.inc: u grows
+	// right, v grows down the Vulkan framebuffer, q projects to one on the
+	// camera forward axis so z below is forward view depth.
+	const vec3 q = push_constants.cam_forward_tanx.xyz + (2.0f * u - 1.0f) * push_constants.cam_forward_tanx.w * push_constants.cam_right_tany.xyz -
+				   (2.0f * v - 1.0f) * push_constants.cam_right_tany.w * push_constants.cam_up_fogdensity.xyz;
+	const float segment_length_scale = length (q);
+
+	const float z_max = push_constants.camera_origin_zmax.w;
+	const uint  segments = push_constants.counts.z;
+	const float base_scattering = 1.0f / push_constants.params.w;
+	const float fog_density = push_constants.cam_up_fogdensity.w;
+	const float strength = push_constants.params.x;
+
+	vec3 accumulated = vec3 (0.0f);
+	imageStore (output_image, ivec3 (column, 0), vec4 (0.0f));
+	for (uint s = 0; s < segments; ++s)
+	{
+		const float t0 = float (s) / float (segments);
+		const float t1 = float (s + 1) / float (segments);
+		const float z_a = z_max * t0 * t0;
+		const float z_b = z_max * t1 * t1;
+		const float z_m = 0.5f * (z_a + z_b);
+		const vec3  sample_pos = push_constants.camera_origin_zmax.xyz + q * z_m;
+		// Existing renderer fog transmittance, not opacity: at zero authored
+		// fog this weight is exactly one and can never gate scattering.
+		const float fog_transmittance = exp (-pow (fog_density * z_m, 2.0f));
+		const vec3  radiance = EvaluateSources (sample_pos);
+		const float ds = segment_length_scale * (z_b - z_a);
+		accumulated += strength * base_scattering * ds * fog_transmittance * radiance;
+		// Storage-range defense for the RGBA16F volume; validation inside the
+		// representable range is unaffected.
+		imageStore (output_image, ivec3 (column, int (s + 1)), vec4 (min (accumulated, vec3 (1e4)), 1.0f));
+	}
+}

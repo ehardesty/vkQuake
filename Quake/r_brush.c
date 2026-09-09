@@ -1373,6 +1373,20 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			int pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 								 (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) + (detail_enabled ? 32 : 0) +
 								 (bandlimit_enabled ? 64 : 0);
+			// RV2 volume mirrors R_FlushBatch: opaque/alpha-tested draws sample
+			// air scattering; liquid-receiver, alpha-blend, bandlimit, and
+			// surface-debug draws keep their original pipelines.
+			const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
+			const qboolean volume_wanted = !alpha_blend && !liquid_emissive_receiver && !bandlimit_enabled && !emissive_debug &&
+										 R_EmissiveVolumeReady ();
+			vulkan_pipeline_t volume_pipeline;
+			qboolean volume_selected = false;
+			memset (&volume_pipeline, 0, sizeof (volume_pipeline));
+			if (volume_wanted && cbx->render_pass_index == RENDER_PASS_INDEX_MAIN)
+			{
+				volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
+				volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+			}
 			vulkan_pipeline_t pipeline;
 			if (liquid_emissive_receiver)
 			{
@@ -1390,12 +1404,23 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
 				pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
 			}
+			else if (volume_selected)
+				pipeline = volume_pipeline;
 			else
 				pipeline = R_PipelineForRenderPass (
 					cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
 					vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
 					vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			if (volume_selected)
+			{
+				const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
+				float volume_push[5];
+				vulkan_globals.vk_cmd_bind_descriptor_sets (
+					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+				R_EmissiveVolumeFragmentPush (volume_push);
+				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (volume_push), volume_push);
+			}
 
 			qboolean use_zbias = INDIRECT_ZBIAS && gl_zfix.value && indirect_draws[i].is_bmodel;
 			float	 constant_factor = 0.0f, slope_factor = 0.0f;
@@ -7674,6 +7699,18 @@ reclassification happens at this seam: every accepted enabled source in
 each collection is visible to the volume exactly once.
 ==================
 */
+int R_EmissiveVolumeFrameSlot (void)
+{
+	return current_compute_buffer_index;
+}
+
+void R_EmissiveVolumeParentBuffers (VkBuffer *cacheable, VkBuffer *modulations, VkBuffer *transient)
+{
+	*cacheable = emissive_lights_buffer;
+	*modulations = emissive_modulations_buffer;
+	*transient = transient_emissive_lights_buffer;
+}
+
 void R_EmissiveVolumeSourceView (
 	const emissive_light_t **cacheable_lights, const float **cacheable_modulations, int *num_cacheable,
 	const emissive_light_t **transient_lights, int *num_transient)
@@ -10011,6 +10048,7 @@ void R_UpdateEmissiveLightmapsOnly (void)
 	R_UpdateEmissiveRadiance (cbx);
 	R_UpdateTransientEmissiveLightmaps (cbx);
 	R_UpdateEmissiveBrushReceiverLightmaps (cbx);
+	R_EmissiveVolumeUpdate (cbx);
 	R_RefreshEmissiveBounceLayers (cbx);
 	R_EndDebugUtilsLabel (cbx);
 }
@@ -10033,6 +10071,7 @@ void R_UpdateLightmapsAndIndirect (void *unused)
 	R_UpdateEmissiveRadiance (cbx);
 	R_UpdateTransientEmissiveLightmaps (cbx);
 	R_UpdateEmissiveBrushReceiverLightmaps (cbx);
+	R_EmissiveVolumeUpdate (cbx);
 	R_RefreshEmissiveBounceLayers (cbx);
 
 	for (int i = 0; i < MAX_LIGHTSTYLES; ++i)

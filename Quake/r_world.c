@@ -1172,6 +1172,22 @@ static void R_FlushBatch (
 		int			   pipeline_index = (fullbright_enabled ? 1 : 0) + (alpha_test ? 2 : 0) + (alpha_blend ? 4 : 0) +
 										(vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) + (detail_enabled ? 32 : 0) +
 										(bandlimit_enabled ? 64 : 0);
+		// RV2 volume: opaque/alpha-tested world and brush draws sample the
+		// air-scattering volume at their own depth. Liquid/additive draws
+		// (RV6B), OIT stages (RV6C), bandlimit-combined draws, and surface
+		// debug draws keep their original pipelines and bind nothing new.
+		const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
+		const qboolean volume_wanted =
+			!alpha_blend && !emissive_add && !bandlimit_enabled && !emissive_debug && R_EmissiveVolumeReady ();
+		vulkan_pipeline_t volume_pipeline;
+		qboolean volume_selected = false;
+		memset (&volume_pipeline, 0, sizeof (volume_pipeline));
+		if (volume_wanted && cbx->render_pass_index == RENDER_PASS_INDEX_MAIN)
+		{
+			volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
+			volume_selected =
+				volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+		}
 		vulkan_pipeline_t pipeline;
 		if (emissive_add)
 		{
@@ -1189,6 +1205,8 @@ static void R_FlushBatch (
 				alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
 			pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
 		}
+		else if (volume_selected)
+			pipeline = volume_pipeline;
 		else
 			pipeline = R_PipelineForRenderPass (
 				cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
@@ -1230,6 +1248,15 @@ static void R_FlushBatch (
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1,
 					&surface_indices_texture->descriptor_set, 0, NULL);
+		}
+		if (volume_selected)
+		{
+			const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
+			float volume_push[5];
+			vulkan_globals.vk_cmd_bind_descriptor_sets (
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+			R_EmissiveVolumeFragmentPush (volume_push);
+			R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (volume_push), volume_push);
 		}
 
 		VkBuffer	 buffer;

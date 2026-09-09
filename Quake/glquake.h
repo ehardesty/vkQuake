@@ -484,6 +484,8 @@ typedef struct
 	vulkan_pipeline_t		 emissive_transient_detail_pipeline;
 	vulkan_pipeline_t		 emissive_bounce_pipeline;
 	vulkan_pipeline_t		 emissive_brush_receiver_pipeline;
+	vulkan_pipeline_t		 emissive_volume_pipeline;
+	vulkan_pipeline_t		 world_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;
@@ -511,6 +513,7 @@ typedef struct
 	vulkan_desc_set_layout_t emissive_compute_set_layout;
 	vulkan_desc_set_layout_t emissive_bounce_set_layout;
 	vulkan_desc_set_layout_t emissive_brush_receiver_set_layout;
+	vulkan_desc_set_layout_t emissive_volume_set_layout;
 	VkDescriptorSet			 indirect_compute_desc_set;
 	vulkan_desc_set_layout_t indirect_compute_set_layout;
 	VkDescriptorSet			 bmodel_instances_desc_set;
@@ -835,6 +838,18 @@ typedef struct emissive_compute_push_constants_s
 } emissive_compute_push_constants_t;
 COMPILE_TIME_ASSERT (emissive_compute_push_constants_t, sizeof (emissive_compute_push_constants_t) == 20);
 
+// RT-emissive volume generation push constants. Mirrors Shaders/emissive_volume.comp.
+typedef struct emissive_volume_push_s
+{
+	float	 camera_origin_zmax[4];
+	float	 forward_tanx[4];
+	float	 right_tany[4];
+	float	 up_fogdensity[4];
+	uint32_t counts[4];
+	float	 params[4];
+} emissive_volume_push_t;
+COMPILE_TIME_ASSERT (emissive_volume_push_t, sizeof (emissive_volume_push_t) == 96);
+
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
 void R_AllocateEmissiveLightmaps (void);
@@ -879,6 +894,17 @@ void R_EmissiveVolumeNewMap (void);
 void R_EmissiveVolumePrepare (void);
 qboolean R_EmissiveVolumeActive (void);
 void R_EmissiveVolumeStats_f (void);
+struct cb_context_s;
+void R_EmissiveVolumeUpdate (struct cb_context_s *cbx);
+qboolean R_EmissiveVolumeReady (void);
+qboolean R_EmissiveVolumeScatterOnly (void);
+void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5]);
+vulkan_pipeline_t R_EmissiveVolumeWorldPipeline (int variant, int pipeline_index, qboolean scatter_only);
+VkDescriptorSet R_EmissiveVolumeFragmentSet (void);
+void R_CreateEmissiveVolumePipelines (void);
+void R_DestroyEmissiveVolumePipelines (void);
+int R_EmissiveVolumeFrameSlot (void);
+void R_EmissiveVolumeParentBuffers (VkBuffer *cacheable, VkBuffer *modulations, VkBuffer *transient);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
 void R_EmissiveRadianceStats (
 	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,

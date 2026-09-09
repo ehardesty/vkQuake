@@ -84,4 +84,19 @@ qboolean R_EmissiveVolumeActive (void);
 // resource/GPU/ray counters join in their slices).
 void R_EmissiveVolumeStats_f (void);
 
+// --- RV2: fused view-volume generation + opaque-world composition ---
+struct cb_context_s;
+// Record volume generation into the update command buffer. Must run inside
+// R_UpdateLightmapsAndIndirect after the transient updates so the reused
+// parent buffers and modulation uploads are current for this frame.
+void R_EmissiveVolumeUpdate (struct cb_context_s *cbx);
+// Draw-time predicate for scene fragments: active snapshot, positive
+// radiance available, and this frame's volume resources valid. Draw-local
+// policy (alpha blend, debug pipelines, render pass) stays with the caller.
+qboolean R_EmissiveVolumeReady (void);
+// Scatter-only fragment selection from the volume debug mode.
+qboolean R_EmissiveVolumeScatterOnly (void);
+// Fragment push values: viewport rect (framebuffer px, y down) + z extent.
+void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5]);
+
 #endif // R_EMISSIVE_VOLUME_H

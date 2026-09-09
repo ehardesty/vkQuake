@@ -20,6 +20,10 @@ layout (push_constant) uniform PushConsts
 	uint  instance_base;
 	ivec2 emissive_atlas_offset;
 	vec3  emissive_add;
+	// RT-emissive volume sampling rect (framebuffer px, y down) and forward-depth extent.
+	// Appended after the established 27 floats so every existing push offset is unchanged.
+	vec4  volume_viewport;
+	float volume_z_max;
 }
 push_constants;
 
@@ -52,6 +56,9 @@ layout (constant_id = 7) const bool emissive_bandlimit_enabled = false;
 #endif
 #endif
 
+#ifdef EMISSIVE_VOLUME
+#include "emissive_volume.inc"
+#endif
 #include "world_common.inc"
 
 #if MBOIT

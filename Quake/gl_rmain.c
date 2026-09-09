@@ -390,7 +390,6 @@ static void R_SetupViewBeforeMark (void *unused)
 	R_AnimateLight ();
 	R_UpdateEmissiveLightstyles ();
 	R_LatchEmissiveResolvedTextures ();
-	R_EmissiveVolumePrepare ();
 
 	// build the transformation matrix for the given view angles
 	VectorCopy (r_refdef.vieworg, r_origin);
@@ -450,6 +449,10 @@ static void R_SetupViewBeforeMark (void *unused)
 		r_lightmap_cheatsafe = false;
 	}
 	// johnfitz
+	// Volume Prepare runs last so the camera basis, FOV, and matrices above
+	// are current for this frame; source counts and modulation were already
+	// latched earlier in this function and transient sources before it.
+	R_EmissiveVolumePrepare ();
 }
 
 //==============================================================================
