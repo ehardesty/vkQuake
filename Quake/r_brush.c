@@ -5112,6 +5112,85 @@ static void R_EmissiveOccluderStateBounds (const emissive_occluder_state_t *stat
 	}
 }
 
+static float R_EmissivePointAABBDistance2 (const vec3_t point, const vec3_t mins, const vec3_t maxs)
+{
+	float distance2 = 0.0f;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		const float outside = point[axis] < mins[axis] ? mins[axis] - point[axis] : point[axis] > maxs[axis] ? point[axis] - maxs[axis] : 0.0f;
+		distance2 += outside * outside;
+	}
+	return distance2;
+}
+
+static float R_EmissiveSegmentAABBDistance2 (const vec3_t segment_start, const vec3_t segment_end, const vec3_t mins, const vec3_t maxs)
+{
+	vec3_t direction;
+	VectorSubtract (segment_end, segment_start, direction);
+	float tmin = 0.0f, tmax = 1.0f;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		if (fabsf (direction[axis]) < 1e-9f)
+		{
+			if (segment_start[axis] < mins[axis] || segment_start[axis] > maxs[axis])
+			{
+				tmin = 1.0f;
+				tmax = 0.0f;
+				break;
+			}
+		}
+		else
+		{
+			float t0 = (mins[axis] - segment_start[axis]) / direction[axis];
+			float t1 = (maxs[axis] - segment_start[axis]) / direction[axis];
+			if (t0 > t1)
+			{
+				const float temp = t0;
+				t0 = t1;
+				t1 = temp;
+			}
+			tmin = q_max (tmin, t0);
+			tmax = q_min (tmax, t1);
+			if (tmin > tmax)
+				break;
+		}
+	}
+	if (tmin <= tmax)
+		return 0.0f;
+	// No intersection: minimize the convex point-to-box distance along the segment.
+	float low = 0.0f, high = 1.0f;
+	for (int iteration = 0; iteration < 48; ++iteration)
+	{
+		const float third = (high - low) / 3.0f;
+		const float first = low + third;
+		const float second = high - third;
+		vec3_t point_first, point_second;
+		VectorMA (segment_start, first, direction, point_first);
+		VectorMA (segment_start, second, direction, point_second);
+		if (R_EmissivePointAABBDistance2 (point_first, mins, maxs) > R_EmissivePointAABBDistance2 (point_second, mins, maxs))
+			low = first;
+		else
+			high = second;
+	}
+	vec3_t closest;
+	VectorMA (segment_start, 0.5f * (low + high), direction, closest);
+	return R_EmissivePointAABBDistance2 (closest, mins, maxs);
+}
+
+// Confirm a fat source-to-tile overlap against the true ray bundle. The classic
+// builder traces point-source rays from the source origin to tile texels, so the
+// bundle is contained in the capsule around source-to-tile-center with the tile
+// half-diagonal as radius. The fat AABB test stays as the broadphase: overlap
+// there is necessary for any hit, so rejection remains exact and only
+// confirmation can drop false positives. Never narrowed stale detail: on any
+// doubt the tile stays dirty.
+static qboolean R_EmissiveOccluderBundleConfirm (
+	const vec3_t source_origin, const vec3_t tile_center, float tile_radius, const vec3_t occluder_mins, const vec3_t occluder_maxs)
+{
+	const float distance2 = R_EmissiveSegmentAABBDistance2 (source_origin, tile_center, occluder_mins, occluder_maxs);
+	return distance2 <= tile_radius * tile_radius * 1.0001f + 1e-6f;
+}
+
 static void R_MarkEmissiveOccluderStateTiles (const emissive_occluder_state_t *state)
 {
 	if (!emissive_occluder_dirty_tile_bits || !emissive_logical_tile_mins || !emissive_logical_tile_maxs)
@@ -5128,6 +5207,10 @@ static void R_MarkEmissiveOccluderStateTiles (const emissive_occluder_state_t *s
 		if (emissive_occluder_dirty_tile_bits[tile_index])
 			continue;
 		const emissive_logical_tile_t *const tile = &emissive_logical_tiles[tile_index];
+		vec3_t tile_center, tile_diagonal;
+		VectorSubtract (emissive_logical_tile_maxs[tile_index], emissive_logical_tile_mins[tile_index], tile_diagonal);
+		VectorMA (emissive_logical_tile_mins[tile_index], 0.5f, tile_diagonal, tile_center);
+		const float tile_radius = 0.5f * VectorLength (tile_diagonal);
 		for (uint32_t source_link = tile->first_source; source_link < tile->first_source + tile->num_sources; ++source_link)
 		{
 			const emissive_light_t *const source = &emissive_cacheable_lights[emissive_logical_tile_sources[source_link]];
@@ -5142,7 +5225,8 @@ static void R_MarkEmissiveOccluderStateTiles (const emissive_occluder_state_t *s
 					break;
 				}
 			}
-			if (intersects)
+			if (intersects &&
+				R_EmissiveOccluderBundleConfirm (source->origin, tile_center, tile_radius, occluder_mins, occluder_maxs))
 			{
 				emissive_occluder_dirty_tile_bits[tile_index] = true;
 				break;
