@@ -4696,8 +4696,10 @@ void GL_WaitForDeviceIdle (void)
 	GL_SynchronizeEndRenderingTask ();
 	if (!vulkan_globals.device_idle)
 	{
+		const double idle_start = Sys_DoubleTime ();
 		R_SubmitStagingBuffers ();
 		vkDeviceWaitIdle (vulkan_globals.device);
+		RTPerf_Record ("device_idle", (Sys_DoubleTime () - idle_start) * 1000.0, 0);
 	}
 
 	vulkan_globals.device_idle = true;

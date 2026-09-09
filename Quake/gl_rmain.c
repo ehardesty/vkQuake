@@ -1531,8 +1531,13 @@ void R_RenderView (
 	if (!cl.worldmodel)
 		Sys_Error ("R_RenderView: NULL worldmodel");
 
-	R_UpdateTransientEmissiveSources ();
-	R_UpdateEmissiveBrushReceivers ();
+	RTPerf_Frame ();
+	{
+		const double emissive_prepare_start = Sys_DoubleTime ();
+		R_UpdateTransientEmissiveSources ();
+		R_UpdateEmissiveBrushReceivers ();
+		RTPerf_Record ("emissive_prepare", (Sys_DoubleTime () - emissive_prepare_start) * 1000.0, 0);
+	}
 
 	if (scr_speeds.value)
 		rs_frame_starttime = Sys_DoubleTime ();

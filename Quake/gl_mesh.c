@@ -799,6 +799,14 @@ void R_AllocateEntityBLAS (entity_t *e)
 
 	// Track which model this BLAS was allocated for
 	e->blas_data->model = e->model;
+
+	// F4 churn signal: entity index, or -1 for non-client entities
+	{
+		uint64_t ent_index = (uint64_t)-1;
+		if (e >= cl.entities && e < cl.entities + cl.num_entities)
+			ent_index = (uint64_t)(e - cl.entities);
+		RTPerf_Record ("blas_alloc", 0.0, ent_index);
+	}
 }
 
 /*
@@ -812,6 +820,13 @@ void R_FreeEntityBLAS (entity_t *e)
 {
 	if (!e || !e->blas_data)
 		return;
+
+	{
+		uint64_t ent_index = (uint64_t)-1;
+		if (e >= cl.entities && e < cl.entities + cl.num_entities)
+			ent_index = (uint64_t)(e - cl.entities);
+		RTPerf_Record ("blas_free", 0.0, ent_index);
+	}
 
 	// Add to garbage collection - resources will be freed after GPU is done with them
 	if (e->blas_data->blas != VK_NULL_HANDLE)

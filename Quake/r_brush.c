@@ -2742,6 +2742,9 @@ void GL_RebuildIndirectDraws (qboolean emissive_grouping, qboolean receiver_clas
 		Con_DPrintf (
 			"RT emissives: rebuilt %d indirect draw%s in %.3f ms\n", used_indirect_draws, used_indirect_draws == 1 ? "" : "s",
 			(Sys_DoubleTime () - rebuild_start) * 1000.0);
+		RTPerf_Record (
+			"indirect_regroup", (Sys_DoubleTime () - rebuild_start) * 1000.0,
+			((uint64_t)(emissive_grouping ? 1 : 0) << 1) | (receiver_classification_changed ? 1u : 0u));
 	}
 	else
 	{
@@ -5452,6 +5455,119 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 	Atomic_IncrementUInt32 (&emissive_clustered_alias_builds);
 }
 
+/*================
+RTPerf: minimal frame-event ring for hitch attribution
+
+Always records into a fixed 512-entry ring (a few stores per event: no prints,
+no waits, no allocation). The rtperf_spikelog threshold only controls automatic
+reporting: when set, any render-thread frame slower than the threshold prints a
+spike report with map, time, player viewpos, recent events, and alias-receiver
+deltas to the console (captured with -condebug). rtperf_dump prints on demand.
+Task-thread hooks are safe: the ring index is atomic and recording never prints.
+================*/
+#define RTPERF_RING_BITS 9
+#define RTPERF_RING_SIZE (1u << RTPERF_RING_BITS)
+#define RTPERF_RING_MASK (RTPERF_RING_SIZE - 1u)
+
+typedef struct rtperf_event_s
+{
+	uint32_t	 frame;
+	double		 time;
+	const char *stage;
+	double		 duration_ms;
+	uint64_t	 value;
+} rtperf_event_t;
+
+cvar_t rtperf_spikelog = {"rtperf_spikelog", "0", CVAR_NONE};
+
+static rtperf_event_t rtperf_ring[RTPERF_RING_SIZE];
+static atomic_uint32_t rtperf_count;
+static atomic_uint32_t rtperf_frame;
+static double rtperf_last_frame_time;
+static uint32_t rtperf_last_builds;
+static uint32_t rtperf_last_shadow_tests;
+static uint32_t rtperf_last_build_delta;
+static uint32_t rtperf_last_shadow_delta;
+static qboolean rtperf_counters_valid;
+
+void RTPerf_Record (const char *stage, double duration_ms, uint64_t value)
+{
+	const uint32_t index = Atomic_IncrementUInt32 (&rtperf_count) & RTPERF_RING_MASK;
+	rtperf_event_t *const event = &rtperf_ring[index];
+	event->frame = Atomic_LoadUInt32 (&rtperf_frame);
+	event->time = Sys_DoubleTime ();
+	event->stage = stage;
+	event->duration_ms = duration_ms;
+	event->value = value;
+}
+
+static void RTPerf_Dump (int count, double spike_ms)
+{
+	if (count <= 0)
+		return;
+	if (count > (int)RTPERF_RING_SIZE)
+		count = (int)RTPERF_RING_SIZE;
+	if (cls.state == ca_connected && cl.worldmodel)
+	{
+		Con_Printf (
+			"RTPerf %s%.1f ms frame %u map %s time %.2f viewpos (%d %d %d) %d %d %d alias_builds +%u shadow_tests +%u\n",
+			spike_ms > 0.0 ? "SPIKE " : "dump ", spike_ms, Atomic_LoadUInt32 (&rtperf_frame), cl.worldmodel->name, cl.time,
+			(int)cl.entities[cl.viewentity].origin[0], (int)cl.entities[cl.viewentity].origin[1], (int)cl.entities[cl.viewentity].origin[2],
+			(int)cl.viewangles[PITCH], (int)cl.viewangles[YAW], (int)cl.viewangles[ROLL], rtperf_last_build_delta, rtperf_last_shadow_delta);
+	}
+	else
+		Con_Printf ("RTPerf dump frame %u (not connected)\n", Atomic_LoadUInt32 (&rtperf_frame));
+	const uint32_t total = Atomic_LoadUInt32 (&rtperf_count);
+	const uint32_t available = q_min ((uint32_t)count, q_min (total, RTPERF_RING_SIZE));
+	const double now = Sys_DoubleTime ();
+	for (uint32_t i = available; i > 0; --i)
+	{
+		const rtperf_event_t *const event = &rtperf_ring[(total - i) & RTPERF_RING_MASK];
+		if (!event->stage)
+			continue;
+		Con_Printf ("  frame %u t%+.1fms %-18s dur %7.2f ms val %llu\n", event->frame, (event->time - now) * 1000.0, event->stage,
+			event->duration_ms, (unsigned long long)event->value);
+	}
+	Con_Printf (
+		"  generations: sources %u occluders %u\n", emissive_brush_receiver_source_generation, emissive_brush_occluder_generation);
+}
+
+void RTPerf_Dump_f (void)
+{
+	int count = 64;
+	if (Cmd_Argc () > 1)
+		count = atoi (Cmd_Argv (1));
+	RTPerf_Dump (count, 0.0);
+}
+
+void RTPerf_Frame (void)
+{
+	const double now = Sys_DoubleTime ();
+	double frame_ms = 0.0;
+	if (rtperf_last_frame_time > 0.0)
+		frame_ms = (now - rtperf_last_frame_time) * 1000.0;
+	rtperf_last_frame_time = now;
+	Atomic_IncrementUInt32 (&rtperf_frame);
+	if (rtperf_spikelog.value > 0.0 && cl.worldmodel)
+	{
+		int records, active, ready;
+		uint32_t receivers, builds, evaluations, shadow_tests, rejections, contributors;
+		R_EmissiveClusteredAliasStats (&records, &active, &ready, &receivers, &builds, &evaluations, &shadow_tests, &rejections, &contributors);
+		if (rtperf_counters_valid)
+		{
+			rtperf_last_build_delta = builds - rtperf_last_builds;
+			rtperf_last_shadow_delta = shadow_tests - rtperf_last_shadow_tests;
+		}
+		rtperf_last_builds = builds;
+		rtperf_last_shadow_tests = shadow_tests;
+		rtperf_counters_valid = true;
+		if (frame_ms > rtperf_spikelog.value)
+			RTPerf_Dump (48, frame_ms);
+	}
+	else
+		rtperf_counters_valid = false;
+}
+
 void R_UpdateEmissiveBrushReceivers (void)
 {
 	for (int i = 0; i < emissive_brush_receiver_count; ++i)
@@ -6050,6 +6166,10 @@ static void R_EnsureTransientEmissiveResources (void)
 	const qboolean sources_grow = sources_size > transient_emissive_tile_sources_capacity;
 	if (lights_grow || tiles_grow || sources_grow || seeds_grow)
 	{
+		RTPerf_Record (
+			"transient_grow",
+			0.0,
+			(lights_grow ? 1u : 0u) | (tiles_grow ? 2u : 0u) | (sources_grow ? 4u : 0u) | (seeds_grow ? 8u : 0u));
 		if (transient_emissive_lights_buffer != VK_NULL_HANDLE || emissive_brush_receiver_count)
 			GL_WaitForDeviceIdle ();
 		R_FreeEmissiveBrushReceiverDescriptorSets ();
@@ -8865,8 +8985,18 @@ R_BuildTopLevelAccelerationStructure
 */
 void R_BuildTopLevelAccelerationStructure (void *unused)
 {
+	const double start_time = Sys_DoubleTime ();
 	const int occluder_tier = CLAMP (0, (int)r_emissive_rt_occluders.value, 2);
-	if (r_emissive_rt.value > 0.0f && occluder_tier > 0 && R_UpdateEmissiveOccluderState ())
+	double occluder_state_start = 0.0;
+	qboolean occluder_state_changed = false;
+	if (r_emissive_rt.value > 0.0f && occluder_tier > 0)
+	{
+		occluder_state_start = Sys_DoubleTime ();
+		occluder_state_changed = R_UpdateEmissiveOccluderState ();
+		if (occluder_state_changed)
+			RTPerf_Record ("occluder_state", (Sys_DoubleTime () - occluder_state_start) * 1000.0, 1);
+	}
+	if (occluder_state_changed)
 	{
 		if (!emissive_detail_building && num_emissive_logical_tiles > 0 && R_EmissiveDetailAvailable () &&
 			(emissive_occluder_full_detail_refresh || num_emissive_occluder_dirty_tiles > 0))
@@ -8893,12 +9023,15 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		!emissive_live_as_dirty)
 		return;
 
-	const double  start_time = Sys_DoubleTime ();
 	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_BUILD_ACCELERATION_STRUCTURES];
 	GL_BeginLiveASTimestamp (cbx);
 
 	// Update animated entity BLASes first
-	R_UpdateAnimatedBLASes (cbx);
+	{
+		const double blas_update_start = Sys_DoubleTime ();
+		R_UpdateAnimatedBLASes (cbx);
+		RTPerf_Record ("blas_update", (Sys_DoubleTime () - blas_update_start) * 1000.0, 0);
+	}
 
 	R_BeginDebugUtilsLabel (cbx, "Build TLAS");
 
@@ -9068,6 +9201,7 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 	live_as_instance_count = num_instances;
 	rs_live_as_cputime_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 	emissive_live_as_dirty = false;
+	RTPerf_Record ("tlas_build", (Sys_DoubleTime () - start_time) * 1000.0, (uint64_t)num_instances);
 }
 
 /*

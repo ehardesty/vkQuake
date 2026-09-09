@@ -40,6 +40,7 @@ extern cvar_t r_emissive_rt, r_emissive_rt_resolution, r_emissive_rt_occluders, 
 	r_emissive_rt_translucent_receivers, r_emissive_rt_sprite_receivers, r_emissive_rt_particle_receivers, r_emissive_rt_model_emitters, r_emissive_rt_debug,
 	r_emissive_rt_bandlimit, r_emissive_rt_bounce, r_emissive_rt_bounce_strength, r_emissive_rt_bounce_reflectance, r_emissive_rt_bounce_rays,
 	r_emissive_rt_bounce_resolution, r_emissive_rt_model_lights;
+extern cvar_t rtperf_spikelog;
 extern cvar_t gl_fullbrights;
 extern cvar_t gl_farclip;
 extern cvar_t r_waterquality;
@@ -4944,6 +4945,7 @@ void R_Init (void)
 
 	Cmd_AddCommand ("vkmemstats", R_VulkanMemStats_f);
 	Cmd_AddCommand ("r_emissive_rt_stats", R_EmissiveRTStats_f);
+	Cmd_AddCommand ("rtperf_dump", RTPerf_Dump_f);
 	Cmd_AddCommand ("r_rt_max_quality", R_RTMaxQuality_f);
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_lightmap);
@@ -5005,6 +5007,7 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_bounce_resolution, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_model_lights);
 	Cvar_RegisterVariable (&r_emissive_rt_model_emitters);
+	Cvar_RegisterVariable (&rtperf_spikelog);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);
 	Cvar_RegisterVariable (&r_showtris);
