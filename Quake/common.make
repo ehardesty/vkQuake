@@ -243,6 +243,7 @@ GLOBJS = \
 	r_sprite.o \
 	r_alias.o \
 	r_brush.o \
+	r_emissive_volume.o \
 	gl_model.o
 
 OBJS := strlcat.o \

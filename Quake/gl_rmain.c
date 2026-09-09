@@ -390,6 +390,7 @@ static void R_SetupViewBeforeMark (void *unused)
 	R_AnimateLight ();
 	R_UpdateEmissiveLightstyles ();
 	R_LatchEmissiveResolvedTextures ();
+	R_EmissiveVolumePrepare ();
 
 	// build the transformation matrix for the given view angles
 	VectorCopy (r_refdef.vieworg, r_origin);

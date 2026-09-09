@@ -7659,6 +7659,32 @@ void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pend
 	*pending = emissive_coarse_pending;
 }
 
+/*
+==================
+R_EmissiveVolumeSourceView
+
+Read-only view of both canonical source collections for the RT-emissive
+volume receiver. The returned pointers borrow map/frame-lifetime parent
+storage; the caller must not free, reallocate, or write through them.
+Modulation semantics (documented once, here): cacheable intensity is
+pre-modulation and pairs element-wise with modulations[] (1.0 for style
+255, otherwise the resolved d_lightstylevalue/256); transient intensity is
+final and needs no further modulation. No duplication, filtering, or
+reclassification happens at this seam: every accepted enabled source in
+each collection is visible to the volume exactly once.
+==================
+*/
+void R_EmissiveVolumeSourceView (
+	const emissive_light_t **cacheable_lights, const float **cacheable_modulations, int *num_cacheable,
+	const emissive_light_t **transient_lights, int *num_transient)
+{
+	*cacheable_lights = emissive_cacheable_lights;
+	*cacheable_modulations = emissive_light_modulations;
+	*num_cacheable = num_emissive_lights;
+	*transient_lights = transient_emissive_lights;
+	*num_transient = num_transient_emissive_lights;
+}
+
 void R_EmissiveRadianceStats (
 	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,
 	uint32_t *cpu_time_us, qboolean *visibility_available, qboolean *pending)

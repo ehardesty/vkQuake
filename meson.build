@@ -275,6 +275,7 @@ srcs = [
     'Quake/pr_ext.c',
     'Quake/r_alias.c',
     'Quake/r_brush.c',
+    'Quake/r_emissive_volume.c',
     'Quake/r_part.c',
     'Quake/r_part_fte.c',
     'Quake/r_sprite.c',

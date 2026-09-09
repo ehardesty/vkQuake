@@ -5007,6 +5007,7 @@ void R_Init (void)
 	Cvar_SetCallback (&r_emissive_rt_bounce_resolution, R_EmissiveBounceChanged_f);
 	Cvar_RegisterVariable (&r_emissive_rt_model_lights);
 	Cvar_RegisterVariable (&r_emissive_rt_model_emitters);
+	R_EmissiveVolumeInit ();
 	Cvar_RegisterVariable (&rtperf_spikelog);
 	Cvar_RegisterVariable (&r_oldskyleaf);
 	Cvar_RegisterVariable (&r_drawworld);

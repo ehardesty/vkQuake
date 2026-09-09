@@ -1547,6 +1547,7 @@ void R_EmissiveRTPrepareNewMap (void)
 
 void R_EmissiveRTNewMap (void)
 {
+	R_EmissiveVolumeNewMap ();
 	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		return;
 	R_BuildEmissiveWorldSurfaceCache ();

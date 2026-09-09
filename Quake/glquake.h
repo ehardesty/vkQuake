@@ -871,6 +871,14 @@ qboolean R_EmissiveDetailAvailable (void);
 void	 R_SetEmissiveLights (
 	const emissive_light_t *lights, const byte *styles, int count, const emissive_surface_light_t *surface_lights, int num_surface_lights);
 void R_EmissiveLightStats (int *count, uint64_t *allocated_bytes, qboolean *pending);
+void R_EmissiveVolumeSourceView (
+	const emissive_light_t **cacheable_lights, const float **cacheable_modulations, int *num_cacheable,
+	const emissive_light_t **transient_lights, int *num_transient);
+void R_EmissiveVolumeInit (void);
+void R_EmissiveVolumeNewMap (void);
+void R_EmissiveVolumePrepare (void);
+qboolean R_EmissiveVolumeActive (void);
+void R_EmissiveVolumeStats_f (void);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
 void R_EmissiveRadianceStats (
 	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,

@@ -178,6 +178,9 @@
     <ClCompile Include="..\..\Quake\r_brush.c">
       <Filter>Renderer</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Quake\r_emissive_volume.c">
+      <Filter>Renderer</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Quake\r_part.c">
       <Filter>Renderer</Filter>
     </ClCompile>
