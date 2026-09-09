@@ -49,6 +49,11 @@ static uint64_t				   volume_evaluated_pairs_estimate;
 static void R_EmissiveVolumeTeardownResources (void);
 static int R_EmissiveVolumeDebugMode (void);
 static qboolean R_EmissiveVolumeForceBruteForce (void);
+// RV2/B resource state tentatively declared here: Prepare and NewMap run
+// before the definitions below and must reference them.
+static qboolean volume_resources_valid;
+static uint64_t volume_list_eval_pairs;
+static const char *volume_resource_reason;
 static void R_EmissiveVolumeEnsureResources (void);
 static void R_EmissiveVolumeBuildLists (void);
 // Per-group sphere-overlap admission. A group owns the view pyramid over
@@ -80,6 +85,22 @@ static float R_EmissiveVolumeClampedStrength (void)
 	return strength;
 }
 
+// Cheap requested-state predicate: scalar cvars only, no source scans and
+// no snapshot requirement, so Prepare can take its inactive path and the
+// stats command can report requested state while disabled.
+static qboolean R_EmissiveVolumeRequested (void)
+{
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
+		return false;
+	if (r_emissive_rt_volumetrics.value <= 0.0f)
+		return false;
+	if (R_EmissiveVolumeClampedStrength () <= 0.0f)
+		return false;
+	if (R_EmissiveBandlimitActive ())
+		return false;
+	return true;
+}
+
 void R_EmissiveVolumeInit (void)
 {
 	Cvar_RegisterVariable (&r_emissive_rt_volumetrics);
@@ -108,6 +129,7 @@ void R_EmissiveVolumeNewMap (void)
 	volume_mod_checksum = 0.0;
 	volume_prepare_cpu_us = 0;
 	volume_evaluated_pairs_estimate = 0;
+	volume_list_eval_pairs = 0;
 }
 
 static void R_EmissiveVolumeCountPositive (void)
@@ -170,6 +192,27 @@ void R_EmissiveVolumePrepare (void)
 {
 	const double prepare_start = Sys_DoubleTime ();
 
+	// Cheap inactive path first: scalar cvars only, so a disabled frame
+	// never iterates the emitter arrays. Requested-state reporting stays in
+	// the stats command; detailed snapshots are latched on the active path.
+	if (!R_EmissiveVolumeRequested ())
+	{
+		if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
+			volume_inactive_reason = "parent RT emissives disabled";
+		else if (r_emissive_rt_volumetrics.value <= 0.0f)
+			volume_inactive_reason = "volumetrics not requested";
+		else if (R_EmissiveVolumeClampedStrength () <= 0.0f)
+			volume_inactive_reason = "strength is zero";
+		else
+			volume_inactive_reason = "bandlimit combination unsupported (zero addition)";
+		if (volume_resources_valid)
+			R_EmissiveVolumeTeardownResources ();
+		else
+			volume_resource_reason = "inactive (released)";
+		volume_prepare_cpu_us = (uint32_t)((Sys_DoubleTime () - prepare_start) * 1000000.0);
+		return;
+	}
+
 	R_EmissiveVolumeSourceView (&volume_cacheable_lights, &volume_cacheable_modulations, &volume_num_cacheable, &volume_transient_lights,
 		&volume_num_transient);
 	volume_snapshot_valid = true;
@@ -182,21 +225,13 @@ void R_EmissiveVolumePrepare (void)
 	volume_cam_fov[0] = r_fovx;
 	volume_cam_fov[1] = r_fovy;
 
-	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
-		volume_inactive_reason = "parent RT emissives disabled";
-	else if (r_emissive_rt_volumetrics.value <= 0.0f)
-		volume_inactive_reason = "volumetrics not requested";
-	else if (R_EmissiveVolumeClampedStrength () <= 0.0f)
-		volume_inactive_reason = "strength is zero";
-	else if (R_EmissiveBandlimitActive ())
-		volume_inactive_reason = "bandlimit combination unsupported (zero addition)";
-	else if (volume_cacheable_positive + volume_transient_positive <= 0)
-		volume_inactive_reason = "no positive-radiance source (zero addition, no work)";
+	if (volume_cacheable_positive + volume_transient_positive <= 0)
+		volume_inactive_reason = "no positive-radiance source (dormant, resources retained)";
 	else
 		volume_inactive_reason = "ready";
 	R_EmissiveVolumeWorldAS (&volume_world_tlas);
 	if (R_EmissiveVolumeActive () && R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE)
-		volume_inactive_reason = "shadowed unavailable (world AS not resident)";
+		volume_inactive_reason = "shadowed unavailable (world AS not resident, dormant)";
 
 	// Resource creation lives here (not in Update) because before_mark is
 	// CPU-ordered before every draw and update task, so freshly allocated
@@ -212,13 +247,7 @@ qboolean R_EmissiveVolumeActive (void)
 {
 	if (!volume_snapshot_valid)
 		return false;
-	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
-		return false;
-	if (r_emissive_rt_volumetrics.value <= 0.0f)
-		return false;
-	if (R_EmissiveVolumeClampedStrength () <= 0.0f)
-		return false;
-	return true;
+	return R_EmissiveVolumeRequested ();
 }
 
 void R_EmissiveVolumeStats_f (void)
@@ -234,6 +263,8 @@ void R_EmissiveVolumeStats_f (void)
 	Con_Printf ("   eligible sources: %d, proxy checksum %.3f\n", volume_num_cacheable + volume_num_transient, volume_position_checksum);
 	if (!volume_snapshot_valid)
 		Con_Printf ("   no latched snapshot yet (prepare has not run this map)\n");
+	else if (!R_EmissiveVolumeRequested ())
+		Con_Printf ("   snapshot above is last-latched; disabled frames skip source scans\n");
 	R_EmissiveVolumeResourceStats ();
 }
 
@@ -283,7 +314,6 @@ static int volume_nx;
 static int volume_ny;
 static float volume_zmax;
 static float volume_viewport[4];
-static qboolean volume_resources_valid;
 static const char *volume_resource_reason = "never prepared";
 static qboolean volume_slot_initialized[EMISSIVE_VOLUME_SLOTS];
 // RV5 conservative source lists: count/offset/index over 4x4 column groups.
@@ -326,20 +356,32 @@ static void R_EmissiveVolumeDestroySlot (emissive_volume_slot_t *slot)
 		slot->image = VK_NULL_HANDLE;
 	}
 	R_FreeVulkanMemory (&slot->memory, &num_vulkan_bmodel_allocations);
+	memset (&slot->memory, 0, sizeof (slot->memory));
 }
 
 static void R_EmissiveVolumeTeardownResources (void)
 {
 	int i;
-	if (!volume_resources_valid && volume_dummy_buffer == VK_NULL_HANDLE)
+	// Cleanup inspects owned handles, never the bundle-valid flag: partial
+	// construction (a slot failing after earlier slots succeeded) must
+	// still free everything it owns. When nothing is owned this returns
+	// without touching the device.
+	qboolean owned =
+		volume_resources_valid || volume_dummy_buffer != VK_NULL_HANDLE || volume_list_buffer != VK_NULL_HANDLE;
+	for (i = 0; i < EMISSIVE_VOLUME_SLOTS && !owned; ++i)
+		owned = volume_slots[i].image != VK_NULL_HANDLE || volume_slots[i].view != VK_NULL_HANDLE ||
+				volume_slots[i].compute_set != VK_NULL_HANDLE || volume_slots[i].fragment_set != VK_NULL_HANDLE;
+	if (!owned)
 		return;
 	GL_WaitForDeviceIdle ();
 	for (i = 0; i < EMISSIVE_VOLUME_SLOTS; ++i)
 		R_EmissiveVolumeDestroySlot (&volume_slots[i]);
 	R_FreeBuffer (volume_dummy_buffer, &volume_dummy_memory, &num_vulkan_bmodel_allocations);
 	volume_dummy_buffer = VK_NULL_HANDLE;
+	memset (&volume_dummy_memory, 0, sizeof (volume_dummy_memory));
 	R_FreeBuffer (volume_list_buffer, &volume_list_memory, &num_vulkan_bmodel_allocations);
 	volume_list_buffer = VK_NULL_HANDLE;
+	memset (&volume_list_memory, 0, sizeof (volume_list_memory));
 	R_EmissiveVolumeFreeLists ();
 	volume_resources_valid = false;
 	volume_resource_reason = "released";
@@ -352,6 +394,7 @@ static void R_EmissiveVolumeBuildLists (void)
 	volume_use_lists = false;
 	volume_list_admitted = 0;
 	volume_list_fallback_groups = 0;
+	volume_list_eval_pairs = 0;
 	volume_list_cpu_us = 0;
 	volume_list_groups_x = 0;
 	volume_list_groups_y = 0;
@@ -373,8 +416,9 @@ static void R_EmissiveVolumeBuildLists (void)
 	}
 	R_EmissiveVolumeBuildGroupLists (total_sources);
 	volume_use_lists = true;
-	volume_evaluated_pairs_estimate =
-		((uint64_t)volume_list_admitted + (uint64_t)volume_list_fallback_groups * (uint64_t)total_sources) * EMISSIVE_VOLUME_SEGMENTS;
+	// Exact scheduled count: every column evaluates its group's admitted
+	// sources (fallback groups evaluate all sources) through every segment.
+	volume_evaluated_pairs_estimate = volume_list_eval_pairs * EMISSIVE_VOLUME_SEGMENTS;
 	volume_list_cpu_us = (uint32_t)((Sys_DoubleTime () - build_start) * 1000000.0);
 }
 
@@ -392,6 +436,11 @@ static void R_EmissiveVolumeBuildGroupLists (int total_sources)
 		for (gx = 0; gx < groups_x; ++gx)
 		{
 			const uint32_t gid = gy * groups_x + gx;
+			// Actual columns owned by this group (edge groups are partial).
+			const uint32_t group_cols =
+				q_min ((gx + 1) * EMISSIVE_VOLUME_GROUP_SIZE, (uint32_t)volume_nx) - gx * EMISSIVE_VOLUME_GROUP_SIZE;
+			const uint32_t group_rows =
+				q_min ((gy + 1) * EMISSIVE_VOLUME_GROUP_SIZE, (uint32_t)volume_ny) - gy * EMISSIVE_VOLUME_GROUP_SIZE;
 			const float u0 = (float)(gx * EMISSIVE_VOLUME_GROUP_SIZE) / (float)volume_nx;
 			const float u1 = (float)q_min ((gx + 1) * EMISSIVE_VOLUME_GROUP_SIZE, (uint32_t)volume_nx) / (float)volume_nx;
 			const float v0 = (float)(gy * EMISSIVE_VOLUME_GROUP_SIZE) / (float)volume_ny;
@@ -411,6 +460,7 @@ static void R_EmissiveVolumeBuildGroupLists (int total_sources)
 				volume_list_headers[gid * 2] = 0;
 				volume_list_headers[gid * 2 + 1] = EMISSIVE_VOLUME_LIST_FALLBACK;
 				++volume_list_fallback_groups;
+				volume_list_eval_pairs += (uint64_t)group_cols * (uint64_t)group_rows * (uint64_t)total_sources;
 				continue;
 			}
 			VectorMA (vright, -tx0, vpn, plane_l);
@@ -446,6 +496,7 @@ static void R_EmissiveVolumeBuildGroupLists (int total_sources)
 					volume_list_headers[gid * 2] = 0;
 					volume_list_headers[gid * 2 + 1] = EMISSIVE_VOLUME_LIST_FALLBACK;
 					++volume_list_fallback_groups;
+					volume_list_eval_pairs += (uint64_t)group_cols * (uint64_t)group_rows * (uint64_t)total_sources;
 					overflow = true;
 					break;
 				}
@@ -455,6 +506,7 @@ static void R_EmissiveVolumeBuildGroupLists (int total_sources)
 				continue;
 			volume_list_headers[gid * 2] = group_start;
 			volume_list_headers[gid * 2 + 1] = admitted - group_start;
+			volume_list_eval_pairs += (uint64_t)group_cols * (uint64_t)group_rows * (uint64_t)(admitted - group_start);
 		}
 	volume_list_admitted = admitted;
 }
@@ -544,20 +596,30 @@ static void R_EmissiveVolumeEnsureResources (void)
 	int wanted_nx;
 	int wanted_ny;
 	int i;
-	if (!R_EmissiveVolumeActive () || volume_cacheable_positive + volume_transient_positive <= 0 || R_EmissiveBandlimitActive () ||
-		(R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE))
+	if (!R_EmissiveVolumeActive () || R_EmissiveBandlimitActive ())
 	{
-		const char *prev_reason = volume_inactive_reason;
 		if (volume_resources_valid)
 			R_EmissiveVolumeTeardownResources ();
 		else
 			volume_resource_reason = "inactive (released)";
-		volume_inactive_reason = strcmp (prev_reason, "ready") == 0 ? "inactive (released)" : prev_reason;
 		return;
 	}
 	if (r_refdef.vrect.height <= 0 || r_refdef.vrect.width <= 0)
 	{
-		volume_resource_reason = "degenerate viewport";
+		volume_resource_reason = "degenerate viewport (retained)";
+		return;
+	}
+	// Dormant states retain every reusable allocation: Ready is false, so no
+	// frame dispatches, binds, or samples the volume, and returning
+	// contribution resumes without device-idle waits or reallocation.
+	if (volume_cacheable_positive + volume_transient_positive <= 0)
+	{
+		volume_resource_reason = "dormant (no positive-radiance source, retained)";
+		return;
+	}
+	if (R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE)
+	{
+		volume_resource_reason = "dormant (shadowed AS not resident, retained)";
 		return;
 	}
 	wanted_nx = EMISSIVE_VOLUME_BASE_NX;
@@ -905,7 +967,7 @@ static void R_EmissiveVolumeResourceStats (void)
 		return;
 	}
 	logical_bytes = (uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_BOUNDARIES * 8 * EMISSIVE_VOLUME_SLOTS;
-	allocated_bytes = volume_slots[0].memory.size + volume_slots[1].memory.size + volume_dummy_memory.size;
+	allocated_bytes = volume_slots[0].memory.size + volume_slots[1].memory.size + volume_dummy_memory.size + volume_list_memory.size;
 	Con_Printf (
 		"   volume view: origin (%.1f %.1f %.1f) fov %.1fx%.1f, viewport %.0fx%.0f at %.0f,%.0f, slot %d%s\n",
 		volume_cam_origin[0], volume_cam_origin[1], volume_cam_origin[2], volume_cam_fov[0], volume_cam_fov[1], volume_viewport[2],
@@ -920,7 +982,7 @@ static void R_EmissiveVolumeResourceStats (void)
 	Con_Printf ("   volume resources: %s, prepare %u us\n", volume_resource_reason, volume_prepare_cpu_us);
 	Con_Printf ("   volume memory: %llu logical, %llu allocated bytes\n", (unsigned long long)logical_bytes, (unsigned long long)allocated_bytes);
 	Con_Printf (
-		"   volume work: %llu scheduled source evaluations (estimate; bounds shadowed visibility queries)\n",
+		"   volume work: %llu scheduled source evaluations (exact scheduled count, not measured queries)\n",
 		(unsigned long long)volume_evaluated_pairs_estimate);
 	if (volume_use_lists)
 		Con_Printf (
