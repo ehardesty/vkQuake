@@ -1651,17 +1651,18 @@ void R_CreateDescriptorSetLayouts ()
 	}
 
 	{
-		// RT-emissive volume generation set: one 3D storage image plus the
-		// three reused canonical source buffers (cacheable lights,
-		// cacheable modulations, transient lights). RV3 appends the TLAS as
-		// a second push-descriptor set reusing ray_query_push_set_layout.
+		// RT-emissive volume generation set: one 3D storage image, the three
+		// reused canonical source buffers (cacheable lights, cacheable
+		// modulations, transient lights), and the module-built conservative
+		// source-list buffer (RV5). The TLAS rides a second push-descriptor
+		// set reusing ray_query_push_set_layout.
 		int num_descriptors = 0;
-		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_volume_layout_bindings, 4);
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_volume_layout_bindings, 5);
 		emissive_volume_layout_bindings[0].binding = num_descriptors++;
 		emissive_volume_layout_bindings[0].descriptorCount = 1;
 		emissive_volume_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		emissive_volume_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		for (int i = 1; i < 4; ++i)
+		for (int i = 1; i < 5; ++i)
 		{
 			emissive_volume_layout_bindings[i].binding = num_descriptors++;
 			emissive_volume_layout_bindings[i].descriptorCount = 1;
@@ -1674,7 +1675,7 @@ void R_CreateDescriptorSetLayouts ()
 
 		memset (&vulkan_globals.emissive_volume_set_layout, 0, sizeof (vulkan_globals.emissive_volume_set_layout));
 		vulkan_globals.emissive_volume_set_layout.num_storage_images = 1;
-		vulkan_globals.emissive_volume_set_layout.num_storage_buffers = 3;
+		vulkan_globals.emissive_volume_set_layout.num_storage_buffers = 4;
 
 		err = vkCreateDescriptorSetLayout (
 			vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_volume_set_layout.handle);

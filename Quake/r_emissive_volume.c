@@ -48,9 +48,25 @@ static uint64_t				   volume_evaluated_pairs_estimate;
 // RV2 resource state (defined below; forward-declared for NewMap ordering).
 static void R_EmissiveVolumeTeardownResources (void);
 static void R_EmissiveVolumeEnsureResources (void);
+static void R_EmissiveVolumeBuildLists (void);
+// Per-group sphere-overlap admission. A group owns the view pyramid over
+// its 4x4 columns from the camera plane to zmax. A source is admitted when
+// its sphere can reach that pyramid: depth-slab overlap plus inside-or-
+// intersecting on all four side planes. The test is exact for the infinite
+// pyramid, so rejection proves zero contribution for every group sample and
+// the listed set reproduces the reference up to summation order. Only origin
+// and radius participate: intensity and modulation never gate membership, so
+// flicker cannot reshuffle lists. Behind-camera spheres intersecting the
+// view, camera-inside spheres, near-plane crossings, and offscreen finite
+// emitters all follow from the same test without special cases.
+
+
+static void R_EmissiveVolumeFreeLists (void);
+static void R_EmissiveVolumeBuildGroupLists (int total_sources);
 static void R_EmissiveVolumeResourceStats (void);
 static void R_EmissiveVolumeRefreshComputeSet (int slot_index);
 static void R_EmissiveVolumePushWorldAS (cb_context_t *cbx);
+static void R_EmissiveVolumeUploadLists (cb_context_t *cbx);
 static void R_EmissiveVolumeRecordBarriers (cb_context_t *cbx, int slot_index);
 static void R_EmissiveVolumePublishSlot (cb_context_t *cbx, int slot_index);
 
@@ -73,6 +89,7 @@ void R_EmissiveVolumeInit (void)
 void R_EmissiveVolumeNewMap (void)
 {
 	R_EmissiveVolumeTeardownResources ();
+	GL_ResetEmissiveVolumeTimestamp ();
 	volume_cacheable_lights = NULL;
 	volume_cacheable_modulations = NULL;
 	volume_num_cacheable = 0;
@@ -184,6 +201,7 @@ void R_EmissiveVolumePrepare (void)
 	// descriptor sets are safe to bind the same frame. First-frame draws may
 	// sample the just-cleared zero volume; that is correct zero addition.
 	R_EmissiveVolumeEnsureResources ();
+	R_EmissiveVolumeBuildLists ();
 
 	volume_prepare_cpu_us = (uint32_t)((Sys_DoubleTime () - prepare_start) * 1000000.0);
 }
@@ -236,6 +254,14 @@ frames select the original pipelines and bind nothing.
 #define EMISSIVE_VOLUME_MEMORY_BUDGET_MB 64
 // Must match the local_size_x/y in Shaders/emissive_volume.comp.
 #define EMISSIVE_VOLUME_LOCAL_SIZE 8
+// Column-group edge length for conservative source lists. Must match the
+// /4u grouping in Shaders/emissive_volume.comp.
+#define EMISSIVE_VOLUME_GROUP_SIZE 4
+// At or below this total source count the brute-force reference loop runs
+// directly: list build and upload would cost more than they save.
+#define EMISSIVE_VOLUME_BRUTE_FORCE_SOURCES 16
+#define EMISSIVE_VOLUME_LIST_INDEX_CAP 65536
+#define EMISSIVE_VOLUME_LIST_FALLBACK 0xFFFFFFFFu
 
 typedef struct emissive_volume_slot_s
 {
@@ -257,6 +283,21 @@ static float volume_viewport[4];
 static qboolean volume_resources_valid;
 static const char *volume_resource_reason = "never prepared";
 static qboolean volume_slot_initialized[EMISSIVE_VOLUME_SLOTS];
+// RV5 conservative source lists: count/offset/index over 4x4 column groups.
+// Headers pack [offset, count] per group; count FALLBACK selects the full
+// reference scan for that group. Membership is geometry-only (origin and
+// radius), so flicker never reshuffles it.
+static uint32_t *volume_list_headers;
+static uint32_t *volume_list_indices;
+static uint32_t volume_list_header_capacity;
+static uint32_t volume_list_groups_x;
+static uint32_t volume_list_groups_y;
+static uint32_t volume_list_admitted;
+static uint32_t volume_list_fallback_groups;
+static uint32_t volume_list_cpu_us;
+static qboolean volume_use_lists;
+static VkBuffer volume_list_buffer = VK_NULL_HANDLE;
+static vulkan_memory_t volume_list_memory;
 #define EMISSIVE_VOLUME_OCCLUDER_MASK 0x01u
 
 static void R_EmissiveVolumeDestroySlot (emissive_volume_slot_t *slot)
@@ -294,8 +335,138 @@ static void R_EmissiveVolumeTeardownResources (void)
 		R_EmissiveVolumeDestroySlot (&volume_slots[i]);
 	R_FreeBuffer (volume_dummy_buffer, &volume_dummy_memory, &num_vulkan_bmodel_allocations);
 	volume_dummy_buffer = VK_NULL_HANDLE;
+	R_FreeBuffer (volume_list_buffer, &volume_list_memory, &num_vulkan_bmodel_allocations);
+	volume_list_buffer = VK_NULL_HANDLE;
+	R_EmissiveVolumeFreeLists ();
 	volume_resources_valid = false;
 	volume_resource_reason = "released";
+}
+
+static void R_EmissiveVolumeBuildLists (void)
+{
+	const double build_start = Sys_DoubleTime ();
+	const int total_sources = volume_num_cacheable + volume_num_transient;
+	volume_use_lists = false;
+	volume_list_admitted = 0;
+	volume_list_fallback_groups = 0;
+	volume_list_cpu_us = 0;
+	volume_list_groups_x = 0;
+	volume_list_groups_y = 0;
+	if (!volume_resources_valid || total_sources <= EMISSIVE_VOLUME_BRUTE_FORCE_SOURCES)
+		return;
+	volume_list_groups_x = (uint32_t)((volume_nx + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE);
+	volume_list_groups_y = (uint32_t)((volume_ny + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE);
+	if (volume_list_groups_x * volume_list_groups_y > volume_list_header_capacity)
+	{
+		R_EmissiveVolumeFreeLists ();
+		volume_list_headers = (uint32_t *)Mem_Alloc (volume_list_groups_x * volume_list_groups_y * 2 * sizeof (uint32_t));
+		volume_list_indices = (uint32_t *)Mem_Alloc (EMISSIVE_VOLUME_LIST_INDEX_CAP * sizeof (uint32_t));
+		volume_list_header_capacity = volume_list_groups_x * volume_list_groups_y;
+	}
+	R_EmissiveVolumeBuildGroupLists (total_sources);
+	volume_use_lists = true;
+	volume_evaluated_pairs_estimate =
+		((uint64_t)volume_list_admitted + (uint64_t)volume_list_fallback_groups * (uint64_t)total_sources) * EMISSIVE_VOLUME_SEGMENTS;
+	volume_list_cpu_us = (uint32_t)((Sys_DoubleTime () - build_start) * 1000000.0);
+}
+
+static void R_EmissiveVolumeBuildGroupLists (int total_sources)
+{
+	const float tanx = tanf (DEG2RAD (r_fovx) * 0.5f);
+	const float tany = tanf (DEG2RAD (r_fovy) * 0.5f);
+	const uint32_t groups_x = volume_list_groups_x;
+	const uint32_t groups_y = volume_list_groups_y;
+	uint32_t admitted = 0;
+	qboolean overflow = false;
+	uint32_t gy;
+	uint32_t gx;
+	for (gy = 0; gy < groups_y; ++gy)
+		for (gx = 0; gx < groups_x; ++gx)
+		{
+			const uint32_t gid = gy * groups_x + gx;
+			const float u0 = (float)(gx * EMISSIVE_VOLUME_GROUP_SIZE) / (float)volume_nx;
+			const float u1 = (float)q_min ((gx + 1) * EMISSIVE_VOLUME_GROUP_SIZE, (uint32_t)volume_nx) / (float)volume_nx;
+			const float v0 = (float)(gy * EMISSIVE_VOLUME_GROUP_SIZE) / (float)volume_ny;
+			const float v1 = (float)q_min ((gy + 1) * EMISSIVE_VOLUME_GROUP_SIZE, (uint32_t)volume_ny) / (float)volume_ny;
+			const float tx0 = (2.0f * u0 - 1.0f) * tanx;
+			const float tx1 = (2.0f * u1 - 1.0f) * tanx;
+			const float ty_lo = -(2.0f * v1 - 1.0f) * tany;
+			const float ty_hi = -(2.0f * v0 - 1.0f) * tany;
+			vec3_t plane_l;
+			vec3_t plane_r;
+			vec3_t plane_b;
+			vec3_t plane_t;
+			uint32_t group_start;
+			int s;
+			if (overflow)
+			{
+				volume_list_headers[gid * 2] = 0;
+				volume_list_headers[gid * 2 + 1] = EMISSIVE_VOLUME_LIST_FALLBACK;
+				++volume_list_fallback_groups;
+				continue;
+			}
+			VectorMA (vright, -tx0, vpn, plane_l);
+			VectorNormalize (plane_l);
+			VectorMA (vright, -tx1, vpn, plane_r);
+			VectorScale (plane_r, -1.0f, plane_r);
+			VectorNormalize (plane_r);
+			VectorMA (vup, -ty_lo, vpn, plane_b);
+			VectorNormalize (plane_b);
+			VectorMA (vup, -ty_hi, vpn, plane_t);
+			VectorScale (plane_t, -1.0f, plane_t);
+			VectorNormalize (plane_t);
+			group_start = admitted;
+			for (s = 0; s < total_sources; ++s)
+			{
+				const emissive_light_t *light =
+					s < volume_num_cacheable ? &volume_cacheable_lights[s] : &volume_transient_lights[s - volume_num_cacheable];
+				const float radius = light->radius;
+				vec3_t rel;
+				float cz;
+				if (radius <= 0.0f)
+					continue;
+				VectorSubtract (light->origin, r_refdef.vieworg, rel);
+				cz = DotProduct (rel, vpn);
+				if (cz + radius <= 0.0f || cz - radius >= volume_zmax)
+					continue;
+				if (DotProduct (rel, plane_l) < -radius || DotProduct (rel, plane_r) < -radius ||
+					DotProduct (rel, plane_b) < -radius || DotProduct (rel, plane_t) < -radius)
+					continue;
+				if (admitted >= EMISSIVE_VOLUME_LIST_INDEX_CAP)
+				{
+					admitted = group_start;
+					volume_list_headers[gid * 2] = 0;
+					volume_list_headers[gid * 2 + 1] = EMISSIVE_VOLUME_LIST_FALLBACK;
+					++volume_list_fallback_groups;
+					overflow = true;
+					break;
+				}
+				volume_list_indices[admitted++] = (uint32_t)s;
+			}
+			if (overflow)
+				continue;
+			volume_list_headers[gid * 2] = group_start;
+			volume_list_headers[gid * 2 + 1] = admitted - group_start;
+		}
+	volume_list_admitted = admitted;
+}
+
+static void R_EmissiveVolumeFreeLists (void)
+{
+	if (volume_list_headers)
+	{
+		Mem_Free (volume_list_headers);
+		volume_list_headers = NULL;
+	}
+	if (volume_list_indices)
+	{
+		Mem_Free (volume_list_indices);
+		volume_list_indices = NULL;
+	}
+	volume_list_header_capacity = 0;
+	volume_list_admitted = 0;
+	volume_list_fallback_groups = 0;
+	volume_use_lists = false;
 }
 
 static qboolean R_EmissiveVolumeCreateSlot (emissive_volume_slot_t *slot, int nx, int ny)
@@ -365,12 +536,15 @@ static void R_EmissiveVolumeEnsureResources (void)
 	int wanted_nx;
 	int wanted_ny;
 	int i;
-	if (!R_EmissiveVolumeActive () || volume_cacheable_positive + volume_transient_positive <= 0 || R_EmissiveBandlimitActive ())
+	if (!R_EmissiveVolumeActive () || volume_cacheable_positive + volume_transient_positive <= 0 || R_EmissiveBandlimitActive () ||
+		(R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE))
 	{
+		const char *prev_reason = volume_inactive_reason;
 		if (volume_resources_valid)
 			R_EmissiveVolumeTeardownResources ();
 		else
 			volume_resource_reason = "inactive (released)";
+		volume_inactive_reason = strcmp (prev_reason, "ready") == 0 ? "inactive (released)" : prev_reason;
 		return;
 	}
 	if (r_refdef.vrect.height <= 0 || r_refdef.vrect.width <= 0)
@@ -398,6 +572,14 @@ static void R_EmissiveVolumeEnsureResources (void)
 		R_CreateBuffer (
 			&volume_dummy_buffer, &volume_dummy_memory, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
 			&num_vulkan_bmodel_allocations, NULL, "emissive volume dummy");
+		R_CreateBuffer (
+			&volume_list_buffer, &volume_list_memory,
+			(size_t)(((wanted_nx + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE) *
+					 ((wanted_ny + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE) * 2 +
+				EMISSIVE_VOLUME_LIST_INDEX_CAP) *
+				sizeof (uint32_t),
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
+			&num_vulkan_bmodel_allocations, NULL, "emissive volume lists");
 		volume_nx = wanted_nx;
 		volume_ny = wanted_ny;
 		volume_resources_valid = true;
@@ -464,7 +646,9 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx)
 	if (!R_EmissiveVolumeReady ())
 		return;
 	R_BeginDebugUtilsLabel (cbx, "Emissive Volume");
+	GL_BeginEmissiveVolumeTimestamp (cbx);
 	R_EmissiveVolumeRefreshComputeSet (volume_slot);
+	R_EmissiveVolumeUploadLists (cbx);
 	R_EmissiveVolumeRecordBarriers (cbx, volume_slot);
 	memset (&constants, 0, sizeof (constants));
 	constants.camera_origin_zmax[0] = r_refdef.vieworg[0];
@@ -486,10 +670,10 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx)
 	constants.counts[0] = (uint32_t)volume_num_cacheable;
 	constants.counts[1] = (uint32_t)volume_num_transient;
 	constants.counts[2] = EMISSIVE_VOLUME_SEGMENTS;
-	constants.counts[3] = 0;
-	constants.extra[0] = 0;
+	constants.counts[3] = volume_use_lists ? 1u : 0u;
+	constants.extra[0] = volume_list_groups_x;
 	constants.extra[1] = EMISSIVE_VOLUME_OCCLUDER_MASK;
-	constants.extra[2] = 0;
+	constants.extra[2] = volume_list_groups_y;
 	constants.extra[3] = 0;
 	constants.params[0] = R_EmissiveVolumeClampedStrength ();
 	constants.params[1] = (float)volume_nx;
@@ -508,7 +692,35 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx)
 		cbx->cb, (uint32_t)((volume_nx + EMISSIVE_VOLUME_LOCAL_SIZE - 1) / EMISSIVE_VOLUME_LOCAL_SIZE),
 		(uint32_t)((volume_ny + EMISSIVE_VOLUME_LOCAL_SIZE - 1) / EMISSIVE_VOLUME_LOCAL_SIZE), 1);
 	R_EmissiveVolumePublishSlot (cbx, volume_slot);
+	GL_EndEmissiveVolumeTimestamp (cbx);
 	R_EndDebugUtilsLabel (cbx);
+}
+
+static void R_EmissiveVolumeUploadLists (cb_context_t *cbx)
+{
+	const uint32_t *segments[2];
+	size_t segment_sizes[2];
+	VkDeviceSize dst_offset = 0;
+	int seg;
+	if (!volume_use_lists)
+		return;
+	segments[0] = volume_list_headers;
+	segment_sizes[0] = (size_t)volume_list_groups_x * volume_list_groups_y * 2 * sizeof (uint32_t);
+	segments[1] = volume_list_indices;
+	segment_sizes[1] = (size_t)volume_list_admitted * sizeof (uint32_t);
+	for (seg = 0; seg < 2; ++seg)
+	{
+		const byte *bytes = (const byte *)segments[seg];
+		size_t remaining = segment_sizes[seg];
+		while (remaining > 0)
+		{
+			const size_t chunk = q_min (remaining, (size_t)65536);
+			vkCmdUpdateBuffer (cbx->cb, volume_list_buffer, dst_offset, chunk, bytes);
+			bytes += chunk;
+			dst_offset += chunk;
+			remaining -= chunk;
+		}
+	}
 }
 
 static void R_EmissiveVolumePushWorldAS (cb_context_t *cbx)
@@ -531,8 +743,9 @@ static void R_EmissiveVolumeRefreshComputeSet (int slot_index)
 {
 	emissive_volume_slot_t *const slot = &volume_slots[slot_index];
 	VkDescriptorBufferInfo buffers[3];
+	VkDescriptorBufferInfo list_info;
 	VkDescriptorImageInfo storage_image;
-	VkWriteDescriptorSet writes[4];
+	VkWriteDescriptorSet writes[5];
 	VkBuffer parent_buffers[3];
 	int i;
 	R_EmissiveVolumeParentBuffers (&parent_buffers[0], &parent_buffers[1], &parent_buffers[2]);
@@ -546,8 +759,11 @@ static void R_EmissiveVolumeRefreshComputeSet (int slot_index)
 	memset (&storage_image, 0, sizeof (storage_image));
 	storage_image.imageView = slot->view;
 	storage_image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	list_info.buffer = volume_list_buffer != VK_NULL_HANDLE ? volume_list_buffer : volume_dummy_buffer;
+	list_info.offset = 0;
+	list_info.range = VK_WHOLE_SIZE;
 	memset (writes, 0, sizeof (writes));
-	for (i = 0; i < 4; ++i)
+	for (i = 0; i < 5; ++i)
 	{
 		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[i].dstSet = slot->compute_set;
@@ -561,7 +777,9 @@ static void R_EmissiveVolumeRefreshComputeSet (int slot_index)
 		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		writes[i].pBufferInfo = &buffers[i - 1];
 	}
-	vkUpdateDescriptorSets (vulkan_globals.device, 4, writes, 0, NULL);
+	writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[4].pBufferInfo = &list_info;
+	vkUpdateDescriptorSets (vulkan_globals.device, 5, writes, 0, NULL);
 }
 
 static void R_EmissiveVolumeImageBarrier (
@@ -585,7 +803,7 @@ static void R_EmissiveVolumeImageBarrier (
 static void R_EmissiveVolumeRecordBarriers (cb_context_t *cbx, int slot_index)
 {
 	emissive_volume_slot_t *const slot = &volume_slots[slot_index];
-	VkBufferMemoryBarrier buffer_barriers[3];
+	VkBufferMemoryBarrier buffer_barriers[4];
 	VkBuffer parent_buffers[3];
 	VkAccessFlags image_src_access;
 	int i;
@@ -617,11 +835,18 @@ static void R_EmissiveVolumeRecordBarriers (cb_context_t *cbx, int slot_index)
 		buffer_barriers[i].offset = 0;
 		buffer_barriers[i].size = VK_WHOLE_SIZE;
 	}
+	buffer_barriers[3].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	buffer_barriers[3].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	buffer_barriers[3].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	buffer_barriers[3].srcQueueFamilyIndex = buffer_barriers[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	buffer_barriers[3].buffer = volume_list_buffer != VK_NULL_HANDLE ? volume_list_buffer : volume_dummy_buffer;
+	buffer_barriers[3].offset = 0;
+	buffer_barriers[3].size = VK_WHOLE_SIZE;
 	R_EmissiveVolumeImageBarrier (
 		cbx, slot->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, image_src_access, VK_ACCESS_SHADER_WRITE_BIT,
 		VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	vkCmdPipelineBarrier (
-		cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 3, buffer_barriers, 0, NULL);
+		cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 4, buffer_barriers, 0, NULL);
 }
 
 VkDescriptorSet R_EmissiveVolumeFragmentSet (void)
@@ -665,6 +890,18 @@ static void R_EmissiveVolumeResourceStats (void)
 	Con_Printf (
 		"   volume work: %llu scheduled source evaluations (estimate; bounds shadowed visibility queries)\n",
 		(unsigned long long)volume_evaluated_pairs_estimate);
+	if (volume_use_lists)
+		Con_Printf (
+			"   volume lists: %ux%u groups, %u admitted pairs, %u fallback groups, build %u us, buffer %u/%u bytes\n",
+			volume_list_groups_x, volume_list_groups_y, volume_list_admitted, volume_list_fallback_groups, volume_list_cpu_us,
+			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + volume_list_admitted) * 4u,
+			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + EMISSIVE_VOLUME_LIST_INDEX_CAP) * 4u);
+	else
+		Con_Printf ("   volume lists: brute-force reference (sources at/below threshold)\n");
+	if (rs_emissive_volume_gputime_valid)
+		Con_Printf ("   volume GPU generation: %u us\n", rs_emissive_volume_gputime_us);
+	else
+		Con_Printf ("   volume GPU generation: no timestamp yet\n");
 }
 
 void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5])
