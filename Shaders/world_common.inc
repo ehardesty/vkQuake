@@ -130,12 +130,13 @@ vec4 WorldFragmentColor ()
 	fog = clamp (fog, 0.0, 1.0);
 	frag_color.rgb = mix (push_constants.fog_color, frag_color.rgb, fog);
 
-#if defined(EMISSIVE_VOLUME) && !defined(WBOIT) && !defined(MBOIT)
+#if defined(EMISSIVE_VOLUME) && !(defined(MBOIT) && !defined(MBOIT_COMPOSITE))
 	// Air scattering is added after ordinary fog at the fragment's own depth.
 	// There is deliberately no fog-density participation test here: fog-free
-	// fragments still receive volumetrics. MBOIT moment-only and WBOIT modules
-	// never define EMISSIVE_VOLUME paths (see RV6C), so resolve/accumulation
-	// stages cannot double-add.
+	// fragments still receive volumetrics. Moment-only MBOIT modules are
+	// excluded by the guard above; WBOIT/composite stages follow their
+	// existing conventions and the final resolves never sample the volume,
+	// so nothing double-adds.
 	{
 		const vec3 volume_scattering = EmissiveVolumeSample (
 			gl_FragCoord.xy, in_fog_frag_coord, push_constants.volume_viewport, push_constants.volume_z_max);

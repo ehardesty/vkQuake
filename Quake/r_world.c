@@ -1190,6 +1190,22 @@ static void R_FlushBatch (
 			volume_selected =
 				volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
 		}
+		// RV6C: WBOIT accumulation and MBOIT composite (color-producing OIT
+		// stages) sample the volume under their existing conventions.
+		// Moment-only passes never do; resolves sample nothing new.
+		vulkan_pipeline_t volume_oit_pipeline;
+		qboolean volume_oit_selected = false;
+		memset (&volume_oit_pipeline, 0, sizeof (volume_oit_pipeline));
+		if (volume_wanted &&
+			(cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT || cbx->render_pass_index == RENDER_PASS_INDEX_MBOIT_COMPOSITE))
+		{
+			if (cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT)
+				volume_oit_pipeline = vulkan_globals.world_oit_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+			else
+				volume_oit_pipeline = vulkan_globals.world_mboit_composite_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+			volume_oit_selected =
+				volume_oit_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+		}
 		vulkan_pipeline_t pipeline;
 		if (emissive_add)
 		{
@@ -1205,6 +1221,20 @@ static void R_FlushBatch (
 				if (liquid_volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
 				{
 					pipeline = liquid_volume_pipeline;
+					liquid_volume_selected = true;
+				}
+			}
+			else if (
+				!r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady () &&
+				(cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT || cbx->render_pass_index == RENDER_PASS_INDEX_MBOIT_COMPOSITE))
+			{
+				const vulkan_pipeline_t liquid_oit_pipeline =
+					cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT
+						? vulkan_globals.liquid_oit_volume_pipelines[liquid_pipeline_index][volume_scatter_only ? 1 : 0]
+						: vulkan_globals.liquid_mboit_composite_volume_pipelines[liquid_pipeline_index][volume_scatter_only ? 1 : 0];
+				if (liquid_oit_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
+				{
+					pipeline = liquid_oit_pipeline;
 					liquid_volume_selected = true;
 				}
 			}
@@ -1233,6 +1263,8 @@ static void R_FlushBatch (
 		}
 		else if (volume_selected)
 			pipeline = volume_pipeline;
+		else if (volume_oit_selected)
+			pipeline = volume_oit_pipeline;
 		else
 			pipeline = R_PipelineForRenderPass (
 				cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
@@ -1275,7 +1307,7 @@ static void R_FlushBatch (
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1,
 					&surface_indices_texture->descriptor_set, 0, NULL);
 		}
-		if (volume_selected)
+		if (volume_selected || volume_oit_selected)
 		{
 			const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 			float volume_push[5];

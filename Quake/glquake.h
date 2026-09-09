@@ -498,6 +498,16 @@ typedef struct
 	vulkan_pipeline_t		 emissive_volume_pipeline;
 	vulkan_pipeline_t		 emissive_volume_shadow_pipeline;
 	vulkan_pipeline_t		 world_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 world_oit_volume_pipelines[WORLD_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 world_mboit_composite_volume_pipelines[WORLD_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 liquid_oit_volume_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 liquid_mboit_composite_volume_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 alias_oit_volume_pipelines[MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 alias_mboit_composite_volume_pipelines[MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 md5_oit_volume_pipelines[MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 md5_mboit_composite_volume_pipelines[MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 md5_8_oit_volume_pipelines[MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 md5_8_mboit_composite_volume_pipelines[MODEL_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
 	vulkan_pipeline_t		 ray_debug_pipeline;

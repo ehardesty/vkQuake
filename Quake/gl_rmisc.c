@@ -2804,6 +2804,42 @@ DECLARE_SHADER_MODULE (world_emissive_frag);
 DECLARE_SHADER_MODULE (world_volume_frag);
 DECLARE_SHADER_MODULE (world_emissive_volume_frag);
 DECLARE_SHADER_MODULE (world_liquid_volume_frag);
+DECLARE_SHADER_MODULE (world_oit_volume_frag);
+DECLARE_SHADER_MODULE (world_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_oit_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
+DECLARE_SHADER_MODULE (alias_oit_volume_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+DECLARE_SHADER_MODULE (alias_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (md5_oit_volume_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+DECLARE_SHADER_MODULE (md5_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (world_oit_volume_frag);
+DECLARE_SHADER_MODULE (world_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_oit_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
+DECLARE_SHADER_MODULE (alias_oit_volume_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+DECLARE_SHADER_MODULE (alias_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (md5_oit_volume_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+DECLARE_SHADER_MODULE (md5_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 DECLARE_SHADER_MODULE (world_emissive_bandlimit_frag);
 DECLARE_SHADER_MODULE (world_oit_frag);
 DECLARE_SHADER_MODULE (world_mboit_moment_frag);
@@ -4088,6 +4124,84 @@ static void R_CreateWorldPipelines ()
 
 static qboolean emissive_volume_pipelines_created;
 
+static void R_CreateWorldOITVolumePipelines (void)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry volume_spec_entries[6];
+	uint32_t volume_spec_data[9];
+	VkSpecializationInfo volume_spec_info;
+	int pipeline_index;
+	int scatter_only;
+	int i;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_FALSE;
+	base.rasterization_state.depthBiasEnable = VK_TRUE;
+	base.dynamic_states[base.dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+	base.vertex_input_state.vertexAttributeDescriptionCount = 3;
+	base.vertex_input_state.pVertexAttributeDescriptions = world_vertex_input_attribute_descriptions;
+	base.vertex_input_state.vertexBindingDescriptionCount = 1;
+	base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
+	base.shader_stages[0].module = world_vert_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	for (i = 0; i < 5; ++i)
+	{
+		volume_spec_entries[i].constantID = (uint32_t)i;
+		volume_spec_entries[i].offset = (uint32_t)(i * 4);
+		volume_spec_entries[i].size = 4;
+	}
+	volume_spec_entries[5].constantID = 8;
+	volume_spec_entries[5].offset = 32;
+	volume_spec_entries[5].size = 4;
+	volume_spec_info.mapEntryCount = 0;
+	volume_spec_info.pMapEntries = volume_spec_entries;
+	volume_spec_info.dataSize = sizeof (volume_spec_data);
+	volume_spec_info.pData = volume_spec_data;
+	memset (volume_spec_data, 0, sizeof (volume_spec_data));
+	volume_spec_data[4] = vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+	// OIT color passes never combine with emissive-atlas bits (blended draws
+	// carry no surface atlas), mirroring the base creation skips.
+	for (pipeline_index = 0; pipeline_index < WORLD_PIPELINE_COUNT; ++pipeline_index)
+	{
+		if (!(pipeline_index & 4) || (pipeline_index & (16 | 32 | 64)))
+			continue;
+		volume_spec_data[0] = (uint32_t)(pipeline_index & 1);
+		volume_spec_data[1] = (uint32_t)((pipeline_index & 2) != 0);
+		volume_spec_data[2] = 1;
+		volume_spec_data[3] = (uint32_t)((pipeline_index & 8) != 0);
+		volume_spec_info.mapEntryCount = 6;
+		for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+		{
+			volume_spec_data[8] = (uint32_t)scatter_only;
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 1;
+			infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = world_oit_volume_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &volume_spec_info;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetWBOITBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.world_oit_volume_pipelines[pipeline_index][scatter_only], &infos, vulkan_globals.world_pipeline_layout,
+				va ("world_oit_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 2;
+			infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT) ? world_mboit_composite_volume_frag_module
+																																													: world_mboit_composite_volume_msaa_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &volume_spec_info;
+				infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+				R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.world_mboit_composite_volume_pipelines[pipeline_index][scatter_only], &infos, vulkan_globals.world_pipeline_layout,
+					va ("world_mboit_composite_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+		}
+	}
+}
+
+
 static void R_CreateAliasVolumePipelines (void);
 static void R_CreateMD5VolumePipelineSet (
 	vulkan_pipeline_t pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2],
@@ -4095,6 +4209,13 @@ static void R_CreateMD5VolumePipelineSet (
 	VkShaderModule vertex_module, const char *name);
 static void R_CreateSkyVolumePipelines (void);
 static void R_CreateLiquidVolumePipelines (void);
+static void R_CreateWorldOITVolumePipelines (void);
+static void R_CreateLiquidOITVolumePipelines (void);
+static void R_CreateAliasOITVolumePipelines (void);
+static void R_CreateMD5OITVolumePipelineSet (
+	vulkan_pipeline_t oit_pipelines[MODEL_PIPELINE_COUNT][2], vulkan_pipeline_t composite_pipelines[MODEL_PIPELINE_COUNT][2],
+	VkVertexInputAttributeDescription *vertex_attributes, uint32_t vertex_attribute_count, VkVertexInputBindingDescription *vertex_binding,
+	VkShaderModule vertex_module, const char *name);
 
 void R_CreateEmissiveVolumePipelines (void)
 {
@@ -4200,6 +4321,17 @@ void R_CreateEmissiveVolumePipelines (void)
 		&md5_8_vertex_binding_description, md5_8_vert_module, "md5_8");
 	R_CreateSkyVolumePipelines ();
 	R_CreateLiquidVolumePipelines ();
+	R_CreateWorldOITVolumePipelines ();
+	R_CreateLiquidOITVolumePipelines ();
+	R_CreateAliasOITVolumePipelines ();
+	R_CreateMD5OITVolumePipelineSet (
+		vulkan_globals.md5_oit_volume_pipelines, vulkan_globals.md5_mboit_composite_volume_pipelines,
+		md5_vertex_input_attribute_descriptions, countof (md5_vertex_input_attribute_descriptions), &md5_vertex_binding_description, md5_vert_module,
+		"md5");
+	R_CreateMD5OITVolumePipelineSet (
+		vulkan_globals.md5_8_oit_volume_pipelines, vulkan_globals.md5_8_mboit_composite_volume_pipelines,
+		md5_8_vertex_input_attribute_descriptions, countof (md5_8_vertex_input_attribute_descriptions), &md5_8_vertex_binding_description,
+		md5_8_vert_module, "md5_8");
 	emissive_volume_pipelines_created = true;
 }
 
@@ -4212,6 +4344,189 @@ static void R_CreateEmissiveVolumeSpecInfo (VkSpecializationMapEntry *entries, u
 	info->pMapEntries = entries;
 	info->dataSize = sizeof (uint32_t);
 	info->pData = data;
+}
+
+static void R_CreateLiquidOITVolumePipelines (void)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry volume_spec_entries[6];
+	uint32_t volume_spec_data[9];
+	VkSpecializationInfo volume_spec_info;
+	int alpha_blend;
+	int quantize_lm;
+	int scatter_only;
+	int i;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_FALSE;
+	base.rasterization_state.depthBiasEnable = VK_TRUE;
+	base.dynamic_states[base.dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+	base.vertex_input_state.vertexAttributeDescriptionCount = 3;
+	base.vertex_input_state.pVertexAttributeDescriptions = world_vertex_input_attribute_descriptions;
+	base.vertex_input_state.vertexBindingDescriptionCount = 1;
+	base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
+	base.shader_stages[0].module = world_vert_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	for (i = 0; i < 5; ++i)
+	{
+		volume_spec_entries[i].constantID = (uint32_t)i;
+		volume_spec_entries[i].offset = (uint32_t)(i * 4);
+		volume_spec_entries[i].size = 4;
+	}
+	volume_spec_entries[5].constantID = 8;
+	volume_spec_entries[5].offset = 32;
+	volume_spec_entries[5].size = 4;
+	volume_spec_info.mapEntryCount = 6;
+	volume_spec_info.pMapEntries = volume_spec_entries;
+	volume_spec_info.dataSize = sizeof (volume_spec_data);
+	volume_spec_info.pData = volume_spec_data;
+	memset (volume_spec_data, 0, sizeof (volume_spec_data));
+	volume_spec_data[4] = vulkan_globals.color_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+	for (alpha_blend = 0; alpha_blend < 2; ++alpha_blend)
+		for (quantize_lm = 0; quantize_lm < 2; ++quantize_lm)
+		{
+			const int liquid_pipeline_index = alpha_blend + quantize_lm * 2;
+			volume_spec_data[2] = (uint32_t)alpha_blend;
+			volume_spec_data[3] = (uint32_t)quantize_lm;
+			for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+			{
+				volume_spec_data[8] = (uint32_t)scatter_only;
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+				infos.graphics_pipeline.subpass = 1;
+				infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+				infos.shader_stages[1].module = world_liquid_volume_oit_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &volume_spec_info;
+				infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+				R_SetWBOITBlend (infos.blend_attachment_states);
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.liquid_oit_volume_pipelines[liquid_pipeline_index][scatter_only], &infos,
+					vulkan_globals.world_pipeline_layout, va ("liquid_oit_volume %d%s", liquid_pipeline_index, scatter_only ? " scatter" : ""));
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+				infos.graphics_pipeline.subpass = 2;
+				infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+				infos.shader_stages[1].module = (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
+					? world_liquid_volume_mboit_composite_frag_module
+					: world_liquid_volume_mboit_composite_msaa_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &volume_spec_info;
+				infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+				R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.liquid_mboit_composite_volume_pipelines[liquid_pipeline_index][scatter_only], &infos,
+					vulkan_globals.world_pipeline_layout, va ("liquid_mboit_composite_volume %d%s", liquid_pipeline_index, scatter_only ? " scatter" : ""));
+			}
+		}
+}
+
+static void R_CreateAliasOITVolumePipelines (void)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry spec_entry;
+	uint32_t spec_data;
+	VkSpecializationInfo spec_info;
+	int pipeline_index;
+	int scatter_only;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_FALSE;
+	base.vertex_input_state.vertexAttributeDescriptionCount = 5;
+	base.vertex_input_state.pVertexAttributeDescriptions = alias_vertex_input_attribute_descriptions;
+	base.vertex_input_state.vertexBindingDescriptionCount = 3;
+	base.vertex_input_state.pVertexBindingDescriptions = alias_vertex_binding_descriptions;
+	base.shader_stages[0].module = alias_vert_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	R_CreateEmissiveVolumeSpecInfo (&spec_entry, &spec_data, &spec_info);
+	for (pipeline_index = 0; pipeline_index < MODEL_PIPELINE_SHOWTRIS; ++pipeline_index)
+	{
+		const qboolean alpha_test = !!(pipeline_index & MODEL_PIPELINE_ALPHA_TEST_BIT);
+		for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+		{
+			spec_data = (uint32_t)scatter_only;
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 1;
+			infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = alpha_test ? alias_alphatest_oit_volume_frag_module : alias_oit_volume_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &spec_info;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetWBOITBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.alias_oit_volume_pipelines[pipeline_index][scatter_only], &infos, vulkan_globals.alias_volume_pipeline_layout,
+				va ("alias_oit_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 2;
+			infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+			if (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
+				infos.shader_stages[1].module = alpha_test ? alias_alphatest_mboit_composite_volume_frag_module : alias_mboit_composite_volume_frag_module;
+			else
+				infos.shader_stages[1].module = alpha_test ? alias_alphatest_mboit_composite_volume_msaa_frag_module : alias_mboit_composite_volume_msaa_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &spec_info;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.alias_mboit_composite_volume_pipelines[pipeline_index][scatter_only], &infos,
+				vulkan_globals.alias_volume_pipeline_layout, va ("alias_mboit_composite_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+		}
+	}
+}
+
+static void R_CreateMD5OITVolumePipelineSet (
+	vulkan_pipeline_t oit_pipelines[MODEL_PIPELINE_COUNT][2], vulkan_pipeline_t composite_pipelines[MODEL_PIPELINE_COUNT][2],
+	VkVertexInputAttributeDescription *vertex_attributes, uint32_t vertex_attribute_count, VkVertexInputBindingDescription *vertex_binding,
+	VkShaderModule vertex_module, const char *name)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry spec_entry;
+	uint32_t spec_data;
+	VkSpecializationInfo spec_info;
+	int pipeline_index;
+	int scatter_only;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_FALSE;
+	base.vertex_input_state.vertexAttributeDescriptionCount = vertex_attribute_count;
+	base.vertex_input_state.pVertexAttributeDescriptions = vertex_attributes;
+	base.vertex_input_state.vertexBindingDescriptionCount = 1;
+	base.vertex_input_state.pVertexBindingDescriptions = vertex_binding;
+	base.shader_stages[0].module = vertex_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	R_CreateEmissiveVolumeSpecInfo (&spec_entry, &spec_data, &spec_info);
+	for (pipeline_index = 0; pipeline_index < MODEL_PIPELINE_SHOWTRIS; ++pipeline_index)
+	{
+		const qboolean alpha_test = !!(pipeline_index & MODEL_PIPELINE_ALPHA_TEST_BIT);
+		for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+		{
+			spec_data = (uint32_t)scatter_only;
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 1;
+			infos.color_blend_state.attachmentCount = WBOIT_COLOR_ATTACHMENT_COUNT;
+			infos.shader_stages[1].module = alpha_test ? md5_alphatest_oit_volume_frag_module : md5_oit_volume_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &spec_info;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetWBOITBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (&oit_pipelines[pipeline_index][scatter_only], &infos, vulkan_globals.md5_volume_pipeline_layout,
+				va ("%s_oit_volume %d%s", name, pipeline_index, scatter_only ? " scatter" : ""));
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.graphics_pipeline.subpass = 2;
+			infos.color_blend_state.attachmentCount = MBOIT_COMPOSITE_COLOR_ATTACHMENT_COUNT;
+			if (vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
+				infos.shader_stages[1].module = alpha_test ? md5_alphatest_mboit_composite_volume_frag_module : md5_mboit_composite_volume_frag_module;
+			else
+				infos.shader_stages[1].module = alpha_test ? md5_alphatest_mboit_composite_volume_msaa_frag_module : md5_mboit_composite_volume_msaa_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &spec_info;
+			infos.depth_stencil_state.depthWriteEnable = VK_FALSE;
+			R_SetMBOITCompositeBlend (infos.blend_attachment_states);
+			R_CreateGraphicsPipeline (&composite_pipelines[pipeline_index][scatter_only], &infos, vulkan_globals.md5_volume_pipeline_layout,
+				va ("%s_mboit_composite_volume %d%s", name, pipeline_index, scatter_only ? " scatter" : ""));
+		}
+	}
 }
 
 static void R_CreateAliasVolumePipelines (void)
@@ -4421,6 +4736,38 @@ void R_DestroyEmissiveVolumePipelines (void)
 				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_volume_pipelines[variant][i][s].handle, NULL);
 				vulkan_globals.liquid_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
 			}
+	for (i = 0; i < WORLD_PIPELINE_COUNT; ++i)
+		for (s = 0; s < 2; ++s)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_oit_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.world_oit_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_mboit_composite_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.world_mboit_composite_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+		}
+	for (i = 0; i < LIQUID_EMISSIVE_PIPELINE_COUNT; ++i)
+		for (s = 0; s < 2; ++s)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_oit_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.liquid_oit_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.liquid_mboit_composite_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.liquid_mboit_composite_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+		}
+	for (i = 0; i < MODEL_PIPELINE_COUNT; ++i)
+		for (s = 0; s < 2; ++s)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.alias_oit_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.alias_oit_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.alias_mboit_composite_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.alias_mboit_composite_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_oit_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.md5_oit_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_mboit_composite_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.md5_mboit_composite_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_8_oit_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.md5_8_oit_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_8_mboit_composite_volume_pipelines[i][s].handle, NULL);
+			vulkan_globals.md5_8_mboit_composite_volume_pipelines[i][s].handle = VK_NULL_HANDLE;
+		}
 	for (i = 0; i < WORLD_PIPELINE_COUNT; ++i)
 		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
 			for (s = 0; s < 2; ++s)
@@ -5025,6 +5372,42 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (world_volume_frag);
 	CREATE_SHADER_MODULE (world_emissive_volume_frag);
 	CREATE_SHADER_MODULE (world_liquid_volume_frag);
+	CREATE_SHADER_MODULE (world_oit_volume_frag);
+	CREATE_SHADER_MODULE (world_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (world_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (world_liquid_volume_oit_frag);
+	CREATE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+	CREATE_SHADER_MODULE_COND (world_liquid_volume_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (alias_oit_volume_frag);
+	CREATE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+	CREATE_SHADER_MODULE (alias_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (alias_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (alias_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (md5_oit_volume_frag);
+	CREATE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+	CREATE_SHADER_MODULE (md5_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (md5_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (md5_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (world_oit_volume_frag);
+	CREATE_SHADER_MODULE (world_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (world_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (world_liquid_volume_oit_frag);
+	CREATE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+	CREATE_SHADER_MODULE_COND (world_liquid_volume_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (alias_oit_volume_frag);
+	CREATE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+	CREATE_SHADER_MODULE (alias_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (alias_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (alias_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (md5_oit_volume_frag);
+	CREATE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+	CREATE_SHADER_MODULE (md5_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (md5_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+	CREATE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+	CREATE_SHADER_MODULE_COND (md5_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (world_emissive_bandlimit_frag);
 	CREATE_SHADER_MODULE (world_oit_frag);
 	CREATE_SHADER_MODULE (world_mboit_moment_frag);
@@ -5132,6 +5515,42 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (world_volume_frag);
 	DESTROY_SHADER_MODULE (world_emissive_volume_frag);
 	DESTROY_SHADER_MODULE (world_liquid_volume_frag);
+	DESTROY_SHADER_MODULE (world_oit_volume_frag);
+	DESTROY_SHADER_MODULE (world_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_oit_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
+	DESTROY_SHADER_MODULE (alias_oit_volume_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (md5_oit_volume_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (world_oit_volume_frag);
+	DESTROY_SHADER_MODULE (world_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_oit_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
+	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
+	DESTROY_SHADER_MODULE (alias_oit_volume_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_oit_volume_frag);
+	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (md5_oit_volume_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_oit_volume_frag);
+	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 	DESTROY_SHADER_MODULE (world_emissive_bandlimit_frag);
 	DESTROY_SHADER_MODULE (world_oit_frag);
 	DESTROY_SHADER_MODULE (world_mboit_moment_frag);

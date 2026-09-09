@@ -144,10 +144,22 @@ SHADER_OBJS = \
 	alias_frag.o \
 	alias_oit_frag.o \
 	alias_volume_frag.o \
+	alias_oit_volume_frag.o \
+	alias_mboit_composite_volume_frag.o \
+	alias_mboit_composite_volume_msaa_frag.o \
 	alias_alphatest_frag.o \
 	alias_alphatest_volume_frag.o \
+	alias_alphatest_oit_volume_frag.o \
+	alias_alphatest_mboit_composite_volume_frag.o \
+	alias_alphatest_mboit_composite_volume_msaa_frag.o \
 	md5_volume_frag.o \
 	md5_alphatest_volume_frag.o \
+	md5_oit_volume_frag.o \
+	md5_alphatest_oit_volume_frag.o \
+	md5_mboit_composite_volume_frag.o \
+	md5_mboit_composite_volume_msaa_frag.o \
+	md5_alphatest_mboit_composite_volume_frag.o \
+	md5_alphatest_mboit_composite_volume_msaa_frag.o \
 	alias_alphatest_oit_frag.o \
 	alias_mboit_moment_frag.o \
 	alias_alphatest_mboit_moment_frag.o \
@@ -207,6 +219,9 @@ SHADER_OBJS = \
 	world_frag.o \
 	world_emissive_frag.o \
 	world_volume_frag.o \
+	world_oit_volume_frag.o \
+	world_mboit_composite_volume_frag.o \
+	world_mboit_composite_volume_msaa_frag.o \
 	world_emissive_volume_frag.o \
 	world_liquid_volume_frag.o \
 	world_emissive_bandlimit_frag.o \
@@ -376,6 +391,24 @@ $(eval $(call SHADER_VARIANT,world_emissive_frag,world.frag,-DEMISSIVE_COARSE=1 
 $(eval $(call SHADER_VARIANT,world_volume_frag,world.frag,-DEMISSIVE_VOLUME=1))
 $(eval $(call SHADER_VARIANT,world_emissive_volume_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1 -DEMISSIVE_VOLUME=1))
 $(eval $(call SHADER_VARIANT,world_liquid_volume_frag,world.frag,-DEMISSIVE_VOLUME=1 -DEMISSIVE_ADD=1))
+$(eval $(call SHADER_VARIANT,world_oit_volume_frag,world.frag,-DEMISSIVE_VOLUME=1 -DWBOIT=1))
+$(eval $(call SHADER_VARIANT,world_mboit_composite_volume_frag,world.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
+$(eval $(call SHADER_VARIANT,world_mboit_composite_volume_msaa_frag,world.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
+$(eval $(call SHADER_VARIANT,world_liquid_volume_oit_frag,world.frag,-DEMISSIVE_VOLUME=1 -DEMISSIVE_ADD=1 -DWBOIT=1))
+$(eval $(call SHADER_VARIANT,world_liquid_volume_mboit_composite_frag,world.frag,-DEMISSIVE_VOLUME=1 -DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
+$(eval $(call SHADER_VARIANT,world_liquid_volume_mboit_composite_msaa_frag,world.frag,-DEMISSIVE_VOLUME=1 -DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
+$(eval $(call SHADER_VARIANT,alias_oit_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DWBOIT=1))
+$(eval $(call SHADER_VARIANT,alias_alphatest_oit_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DWBOIT=1))
+$(eval $(call SHADER_VARIANT,alias_mboit_composite_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
+$(eval $(call SHADER_VARIANT,alias_mboit_composite_volume_msaa_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
+$(eval $(call SHADER_VARIANT,alias_alphatest_mboit_composite_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
+$(eval $(call SHADER_VARIANT,alias_alphatest_mboit_composite_volume_msaa_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
+$(eval $(call SHADER_VARIANT,md5_oit_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DWBOIT=1 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_alphatest_oit_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DWBOIT=1 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_mboit_composite_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMBOIT_INPUT_SET=4 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_mboit_composite_volume_msaa_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1 -DMBOIT_INPUT_SET=4 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_alphatest_mboit_composite_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMBOIT_INPUT_SET=4 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_alphatest_mboit_composite_volume_msaa_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1 -DMBOIT_INPUT_SET=4 -DVOLUME_SAMPLER_SET=5))
 $(eval $(call SHADER_VARIANT,emissive_volume_shadow_comp,emissive_volume.comp,-DVOLUME_SHADOWED=1))
 $(eval $(call SHADER_VARIANT,world_emissive_bandlimit_frag,world.frag,-DEMISSIVE_COARSE=1 -DEMISSIVE_DETAIL=1 -DEMISSIVE_BANDLIMIT=1))
 $(eval $(call SHADER_VARIANT,world_mboit_moment_frag,world.frag,-DMBOIT=1))

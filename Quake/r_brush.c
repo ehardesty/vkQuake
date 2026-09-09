@@ -1387,6 +1387,19 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
 				volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
 			}
+			vulkan_pipeline_t volume_oit_pipeline;
+			qboolean volume_oit_selected = false;
+			memset (&volume_oit_pipeline, 0, sizeof (volume_oit_pipeline));
+			if (volume_wanted &&
+				(cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT || cbx->render_pass_index == RENDER_PASS_INDEX_MBOIT_COMPOSITE))
+			{
+				if (cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT)
+					volume_oit_pipeline = vulkan_globals.world_oit_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+				else
+					volume_oit_pipeline = vulkan_globals.world_mboit_composite_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+				volume_oit_selected =
+					volume_oit_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+			}
 			vulkan_pipeline_t pipeline;
 			qboolean liquid_volume_selected = false;
 			if (liquid_emissive_receiver)
@@ -1400,6 +1413,20 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					if (liquid_volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
 					{
 						pipeline = liquid_volume_pipeline;
+						liquid_volume_selected = true;
+					}
+				}
+				else if (
+					!r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady () &&
+					(cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT || cbx->render_pass_index == RENDER_PASS_INDEX_MBOIT_COMPOSITE))
+				{
+					const vulkan_pipeline_t liquid_oit_pipeline =
+						cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT
+							? vulkan_globals.liquid_oit_volume_pipelines[liquid_pipeline_index][volume_scatter_only ? 1 : 0]
+							: vulkan_globals.liquid_mboit_composite_volume_pipelines[liquid_pipeline_index][volume_scatter_only ? 1 : 0];
+					if (liquid_oit_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
+					{
+						pipeline = liquid_oit_pipeline;
 						liquid_volume_selected = true;
 					}
 				}
@@ -1428,13 +1455,15 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			}
 			else if (volume_selected)
 				pipeline = volume_pipeline;
+			else if (volume_oit_selected)
+				pipeline = volume_oit_pipeline;
 			else
 				pipeline = R_PipelineForRenderPass (
 					cbx->render_pass_index, vulkan_globals.world_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][pipeline_index],
 					vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
 					vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-			if (volume_selected)
+			if (volume_selected || volume_oit_selected)
 			{
 				const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 				float volume_push[5];

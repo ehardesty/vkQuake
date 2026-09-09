@@ -159,15 +159,17 @@ static void GL_DrawAliasFrame (
 			vulkan_globals.alias_wboit_pipelines[pipeline_index], vulkan_globals.alias_mboit_moment_pipelines[pipeline_index],
 			vulkan_globals.alias_mboit_composite_pipelines[pipeline_index]);
 
-	// RV6A volume: opaque/alpha-tested alias and MD5 draws sample foreground
-	// air scattering at their own depth. RV6B extends this to ordinary
-	// alpha-blended models (still sampled before their existing blend).
-	// Excluded: viewmodel, OIT-pass and showtris draws, and diagnostic
-	// unlit/lightmap modes. Model meshes never enter any ray-traced occluder
-	// set for this; no model AS work is enabled.
+	// Volume: alias and MD5 draws sample foreground air scattering at their
+	// own depth (RV6A opaque/alpha-tested, RV6B ordinary blend, RV6C OIT
+	// color stages under existing conventions). Excluded: viewmodel, moment
+	// passes, showtris, and diagnostic unlit/lightmap modes. Model meshes
+	// never enter any ray-traced occluder set; no model AS work is enabled.
 	const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
-	const qboolean volume_wanted = showtris == 0 && !oit_pass && e != &cl.viewent && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe &&
-									 R_EmissiveVolumeReady ();
+	const qboolean volume_family_wanted =
+		showtris == 0 && e != &cl.viewent && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
+	const qboolean volume_wanted = volume_family_wanted && !oit_pass;
+	const qboolean volume_oit_wanted = volume_family_wanted &&
+			(cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT || cbx->render_pass_index == RENDER_PASS_INDEX_MBOIT_COMPOSITE);
 	vulkan_pipeline_t volume_pipeline;
 	qboolean volume_selected = false;
 	memset (&volume_pipeline, 0, sizeof (volume_pipeline));
@@ -181,7 +183,28 @@ static void GL_DrawAliasFrame (
 			volume_pipeline = vulkan_globals.alias_volume_pipelines[variant][pipeline_index][volume_scatter_only ? 1 : 0];
 		volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
 	}
-	if (volume_selected)
+	const qboolean is_md5 = paliashdr->poseverttype == PV_MD5 || paliashdr->poseverttype == PV_MD5_8;
+	const qboolean is_md5_8 = paliashdr->poseverttype == PV_MD5_8;
+	if (volume_oit_wanted)
+	{
+		vulkan_pipeline_t volume_oit_pipeline;
+		memset (&volume_oit_pipeline, 0, sizeof (volume_oit_pipeline));
+		if (cbx->render_pass_index == RENDER_PASS_INDEX_WBOIT)
+			volume_oit_pipeline = is_md5 ? (is_md5_8 ? vulkan_globals.md5_8_oit_volume_pipelines : vulkan_globals.md5_oit_volume_pipelines)[pipeline_index]
+																																																									 [volume_scatter_only ? 1 : 0]
+										  : vulkan_globals.alias_oit_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+		else
+			volume_oit_pipeline = is_md5 ? (is_md5_8 ? vulkan_globals.md5_8_mboit_composite_volume_pipelines
+																																																										: vulkan_globals.md5_mboit_composite_volume_pipelines)[pipeline_index]
+																																																										[volume_scatter_only ? 1 : 0]
+										  : vulkan_globals.alias_mboit_composite_volume_pipelines[pipeline_index][volume_scatter_only ? 1 : 0];
+		if (volume_oit_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
+		{
+			pipeline = volume_oit_pipeline;
+			volume_selected = true;
+		}
+	}
+	else if (volume_selected)
 		pipeline = volume_pipeline;
 
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -190,7 +213,6 @@ static void GL_DrawAliasFrame (
 	{
 		const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 		float volume_push[5];
-		const qboolean is_md5 = paliashdr->poseverttype == PV_MD5 || paliashdr->poseverttype == PV_MD5_8;
 		vulkan_globals.vk_cmd_bind_descriptor_sets (
 			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout.handle, is_md5 ? 5 : 4, 1, &volume_set, 0, NULL);
 		R_EmissiveVolumeFragmentPush (volume_push);

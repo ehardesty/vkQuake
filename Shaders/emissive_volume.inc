@@ -9,7 +9,11 @@
 // unattenuated integrand reproduces along depth within float tolerance.
 // Fragments beyond the represented extent retain the last value.
 
-#if defined(EMISSIVE_VOLUME) && !defined(WBOIT) && !defined(MBOIT)
+// Moment-only MBOIT passes never sample the volume; WBOIT accumulation and
+// MBOIT composite (color-producing stages) do, following each path's
+// existing weighting/compositing convention. The final OIT resolves never
+// reference the volume, so nothing is added twice.
+#if defined(EMISSIVE_VOLUME) && !(defined(MBOIT) && !defined(MBOIT_COMPOSITE))
 
 // Including shaders define VOLUME_SAMPLER_SET (descriptor set holding the
 // volume texture) and VOLUME_SCATTER_ID (scatter-only specialization id)
