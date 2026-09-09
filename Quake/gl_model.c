@@ -5405,6 +5405,7 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
 	TEMP_ALLOC_DECL (unsigned short, poutindexes);
 	TEMP_ALLOC_DECL (unsigned short, skeleton_indexes);
 	TEMP_ALLOC_DECL (md5weightinfo_t, weight);
+	TEMP_ALLOC_DECL (jointpose_t, skinning_joints_with_inverse);
 
 	if (!MD5Anim_Begin (&anim, fname))
 		return false;
@@ -5501,6 +5502,18 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
 		}
 	}
 	SAFE_FREE (anim.posedata);
+
+	// Bind-pose normals are model-space while joint-local positions skin with absolute
+	// animation matrices. Append one inverse-bind pose so the vertex shader can map each
+	// model-space normal into joint-local space before animating it. Positions are unaffected.
+	if (anim.numposes && numjoints)
+	{
+		TEMP_ALLOC_ASSIGN (skinning_joints_with_inverse, numjoints * anim.numposes + numjoints);
+		memcpy (skinning_joints_with_inverse, skinning_joints, numjoints * anim.numposes * sizeof (*skinning_joints));
+		for (size_t j = 0; j < numjoints; ++j)
+			memcpy (
+				skinning_joints_with_inverse[anim.numposes * numjoints + j].mat, joint_infos[j].inverse.mat, sizeof (jointpose_t));
+	}
 
 	// 3. each mesh has its own aliashdr_t : load vertices, triangles, textures...etc. and upload to GPU each surface:
 
@@ -5646,9 +5659,10 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
 		TEMP_FREE (weight);
 		TEMP_FREE (vinfo);
 
-		// Upload to GPU that surface/mesh m:
+		// Upload to GPU that surface/mesh m (with appended inverse-bind pose for normals):
 		GLMesh_UploadBuffers (
-			mod, surf, poutindexes, (byte *)poutvertexes, NULL, skinning_joints, m == 0 ? skeleton_indexes : NULL, m == 0 ? num_skeleton_indexes : 0);
+			mod, surf, poutindexes, (byte *)poutvertexes, NULL, skinning_joints_with_inverse ? skinning_joints_with_inverse : skinning_joints,
+			m == 0 ? skeleton_indexes : NULL, m == 0 ? num_skeleton_indexes : 0);
 
 		TEMP_FREE (poutvertexes);
 		TEMP_FREE (poutindexes);
@@ -5674,6 +5688,7 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
 
 	TEMP_FREE (concat_joints);
 	TEMP_FREE (skinning_joints);
+	TEMP_FREE (skinning_joints_with_inverse);
 	TEMP_FREE (skeleton_indexes);
 
 	TEMP_FREE (joint_poses);
@@ -5703,6 +5718,7 @@ error:
 	}
 	TEMP_FREE (concat_joints);
 	TEMP_FREE (skinning_joints);
+	TEMP_FREE (skinning_joints_with_inverse);
 	TEMP_FREE (joint_poses);
 	TEMP_FREE (joint_infos);
 	return false;

@@ -389,7 +389,12 @@ void GLMesh_UploadBuffers (
 		assert (false);
 	}
 
-	const size_t totaljointssize = hdr->numframes * hdr->numjoints * sizeof (jointpose_t);
+	const size_t totaljointssize = hdr->numframes * hdr->numjoints * sizeof (jointpose_t) +
+		((joints && hdr->numframes > 0 && hdr->numjoints > 0 && (hdr->poseverttype == PV_MD5 || hdr->poseverttype == PV_MD5_8))
+				? (size_t)hdr->numjoints * sizeof (jointpose_t)
+				: 0);
+	// MD5 joints buffers append one inverse-bind pose after the animation poses so the
+	// vertex shader can map model-space bind normals into joint-local space.
 
 	if (hdr->poseverttype == PV_QUAKE1 || hdr->poseverttype == PV_QUAKE3)
 	{

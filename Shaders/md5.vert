@@ -29,6 +29,8 @@ layout (set = 2, binding = 0) uniform UBO
 	EmissiveClusteredLight emissive_lights[4];
 	uint  joints_offset0;
 	uint  joints_offset1;
+	uint  joints_inverse_offset;
+	uint  joints_inverse_pad;
 }
 ubo;
 
@@ -121,7 +123,7 @@ void main ()
 	vec4 joint_positions[MD5_INFLUENCE_COUNT];
 	MD5_LoadJointPositions (joint_position_x, joint_position_y, joint_position_z, joint_weights, joint_positions);
 	MD5_SkinFrames (
-		joint_offsets, joint_indices, joint_weights, joint_positions, in_normal, (ubo.flags & 0x2) == 0, skinned_positions, skinned_normals);
+		joint_offsets, ubo.joints_inverse_offset, joint_indices, joint_weights, joint_positions, in_normal, (ubo.flags & 0x2) == 0, skinned_positions, skinned_normals);
 
 	const vec4 lerped_position = vec4 (mix (skinned_positions[0], skinned_positions[1], ubo.blend_factor), 1.0f);
 	const vec4 model_space_position = ubo.model_matrix * lerped_position;

@@ -57,13 +57,17 @@ vec3 MD5_TransformPosition (mat4x3 joint_mat, vec4 joint_position)
 	return (joint_mat * joint_position).xyz;
 }
 
-vec3 MD5_TransformNormal (mat4x3 joint_mat, vec3 normal, float weight)
+vec3 MD5_TransformNormalCorrected (mat4x3 anim_mat, mat4x3 inv_bind_mat, vec3 normal, float weight)
 {
-	return weight * (mat3x3 (joint_mat) * normal).xyz;
+	// Bind-pose normals are model-space. Map through the inverse-bind rotation
+	// into joint-local space, then through the animated joint rotation.
+	// Translation is excluded via the mat3 path; the caller normalizes the blend.
+	const vec3 joint_local = mat3x3 (inv_bind_mat) * normal;
+	return weight * (mat3x3 (anim_mat) * joint_local);
 }
 
 void MD5_SkinFrames (
-	uint joint_offsets[2], uvec4 joint_indices[MD5_INFLUENCE_GROUP_COUNT], vec4 joint_weights[MD5_INFLUENCE_GROUP_COUNT],
+	uint joint_offsets[2], uint inverse_base, uvec4 joint_indices[MD5_INFLUENCE_GROUP_COUNT], vec4 joint_weights[MD5_INFLUENCE_GROUP_COUNT],
 	vec4 joint_positions[MD5_INFLUENCE_COUNT], vec3 normal, bool skin_normals, out vec3 skinned_positions[2], out vec3 skinned_normals[2])
 {
 	skinned_positions[0] = vec3 (0.0);
@@ -83,8 +87,9 @@ void MD5_SkinFrames (
 				skinned_positions[j] += MD5_TransformPosition (joint_mat, joint_positions[g * 4 + i]);
 				if (skin_normals)
 				{
-					const float joint_weight = joint_weights[g][i];
-					skinned_normals[j] += MD5_TransformNormal (joint_mat, normal, joint_weight);
+					const float  joint_weight = joint_weights[g][i];
+					const mat4x3 inv_bind_mat = MD5_LoadJointMatrix (inverse_base + joint_index);
+					skinned_normals[j] += MD5_TransformNormalCorrected (joint_mat, inv_bind_mat, normal, joint_weight);
 				}
 			}
 		}

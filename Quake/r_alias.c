@@ -66,7 +66,8 @@ typedef struct
 	uint32_t padding[2];
 	emissive_clustered_light_t emissive_lights[EMISSIVE_CLUSTERED_LIGHTS];
 	uint32_t joints_offsets[2];
-	uint32_t end_padding[2];
+	uint32_t joints_inverse_offset;
+	uint32_t joints_inverse_pad;
 } md5ubo_t;
 
 typedef struct
@@ -84,6 +85,7 @@ COMPILE_TIME_ASSERT (aliasubo_lights_offset, offsetof (aliasubo_t, emissive_ligh
 COMPILE_TIME_ASSERT (aliasubo_size, sizeof (aliasubo_t) == 240);
 COMPILE_TIME_ASSERT (md5ubo_lights_offset, offsetof (md5ubo_t, emissive_lights) == 112);
 COMPILE_TIME_ASSERT (md5ubo_joints_offset, offsetof (md5ubo_t, joints_offsets) == 240);
+COMPILE_TIME_ASSERT (md5ubo_inverse_offset, offsetof (md5ubo_t, joints_inverse_offset) == 248);
 COMPILE_TIME_ASSERT (md5ubo_size, sizeof (md5ubo_t) == 256);
 COMPILE_TIME_ASSERT (md5debugubo_joints_offset, offsetof (md5debugubo_t, joints_offsets) == 100);
 COMPILE_TIME_ASSERT (md5debugubo_size, sizeof (md5debugubo_t) == 108);
@@ -229,6 +231,8 @@ static void GL_DrawAliasFrame (
 		ubo->entalpha = entity_alpha;
 		ubo->joints_offsets[0] = lerpdata.pose1 * paliashdr->numjoints;
 		ubo->joints_offsets[1] = lerpdata.pose2 * paliashdr->numjoints;
+		ubo->joints_inverse_offset = (uint32_t)paliashdr->numframes * (uint32_t)paliashdr->numjoints;
+		ubo->joints_inverse_pad = 0;
 
 		VkDescriptorSet descriptor_sets[4] = {tx->descriptor_set, (fb != NULL) ? fb->descriptor_set : tx->descriptor_set, ubo_set, paliashdr->joints_set};
 		vulkan_globals.vk_cmd_bind_descriptor_sets (
