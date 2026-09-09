@@ -5018,14 +5018,19 @@ static emissive_alias_receiver_t *R_FindEmissiveAliasReceiver (entity_t *entity,
 	return NULL;
 }
 
-static void R_EmissiveAliasReceiverFrame (const entity_t *entity, vec3_t center, vec3_t forward, vec3_t right, vec3_t up)
+static void R_EmissiveAliasReceiverFrame (
+	const entity_t *entity, const vec3_t lerped_origin, const vec3_t lerped_angles, vec3_t center, vec3_t forward, vec3_t right, vec3_t up)
 {
 	vec3_t local_center, entity_angles;
 	VectorAdd (entity->model->mins, entity->model->maxs, local_center);
 	VectorScale (local_center, 0.5f * ENTSCALE_DECODE (entity->netstate.scale), local_center);
-	VectorCopy (entity->angles, entity_angles);
+	// Match the alias draw path: R_DrawAliasModel passes lerped angles straight to
+	// R_RotateForEntity, whose pitch rotation is -angles[0]. Negate pitch before
+	// AngleVectors so this basis agrees with that rendering rotation.
+	VectorCopy (lerped_angles, entity_angles);
+	entity_angles[0] = -entity_angles[0];
 	AngleVectors (entity_angles, forward, right, up);
-	VectorCopy (entity->origin, center);
+	VectorCopy (lerped_origin, center);
 	VectorMA (center, local_center[0], forward, center);
 	VectorMA (center, -local_center[1], right, center);
 	VectorMA (center, local_center[2], up, center);
@@ -5287,20 +5292,23 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 		receiver->model = model;
 	}
 	receiver->active = true;
+	// Use the same lerped transform as the alias draw path so the cached lighting
+	// direction cannot represent a different transform than the rendered mesh.
+	vec3_t lerped_origin, lerped_angles;
+	R_GetEntityLerpedTransform (entity, lerped_origin, lerped_angles);
 	if (receiver->ready && receiver->source_generation == emissive_brush_receiver_source_generation &&
-		receiver->occluder_generation == emissive_brush_occluder_generation &&
-		!memcmp (receiver->origin, entity->origin, sizeof (receiver->origin)) && !memcmp (receiver->angles, entity->angles, sizeof (receiver->angles)) &&
-		receiver->scale == entity->netstate.scale)
+		receiver->occluder_generation == emissive_brush_occluder_generation && !memcmp (receiver->origin, lerped_origin, sizeof (receiver->origin)) &&
+		!memcmp (receiver->angles, lerped_angles, sizeof (receiver->angles)) && receiver->scale == entity->netstate.scale)
 		return;
 
-	VectorCopy (entity->origin, receiver->origin);
-	VectorCopy (entity->angles, receiver->angles);
+	VectorCopy (lerped_origin, receiver->origin);
+	VectorCopy (lerped_angles, receiver->angles);
 	receiver->scale = entity->netstate.scale;
 	receiver->source_generation = emissive_brush_receiver_source_generation;
 	receiver->occluder_generation = emissive_brush_occluder_generation;
 	memset (receiver->candidates, 0, sizeof (receiver->candidates));
 	vec3_t center, forward, right, up;
-	R_EmissiveAliasReceiverFrame (entity, center, forward, right, up);
+	R_EmissiveAliasReceiverFrame (entity, lerped_origin, lerped_angles, center, forward, right, up);
 	const int total_lights = num_emissive_lights + num_transient_emissive_lights;
 	for (int light_index = 0; light_index < total_lights; ++light_index)
 	{
