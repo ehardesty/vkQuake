@@ -22,8 +22,11 @@ layout (push_constant) uniform PushConsts
 	vec3  emissive_add;
 	// RT-emissive volume sampling rect (framebuffer px, y down) and forward-depth extent.
 	// Appended after the established 27 floats so every existing push offset is unchanged.
-	vec4  volume_viewport;
+	// The scalar precedes the vector: vec4 requires 16-byte alignment, so it
+	// lives at byte 112 while z_max fills the padding slot at byte 108.
+	// The host uploads z_max at float 27 and the rect at floats 28-31.
 	float volume_z_max;
+	vec4  volume_viewport;
 }
 push_constants;
 

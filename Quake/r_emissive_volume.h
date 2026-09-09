@@ -102,6 +102,8 @@ qboolean R_EmissiveVolumeScatterOnly (void);
 // there. WBOIT/moment/composite/resolve/UI passes are never main passes.
 qboolean R_EmissiveVolumeMainPass (int render_pass_index);
 // Shadowed (0/1) versus unshadowed-diagnostic (2/3) generation selection.
+// Debug bit 2 (values 4-7) preserves the bits-0-1 mapping and additionally
+// forces the brute-force reference loop instead of the conservative lists.
 qboolean R_EmissiveVolumeShadowed (void);
 // Fragment push values: viewport rect (framebuffer px, y down) + z extent.
 void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5]);

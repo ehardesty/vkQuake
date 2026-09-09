@@ -122,10 +122,15 @@ vec3 EvaluateSources (const vec3 sample_pos, const uvec2 column)
 	const uint list_count = volume_lists[group * 2u + 1u];
 	if (list_count == 0xFFFFFFFFu)
 		return EvaluateBruteForce (sample_pos);
+	// Headers and indices share one packed buffer: headers occupy the first
+	// 2*groups_x*groups_y words, so stored offsets are relative to the index
+	// region that follows. Forgetting this base re-reads header words as
+	// source numbers.
+	const uint index_base = 2u * groups_x * groups_y;
 	const uint total_cacheable = push_constants.counts.x;
 	for (uint k = 0u; k < list_count; ++k)
 	{
-		const uint source = volume_lists[list_offset + k];
+		const uint source = volume_lists[index_base + list_offset + k];
 		if (source < total_cacheable)
 			AccumulateSource (contribution, sample_pos, cacheable_lights[source], cacheable_modulations[source]);
 		else

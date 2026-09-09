@@ -1444,7 +1444,11 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					vulkan_globals.vk_cmd_bind_descriptor_sets (
 						cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
 					R_EmissiveVolumeFragmentPush (volume_push);
-					R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (volume_push), volume_push);
+					// Split upload: the shader places volume_z_max (push[4]) at
+					// float 27 and volume_viewport (push[0..3]) at floats 28-31
+					// to satisfy vec4 16-byte alignment in the push block.
+					R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (float), &volume_push[4]);
+					R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 28 * sizeof (float), 4 * sizeof (float), volume_push);
 				}
 			}
 			else if (emissive_debug)
@@ -1470,7 +1474,11 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
 				R_EmissiveVolumeFragmentPush (volume_push);
-				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (volume_push), volume_push);
+				// Split upload: the shader places volume_z_max (push[4]) at
+				// float 27 and volume_viewport (push[0..3]) at floats 28-31
+				// to satisfy vec4 16-byte alignment in the push block.
+				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (float), &volume_push[4]);
+				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 28 * sizeof (float), 4 * sizeof (float), volume_push);
 			}
 
 			qboolean use_zbias = INDIRECT_ZBIAS && gl_zfix.value && indirect_draws[i].is_bmodel;

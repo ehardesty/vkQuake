@@ -1292,8 +1292,10 @@ void Sky_DrawSky (cb_context_t *cbx)
 		{
 			vulkan_globals.vk_cmd_bind_descriptor_sets (
 				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 1, 1, &sky_volume_set, 0, NULL);
-			memcpy (&constant_values[27], sky_volume_push, 4 * sizeof (float));
-			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 31 * sizeof (float), constant_values);
+			// The shader's volume_viewport sits at byte 112 (vec4 alignment
+			// after wind_dir); float 27 is an unread padding slot.
+			memcpy (&constant_values[28], sky_volume_push, 4 * sizeof (float));
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 32 * sizeof (float), constant_values);
 		}
 		else
 			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 27 * sizeof (float), constant_values);
@@ -1326,8 +1328,10 @@ void Sky_DrawSky (cb_context_t *cbx)
 		{
 			vulkan_globals.vk_cmd_bind_descriptor_sets (
 				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 2, 1, &sky_volume_set, 0, NULL);
-			memcpy (&constant_values[25], sky_volume_push, 4 * sizeof (float));
-			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 29 * sizeof (float), constant_values);
+			// The shader's volume_viewport sits at byte 112 (vec4 alignment
+			// after the trailing scalars); floats 25-27 are unread padding.
+			memcpy (&constant_values[28], sky_volume_push, 4 * sizeof (float));
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 32 * sizeof (float), constant_values);
 		}
 		else
 			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 25 * sizeof (float), constant_values);

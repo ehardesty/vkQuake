@@ -2822,24 +2822,6 @@ DECLARE_SHADER_MODULE (md5_mboit_composite_volume_frag);
 DECLARE_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
 DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
-DECLARE_SHADER_MODULE (world_oit_volume_frag);
-DECLARE_SHADER_MODULE (world_mboit_composite_volume_frag);
-DECLARE_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
-DECLARE_SHADER_MODULE (world_liquid_volume_oit_frag);
-DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
-DECLARE_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
-DECLARE_SHADER_MODULE (alias_oit_volume_frag);
-DECLARE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
-DECLARE_SHADER_MODULE (alias_mboit_composite_volume_frag);
-DECLARE_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
-DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
-DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
-DECLARE_SHADER_MODULE (md5_oit_volume_frag);
-DECLARE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
-DECLARE_SHADER_MODULE (md5_mboit_composite_volume_frag);
-DECLARE_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
-DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
-DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 DECLARE_SHADER_MODULE (world_emissive_bandlimit_frag);
 DECLARE_SHADER_MODULE (world_oit_frag);
 DECLARE_SHADER_MODULE (world_mboit_moment_frag);
@@ -5390,24 +5372,6 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (md5_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 	CREATE_SHADER_MODULE_COND (md5_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (world_oit_volume_frag);
-	CREATE_SHADER_MODULE (world_mboit_composite_volume_frag);
-	CREATE_SHADER_MODULE_COND (world_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (world_liquid_volume_oit_frag);
-	CREATE_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
-	CREATE_SHADER_MODULE_COND (world_liquid_volume_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (alias_oit_volume_frag);
-	CREATE_SHADER_MODULE (alias_alphatest_oit_volume_frag);
-	CREATE_SHADER_MODULE (alias_mboit_composite_volume_frag);
-	CREATE_SHADER_MODULE_COND (alias_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
-	CREATE_SHADER_MODULE_COND (alias_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (md5_oit_volume_frag);
-	CREATE_SHADER_MODULE (md5_alphatest_oit_volume_frag);
-	CREATE_SHADER_MODULE (md5_mboit_composite_volume_frag);
-	CREATE_SHADER_MODULE_COND (md5_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
-	CREATE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
-	CREATE_SHADER_MODULE_COND (md5_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (world_emissive_bandlimit_frag);
 	CREATE_SHADER_MODULE (world_oit_frag);
 	CREATE_SHADER_MODULE (world_mboit_moment_frag);
@@ -5533,24 +5497,6 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
 	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
-	DESTROY_SHADER_MODULE (world_oit_volume_frag);
-	DESTROY_SHADER_MODULE (world_mboit_composite_volume_frag);
-	DESTROY_SHADER_MODULE (world_mboit_composite_volume_msaa_frag);
-	DESTROY_SHADER_MODULE (world_liquid_volume_oit_frag);
-	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_frag);
-	DESTROY_SHADER_MODULE (world_liquid_volume_mboit_composite_msaa_frag);
-	DESTROY_SHADER_MODULE (alias_oit_volume_frag);
-	DESTROY_SHADER_MODULE (alias_alphatest_oit_volume_frag);
-	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_frag);
-	DESTROY_SHADER_MODULE (alias_mboit_composite_volume_msaa_frag);
-	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_frag);
-	DESTROY_SHADER_MODULE (alias_alphatest_mboit_composite_volume_msaa_frag);
-	DESTROY_SHADER_MODULE (md5_oit_volume_frag);
-	DESTROY_SHADER_MODULE (md5_alphatest_oit_volume_frag);
-	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_frag);
-	DESTROY_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
-	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
-	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 	DESTROY_SHADER_MODULE (world_emissive_bandlimit_frag);
 	DESTROY_SHADER_MODULE (world_oit_frag);
 	DESTROY_SHADER_MODULE (world_mboit_moment_frag);
@@ -5653,6 +5599,13 @@ void R_CreatePipelines ()
 	R_CreateIndirectComputePipelines ();
 	R_CreateRayDebugPipelines ();
 	R_CreateAnimComputePipelines ();
+
+	// Volumetric pipelines are built here, while every shader module they
+	// reference is still alive. First activation then only allocates the
+	// map-level images and descriptor sets; the idempotent lazy call in
+	// EnsureResources remains as a backstop for any future init path that
+	// reorders this sequence.
+	R_CreateEmissiveVolumePipelines ();
 
 	R_DestroyShaderModules ();
 }

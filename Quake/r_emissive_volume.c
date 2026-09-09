@@ -48,6 +48,7 @@ static uint64_t				   volume_evaluated_pairs_estimate;
 // RV2 resource state (defined below; forward-declared for NewMap ordering).
 static void R_EmissiveVolumeTeardownResources (void);
 static int R_EmissiveVolumeDebugMode (void);
+static qboolean R_EmissiveVolumeForceBruteForce (void);
 static void R_EmissiveVolumeEnsureResources (void);
 static void R_EmissiveVolumeBuildLists (void);
 // Per-group sphere-overlap admission. A group owns the view pyramid over
@@ -356,6 +357,11 @@ static void R_EmissiveVolumeBuildLists (void)
 	volume_list_groups_y = 0;
 	if (!volume_resources_valid || total_sources <= EMISSIVE_VOLUME_BRUTE_FORCE_SOURCES)
 		return;
+	// Forced reference (debug bit 2): skip the lists so the same populated
+	// scene evaluates the brute-force loop; the estimate below stays at the
+	// brute-force value latched by EnsureResources.
+	if (R_EmissiveVolumeForceBruteForce ())
+		return;
 	volume_list_groups_x = (uint32_t)((volume_nx + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE);
 	volume_list_groups_y = (uint32_t)((volume_ny + EMISSIVE_VOLUME_GROUP_SIZE - 1) / EMISSIVE_VOLUME_GROUP_SIZE);
 	if (volume_list_groups_x * volume_list_groups_y > volume_list_header_capacity)
@@ -486,7 +492,7 @@ static qboolean R_EmissiveVolumeCreateSlot (emissive_volume_slot_t *slot, int nx
 	image_info.arrayLayers = 1;
 	image_info.samples = VK_SAMPLE_COUNT_1_BIT;
 	image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	err = vkCreateImage (vulkan_globals.device, &image_info, NULL, &slot->image);
@@ -621,14 +627,25 @@ qboolean R_EmissiveVolumeReady (void)
 
 static int R_EmissiveVolumeDebugMode (void)
 {
+	// Bits 0-1 select shadowed (0/1) vs unshadowed-diagnostic (2/3)
+	// generation; bit 2 (values 4-7) forces the brute-force reference loop
+	// for the same scene so listed and reference evaluation can be
+	// compared with identical sources. Nonfinite input maps to mode 0.
 	if (!isfinite (r_emissive_rt_volumetrics_debug.value))
 		return 0;
-	return CLAMP (0, (int)r_emissive_rt_volumetrics_debug.value, 3);
+	return CLAMP (0, (int)r_emissive_rt_volumetrics_debug.value, 7);
+}
+
+// True when the debug mode forces the brute-force reference instead of the
+// conservative lists (bit 2). Declared here for the list builder below.
+static qboolean R_EmissiveVolumeForceBruteForce (void)
+{
+	return (R_EmissiveVolumeDebugMode () & 4) != 0;
 }
 
 qboolean R_EmissiveVolumeScatterOnly (void)
 {
-	const int debug_mode = R_EmissiveVolumeDebugMode ();
+	const int debug_mode = R_EmissiveVolumeDebugMode () & 3;
 	return debug_mode == 1 || debug_mode == 3;
 }
 
@@ -640,7 +657,7 @@ qboolean R_EmissiveVolumeMainPass (int render_pass_index)
 
 qboolean R_EmissiveVolumeShadowed (void)
 {
-	const int debug_mode = R_EmissiveVolumeDebugMode ();
+	const int debug_mode = R_EmissiveVolumeDebugMode () & 3;
 	return debug_mode == 0 || debug_mode == 1;
 }
 
@@ -912,7 +929,9 @@ static void R_EmissiveVolumeResourceStats (void)
 			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + volume_list_admitted) * 4u,
 			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + EMISSIVE_VOLUME_LIST_INDEX_CAP) * 4u);
 	else
-		Con_Printf ("   volume lists: brute-force reference (sources at/below threshold)\n");
+		Con_Printf (
+			"   volume lists: brute-force reference (%s)\n",
+			R_EmissiveVolumeForceBruteForce () ? "forced by debug bit 2" : "sources at/below threshold");
 	if (rs_emissive_volume_gputime_valid)
 		Con_Printf ("   volume GPU generation: %u us\n", rs_emissive_volume_gputime_us);
 	else
