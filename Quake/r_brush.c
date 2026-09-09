@@ -508,6 +508,11 @@ COMPILE_TIME_ASSERT (emissive_bounce_surface_t, sizeof (emissive_bounce_surface_
 COMPILE_TIME_ASSERT (emissive_bounce_sample_t, sizeof (emissive_bounce_sample_t) == 8);
 COMPILE_TIME_ASSERT (emissive_bounce_push_constants_t, sizeof (emissive_bounce_push_constants_t) == 48);
 #define EMISSIVE_BOUNCE_MAX_RAYS 128
+// Partial bounce refresh issues per-surface copies and dispatches; beyond a few
+// hundred affected surfaces one compact whole-atlas resolve is cheaper. A small
+// dirty input set can still reach thousands of surfaces through bounce reach,
+// so this gates output work, not input tiles.
+#define EMISSIVE_BOUNCE_PARTIAL_SURFACE_LIMIT 256
 #define EMISSIVE_BOUNCE_MEMORY_BUDGET_MB 256
 #define EMISSIVE_BOUNCE_VERSION 2
 enum
@@ -7347,11 +7352,15 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 	const int num_dirty_tiles = transient ? num_transient_emissive_tiles : num_emissive_radiance_tiles;
 	// Thousands of tiny per-surface dispatches and copies cost more than one compact full-atlas resolve.
 	// Keep region work for genuinely small changes and use the bounded no-ray fallback for broad lightstyle updates.
-	const qboolean partial = num_dirty_tiles > 0 && num_dirty_tiles <= 64 &&
+	// Input tile count alone cannot tell them apart: a few changed tiles can reach thousands of receiver
+	// surfaces through bounce reach, so the partial path additionally requires bounded affected output.
+	const qboolean partial_candidate = num_dirty_tiles > 0 && num_dirty_tiles <= 64 &&
 		(transient ? emissive_bounce_transient_outputs_initialized && !emissive_bounce_transient_force_full_refresh
 				   : !emissive_bounce_cacheable_force_full_refresh);
 	uint32_t *dirty_surfaces = NULL;
-	const int num_dirty_surfaces = partial ? R_EmissiveBounceDirtySurfaces (dirty_tiles, num_dirty_tiles, &dirty_surfaces) : 0;
+	const int num_dirty_surfaces =
+		partial_candidate ? R_EmissiveBounceDirtySurfaces (dirty_tiles, num_dirty_tiles, &dirty_surfaces) : 0;
+	const qboolean partial = partial_candidate && num_dirty_surfaces <= EMISSIVE_BOUNCE_PARTIAL_SURFACE_LIMIT;
 	emissive_bounce_dirty_receiver_surfaces = partial ? num_dirty_surfaces : num_dirty_tiles > 0 ? cl.worldmodel->nummodelsurfaces : 0;
 	RTPerf_Record (
 		transient ? "bounce_ref_t" : "bounce_ref_c", 0.0,
