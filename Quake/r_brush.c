@@ -3718,6 +3718,27 @@ void R_SetTransientEmissiveLights (const transient_emissive_source_t *sources, i
 		if (!force_refresh && old_light && new_light && R_TransientEmissiveLightsEqual (old_light, new_light))
 			continue;
 		++num_changed_sources;
+		{
+			// Attribution: which owner, and which field moved (origin/radius/color/intensity vs add/remove).
+			uint64_t reason = 0;
+			const transient_emissive_source_id_t *const reason_id = new_id ? new_id : old_id;
+			if (old_light && new_light)
+			{
+				if (memcmp (old_light->origin, new_light->origin, sizeof (old_light->origin)))
+					reason |= 1u;
+				if (old_light->radius != new_light->radius)
+					reason |= 2u;
+				if (memcmp (old_light->color, new_light->color, sizeof (old_light->color)))
+					reason |= 4u;
+				if (old_light->intensity != new_light->intensity)
+					reason |= 8u;
+			}
+			else
+				reason |= old_light ? 16u : 32u;
+			RTPerf_Record (
+				"transient_chg", 0.0,
+				((uint64_t)reason_id->owner << 32) | ((uint64_t)reason_id->kind << 24) | reason);
+		}
 		transient_emissive_invalidation_t invalidation = {
 			NULL, lightmap_offsets, &dirty_tiles, &num_dirty_tiles, &dirty_tile_capacity, 0};
 		if (old_light)
