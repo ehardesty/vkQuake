@@ -1063,6 +1063,9 @@ static void R_DrawParticlesFaces (cb_context_t *cbx)
 R_DrawParticles -- johnfitz -- moved all non-drawing code to CL_RunParticles
 ===============
 */
+// RV6B classification: classic particles are additive effects. They keep the
+// original attenuation policy without the volumetric foreground term, so
+// overlapping layers never repeatedly add the same integrated scattering.
 void R_DrawParticles (cb_context_t *cbx)
 {
 	R_BeginDebugUtilsLabel (cbx, "Particles");

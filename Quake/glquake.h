@@ -418,6 +418,7 @@ typedef struct
 	vulkan_pipeline_t		 liquid_emissive_wboit_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
 	vulkan_pipeline_t		 liquid_emissive_mboit_moment_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
 	vulkan_pipeline_t		 liquid_emissive_mboit_composite_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
+	vulkan_pipeline_t		 liquid_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][LIQUID_EMISSIVE_PIPELINE_COUNT][2];
 	vulkan_pipeline_layout_t world_pipeline_layout;
 	vulkan_pipeline_layout_t alias_volume_pipeline_layout;
 	vulkan_pipeline_layout_t md5_volume_pipeline_layout;

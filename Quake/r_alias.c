@@ -160,12 +160,14 @@ static void GL_DrawAliasFrame (
 			vulkan_globals.alias_mboit_composite_pipelines[pipeline_index]);
 
 	// RV6A volume: opaque/alpha-tested alias and MD5 draws sample foreground
-	// air scattering at their own depth. Excluded: viewmodel, blended/OIT and
-	// showtris draws, and diagnostic unlit/lightmap modes. Model meshes never
-	// enter any ray-traced occluder set for this; no model AS work is enabled.
+	// air scattering at their own depth. RV6B extends this to ordinary
+	// alpha-blended models (still sampled before their existing blend).
+	// Excluded: viewmodel, OIT-pass and showtris draws, and diagnostic
+	// unlit/lightmap modes. Model meshes never enter any ray-traced occluder
+	// set for this; no model AS work is enabled.
 	const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
-	const qboolean volume_wanted = showtris == 0 && !has_alpha && !oit_pass && e != &cl.viewent && !r_fullbright_cheatsafe &&
-									!r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
+	const qboolean volume_wanted = showtris == 0 && !oit_pass && e != &cl.viewent && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe &&
+									 R_EmissiveVolumeReady ();
 	vulkan_pipeline_t volume_pipeline;
 	qboolean volume_selected = false;
 	memset (&volume_pipeline, 0, sizeof (volume_pipeline));

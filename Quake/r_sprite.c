@@ -209,6 +209,8 @@ static void R_CreateSpriteVertices (entity_t *e, mspriteframe_t *frame, basicver
 R_DrawSpriteModel -- johnfitz -- rewritten: now supports all orientations
 =================
 */
+// RV6B classification: sprites are additive effects. They keep the original
+// attenuation policy without the volumetric foreground term.
 void R_DrawSpriteModel (cb_context_t *cbx, entity_t *e)
 {
 	VkBuffer		buffer;

@@ -1377,8 +1377,8 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			// air scattering; liquid-receiver, alpha-blend, bandlimit, and
 			// surface-debug draws keep their original pipelines.
 			const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
-			const qboolean volume_wanted = !alpha_blend && !liquid_emissive_receiver && !bandlimit_enabled && !emissive_debug &&
-										 !r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
+			const qboolean volume_wanted = !liquid_emissive_receiver && !bandlimit_enabled && !emissive_debug && !r_fullbright_cheatsafe &&
+										 !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
 			vulkan_pipeline_t volume_pipeline;
 			qboolean volume_selected = false;
 			memset (&volume_pipeline, 0, sizeof (volume_pipeline));
@@ -1388,15 +1388,37 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 				volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
 			}
 			vulkan_pipeline_t pipeline;
+			qboolean liquid_volume_selected = false;
 			if (liquid_emissive_receiver)
 			{
 				const int liquid_pipeline_index = alpha_blend + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0);
-				pipeline = R_PipelineForRenderPass (
-					cbx->render_pass_index, vulkan_globals.liquid_emissive_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][liquid_pipeline_index],
-					vulkan_globals.liquid_emissive_wboit_pipelines[liquid_pipeline_index],
-					vulkan_globals.liquid_emissive_mboit_moment_pipelines[liquid_pipeline_index],
-					vulkan_globals.liquid_emissive_mboit_composite_pipelines[liquid_pipeline_index]);
+				if (R_EmissiveVolumeMainPass (cbx->render_pass_index) && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe &&
+					R_EmissiveVolumeReady ())
+				{
+					const vulkan_pipeline_t liquid_volume_pipeline = vulkan_globals.liquid_volume_pipelines
+						[R_MainPassPipelineVariant (cbx->render_pass_index)][liquid_pipeline_index][volume_scatter_only ? 1 : 0];
+					if (liquid_volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE)
+					{
+						pipeline = liquid_volume_pipeline;
+						liquid_volume_selected = true;
+					}
+				}
+				if (!liquid_volume_selected)
+					pipeline = R_PipelineForRenderPass (
+						cbx->render_pass_index, vulkan_globals.liquid_emissive_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][liquid_pipeline_index],
+						vulkan_globals.liquid_emissive_wboit_pipelines[liquid_pipeline_index],
+						vulkan_globals.liquid_emissive_mboit_moment_pipelines[liquid_pipeline_index],
+						vulkan_globals.liquid_emissive_mboit_composite_pipelines[liquid_pipeline_index]);
 				R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 24 * sizeof (float), sizeof (vec3_t), liquid_emissive_add);
+				if (liquid_volume_selected)
+				{
+					const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
+					float volume_push[5];
+					vulkan_globals.vk_cmd_bind_descriptor_sets (
+						cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+					R_EmissiveVolumeFragmentPush (volume_push);
+					R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 27 * sizeof (float), sizeof (volume_push), volume_push);
+				}
 			}
 			else if (emissive_debug)
 			{
