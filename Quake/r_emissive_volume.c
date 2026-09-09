@@ -38,6 +38,11 @@ static uint32_t				   volume_prepare_cpu_us;
 // World-only visibility for both collections: moving doors, brush housings,
 // and monsters never shadow the air; fixed world housings do.
 static VkAccelerationStructureKHR volume_world_tlas = VK_NULL_HANDLE;
+// RV4 isolation diagnostics: latched view and modulation identity so source,
+// visibility, and reconstruction failures can be told apart from stats alone.
+static float volume_cam_origin[3];
+static float volume_cam_fov[2];
+static double volume_mod_checksum;
 static uint64_t				   volume_evaluated_pairs_estimate;
 
 // RV2 resource state (defined below; forward-declared for NewMap ordering).
@@ -79,6 +84,9 @@ void R_EmissiveVolumeNewMap (void)
 	volume_snapshot_valid = false;
 	volume_inactive_reason = "no map snapshot";
 	volume_world_tlas = VK_NULL_HANDLE;
+	volume_cam_origin[0] = volume_cam_origin[1] = volume_cam_origin[2] = 0.0f;
+	volume_cam_fov[0] = volume_cam_fov[1] = 0.0f;
+	volume_mod_checksum = 0.0;
 	volume_prepare_cpu_us = 0;
 	volume_evaluated_pairs_estimate = 0;
 }
@@ -110,6 +118,20 @@ static void R_EmissiveVolumeCountPositive (void)
 // Position checksum over current proxies (both collections, canonical order).
 // Moving emitters shift this value frame to frame; it is diagnostics only and
 // never feeds rendering, so its exact hash function is not load-bearing.
+static void R_EmissiveVolumeChecksumModulation (void)
+{
+	int i;
+	double checksum = 0.0;
+	// Cacheable modulation is the resolved d_lightstylevalue/256 signal (or
+	// 1.0 for style 255); transient sources are always full modulation, so
+	// their count stands in. A lightstyle-only frame shifts this value while
+	// the proxy checksum above stays put, isolating radiance-only changes.
+	for (i = 0; i < volume_num_cacheable; ++i)
+		checksum += (volume_cacheable_modulations ? (double)volume_cacheable_modulations[i] : 1.0) * (double)(i + 1);
+	checksum += (double)volume_num_transient * 1000.0;
+	volume_mod_checksum = checksum;
+}
+
 static void R_EmissiveVolumeChecksumPositions (void)
 {
 	int	   i;
@@ -134,6 +156,12 @@ void R_EmissiveVolumePrepare (void)
 	volume_snapshot_valid = true;
 	R_EmissiveVolumeCountPositive ();
 	R_EmissiveVolumeChecksumPositions ();
+	R_EmissiveVolumeChecksumModulation ();
+	volume_cam_origin[0] = r_refdef.vieworg[0];
+	volume_cam_origin[1] = r_refdef.vieworg[1];
+	volume_cam_origin[2] = r_refdef.vieworg[2];
+	volume_cam_fov[0] = r_fovx;
+	volume_cam_fov[1] = r_fovy;
 
 	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
 		volume_inactive_reason = "parent RT emissives disabled";
@@ -621,6 +649,12 @@ static void R_EmissiveVolumeResourceStats (void)
 	}
 	logical_bytes = (uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_BOUNDARIES * 8 * EMISSIVE_VOLUME_SLOTS;
 	allocated_bytes = volume_slots[0].memory.size + volume_slots[1].memory.size + volume_dummy_memory.size;
+	Con_Printf (
+		"   volume view: origin (%.1f %.1f %.1f) fov %.1fx%.1f, viewport %.0fx%.0f at %.0f,%.0f, slot %d%s\n",
+		volume_cam_origin[0], volume_cam_origin[1], volume_cam_origin[2], volume_cam_fov[0], volume_cam_fov[1], volume_viewport[2],
+		volume_viewport[3], volume_viewport[0], volume_viewport[1], volume_slot,
+		volume_slot_initialized[volume_slot] ? "" : " (first use, cleared)");
+	Con_Printf ("   volume modulation checksum %.3f\n", volume_mod_checksum);
 	Con_Printf ("   volume grid: %dx%dx%d, extent %.0f, %s\n", volume_nx, volume_ny, EMISSIVE_VOLUME_SEGMENTS, volume_zmax,
 		R_EmissiveVolumeShadowed () ? "world-shadowed" : "unshadowed diagnostic");
 	Con_Printf (
