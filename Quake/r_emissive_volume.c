@@ -47,6 +47,7 @@ static uint64_t				   volume_evaluated_pairs_estimate;
 
 // RV2 resource state (defined below; forward-declared for NewMap ordering).
 static void R_EmissiveVolumeTeardownResources (void);
+static int R_EmissiveVolumeDebugMode (void);
 static void R_EmissiveVolumeEnsureResources (void);
 static void R_EmissiveVolumeBuildLists (void);
 // Per-group sphere-overlap admission. A group owns the view pyramid over
@@ -221,9 +222,10 @@ qboolean R_EmissiveVolumeActive (void)
 
 void R_EmissiveVolumeStats_f (void)
 {
-	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;
+	const int debug_mode = R_EmissiveVolumeDebugMode ();
 
 	Con_Printf ("RT emissive volumetrics: %s (%s)\n", R_EmissiveVolumeActive () ? "active" : "inactive", volume_inactive_reason);
+	Con_Printf ("   debug config: r_emissive_rt 1 + r_emissive_rt_volumetrics 1 + strength 4 + debug 2 + fog 0\n");
 	Con_Printf ("   requested %g, strength %g (effective %g), debug %d\n", r_emissive_rt_volumetrics.value,
 		r_emissive_rt_volumetrics_strength.value, R_EmissiveVolumeClampedStrength (), debug_mode);
 	Con_Printf ("   cacheable sources: %d total, %d positive-radiance\n", volume_num_cacheable, volume_cacheable_positive);
@@ -617,9 +619,16 @@ qboolean R_EmissiveVolumeReady (void)
 	return true;
 }
 
+static int R_EmissiveVolumeDebugMode (void)
+{
+	if (!isfinite (r_emissive_rt_volumetrics_debug.value))
+		return 0;
+	return CLAMP (0, (int)r_emissive_rt_volumetrics_debug.value, 3);
+}
+
 qboolean R_EmissiveVolumeScatterOnly (void)
 {
-	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;
+	const int debug_mode = R_EmissiveVolumeDebugMode ();
 	return debug_mode == 1 || debug_mode == 3;
 }
 
@@ -631,7 +640,7 @@ qboolean R_EmissiveVolumeMainPass (int render_pass_index)
 
 qboolean R_EmissiveVolumeShadowed (void)
 {
-	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;
+	const int debug_mode = R_EmissiveVolumeDebugMode ();
 	return debug_mode == 0 || debug_mode == 1;
 }
 
