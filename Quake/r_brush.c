@@ -8958,8 +8958,8 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 		{
 			VectorCopy (e->origin, lerped_origin);
 			VectorCopy (e->angles, lerped_angles);
+			lerped_angles[0] = -lerped_angles[0]; // quake bug: brush raster pre-negates pitch, alias raster does not
 		}
-		lerped_angles[0] = -lerped_angles[0]; // quake bug
 
 		float model_matrix[16];
 		IdentityMatrix (model_matrix);
