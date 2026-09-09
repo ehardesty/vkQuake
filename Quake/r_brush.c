@@ -7192,6 +7192,9 @@ static void R_RefreshEmissiveBounce (cb_context_t *cbx, qboolean transient)
 	uint32_t *dirty_surfaces = NULL;
 	const int num_dirty_surfaces = partial ? R_EmissiveBounceDirtySurfaces (dirty_tiles, num_dirty_tiles, &dirty_surfaces) : 0;
 	emissive_bounce_dirty_receiver_surfaces = partial ? num_dirty_surfaces : num_dirty_tiles > 0 ? cl.worldmodel->nummodelsurfaces : 0;
+	RTPerf_Record (
+		transient ? "bounce_ref_t" : "bounce_ref_c", 0.0,
+		((uint64_t)(uint32_t)num_dirty_tiles << 32) | (partial ? (uint32_t)num_dirty_surfaces : 0xFFFFFFFFu));
 	const vulkan_pipeline_t *const pipeline = &vulkan_globals.emissive_bounce_pipeline;
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
 	VkDescriptorSet first_set = VK_NULL_HANDLE;
@@ -7706,6 +7709,9 @@ static void R_UpdateEmissiveLightmaps (cb_context_t *cbx, qboolean detail)
 	int dirty_tile = 0;
 	emissive_detail_recorded_tiles = partial_detail ? num_emissive_occluder_dirty_tiles : num_emissive_logical_tiles;
 	emissive_detail_recorded_dispatches = 0;
+	RTPerf_Record (
+		detail ? "detail_build" : "coarse_build", 0.0,
+		((uint64_t)(partial_detail ? 1u : 0u) << 32) | (uint32_t)emissive_detail_recorded_tiles);
 	for (int i = 0; i < lightmap_count; ++i)
 	{
 		struct lightmap_s *const lightmap = &lightmaps[i];
@@ -8187,6 +8193,7 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 					num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
 		}
 		R_TransientEmissiveUploadBarrier (cbx);
+		RTPerf_Record ("transient_detail", 0.0, (uint64_t)num_transient_emissive_tiles);
 		if (R_DispatchTransientEmissiveTiles (cbx, true, false))
 		{
 			transient_emissive_detail_published_generation = transient_emissive_generation;
@@ -9201,7 +9208,9 @@ void R_BuildTopLevelAccelerationStructure (void *unused)
 	live_as_instance_count = num_instances;
 	rs_live_as_cputime_us = (uint32_t)((Sys_DoubleTime () - start_time) * 1000000.0);
 	emissive_live_as_dirty = false;
-	RTPerf_Record ("tlas_build", (Sys_DoubleTime () - start_time) * 1000.0, (uint64_t)num_instances);
+	RTPerf_Record (
+		"tlas_build", (Sys_DoubleTime () - start_time) * 1000.0,
+		(uint64_t)num_instances | (rt_shadows_require_update ? ((uint64_t)1 << 32) : (uint64_t)0));
 }
 
 /*
