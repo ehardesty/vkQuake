@@ -447,6 +447,7 @@ typedef struct emissive_alias_receiver_s
 	entity_t					  *entity;
 	qmodel_t					  *model;
 	vec3_t						   origin, angles;
+	vec3_t						   trace_origin, trace_angles;
 	byte						   scale;
 	uint32_t					   source_generation, occluder_generation;
 	qboolean					   active, ready;
@@ -5036,6 +5037,20 @@ static void R_EmissiveAliasReceiverFrame (
 	VectorMA (center, local_center[2], up, center);
 }
 
+// Shadow visibility changes slowly relative to per-frame interpolation, so key
+// retraces on the same quanta the occluder system uses. Candidate directions still
+// refresh every frame from the exact lerped transform above.
+static void R_EmissiveAliasTraceQuantize (const vec3_t origin, const vec3_t angles, vec3_t quantized_origin, vec3_t quantized_angles)
+{
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		quantized_origin[axis] =
+			floorf (origin[axis] / EMISSIVE_OCCLUDER_POSITION_QUANTUM + 0.5f) * EMISSIVE_OCCLUDER_POSITION_QUANTUM;
+		quantized_angles[axis] = floorf (angles[axis] * (EMISSIVE_OCCLUDER_ANGLE_STEPS / 360.0f) + 0.5f) *
+			(360.0f / EMISSIVE_OCCLUDER_ANGLE_STEPS);
+	}
+}
+
 static int R_EmissiveAliasLightLimit (void)
 {
 	return CLAMP (0, (int)r_emissive_rt_model_lights.value, EMISSIVE_CLUSTERED_LIGHTS);
@@ -5294,12 +5309,45 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 	receiver->active = true;
 	// Use the same lerped transform as the alias draw path so the cached lighting
 	// direction cannot represent a different transform than the rendered mesh.
+	// Candidate directions refresh from the exact lerped transform every frame (cheap),
+	// while shadow visibility retraces only on the occluder quanta: retracing up to 8
+	// CPU traces per interpolating entity per frame has no visible benefit for a
+	// single-center whole-model approximation.
 	vec3_t lerped_origin, lerped_angles;
 	R_GetEntityLerpedTransform (entity, lerped_origin, lerped_angles);
-	if (receiver->ready && receiver->source_generation == emissive_brush_receiver_source_generation &&
-		receiver->occluder_generation == emissive_brush_occluder_generation && !memcmp (receiver->origin, lerped_origin, sizeof (receiver->origin)) &&
-		!memcmp (receiver->angles, lerped_angles, sizeof (receiver->angles)) && receiver->scale == entity->netstate.scale)
+	const qboolean transport_changed = receiver->source_generation != emissive_brush_receiver_source_generation ||
+		receiver->occluder_generation != emissive_brush_occluder_generation;
+	const qboolean scale_changed = receiver->scale != entity->netstate.scale;
+	const qboolean transform_changed = !receiver->ready || transport_changed || scale_changed ||
+		memcmp (receiver->origin, lerped_origin, sizeof (receiver->origin)) || memcmp (receiver->angles, lerped_angles, sizeof (receiver->angles));
+	vec3_t quantized_origin, quantized_angles;
+	R_EmissiveAliasTraceQuantize (lerped_origin, lerped_angles, quantized_origin, quantized_angles);
+	const qboolean trace_changed = !receiver->ready || transport_changed || scale_changed ||
+		memcmp (receiver->trace_origin, quantized_origin, sizeof (receiver->trace_origin)) ||
+		memcmp (receiver->trace_angles, quantized_angles, sizeof (receiver->trace_angles));
+	if (!transform_changed && !trace_changed)
 		return;
+
+	// Carry cacheable visibility across direction-only refreshes. Cacheable source
+	// indices are stable identities; transient indices are positional, so transient
+	// candidates always retrace.
+	uint32_t carried_sources[EMISSIVE_CLUSTERED_CANDIDATES];
+	qboolean carried_visible[EMISSIVE_CLUSTERED_CANDIDATES];
+	int carried_count = 0;
+	if (receiver->ready && !transport_changed)
+	{
+		for (int carried = 0; carried < EMISSIVE_CLUSTERED_CANDIDATES; ++carried)
+		{
+			const emissive_clustered_candidate_t *const prev = &receiver->candidates[carried];
+			if (prev->base_score <= 0.0f)
+				break;
+			if (prev->source_index & 0x80000000u)
+				continue;
+			carried_sources[carried_count] = prev->source_index;
+			carried_visible[carried_count] = prev->visible;
+			++carried_count;
+		}
+	}
 
 	VectorCopy (lerped_origin, receiver->origin);
 	VectorCopy (lerped_angles, receiver->angles);
@@ -5351,6 +5399,29 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 			break;
 		const qboolean				  transient = (candidate->source_index & 0x80000000u) != 0u;
 		const uint32_t				  source_index = candidate->source_index & 0x7FFFFFFFu;
+		qboolean needs_trace = trace_changed;
+		if (!needs_trace)
+		{
+			if (transient)
+				needs_trace = true;
+			else
+			{
+				needs_trace = true;
+				for (int carried = 0; carried < carried_count; ++carried)
+				{
+					if (carried_sources[carried] == candidate->source_index)
+					{
+						candidate->visible = carried_visible[carried];
+						needs_trace = false;
+						break;
+					}
+				}
+				if (needs_trace)
+					candidate->visible = false;
+			}
+		}
+		if (!needs_trace)
+			continue;
 		const emissive_light_t *const source = transient ? &transient_emissive_lights[source_index] : &emissive_cacheable_lights[source_index];
 		vec3_t						  light_origin;
 		VectorCopy (source->origin, light_origin);
@@ -5370,6 +5441,11 @@ static void R_UpdateEmissiveAliasReceiverEntity (entity_t *entity)
 		}
 		if (!candidate->visible)
 			Atomic_IncrementUInt32 (&emissive_clustered_alias_shadow_rejections);
+	}
+	if (trace_changed)
+	{
+		VectorCopy (quantized_origin, receiver->trace_origin);
+		VectorCopy (quantized_angles, receiver->trace_angles);
 	}
 	receiver->ready = true;
 	Atomic_IncrementUInt32 (&emissive_clustered_alias_builds);
