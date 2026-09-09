@@ -597,8 +597,8 @@ static int					 num_transient_emissive_tile_sources;
 static qboolean				 transient_emissive_pending;
 static qboolean				 transient_emissive_detail_pending;
 /* Set by occluder movement: the last source-change footprint no longer covers
- * every receiver whose visibility changed, so the update task rebuilds the
- * worklist as the union of active influence before dispatching. */
+ * every receiver whose visibility changed, so the update entry rebuilds the
+ * worklist as the union of active influence before recording. */
 static qboolean				 transient_emissive_occluder_tiles_pending;
 static qboolean				 transient_emissive_detail_ready;
 /* Generation whose detail was completely recorded into this frame's update
@@ -2412,6 +2412,7 @@ void GL_BuildLightmaps (void)
 	transient_emissive_tile_surface_worldmodel = NULL;
 	transient_emissive_pending = false;
 	transient_emissive_detail_pending = false;
+	transient_emissive_occluder_tiles_pending = false;
 	transient_emissive_detail_ready = false;
 	transient_emissive_generation = 0;
 	transient_emissive_detail_published_generation = 0;
@@ -3499,7 +3500,17 @@ static void R_FinalizeTransientEmissiveTiles (int *flat_tiles, int num_flat_tile
 	num_transient_emissive_tiles = 0;
 	num_transient_emissive_tile_sources = 0;
 	if (num_flat_tiles > 1)
+	{
 		qsort (flat_tiles, num_flat_tiles, sizeof (*flat_tiles), R_CompareTransientEmissiveTiles);
+		/* Callers union footprints from independent origins (source-change dirty
+		 * tiles plus occluder-refresh active coverage); collapse duplicates so
+		 * each tile is dispatched once. */
+		int unique_tiles = 1;
+		for (int i = 1; i < num_flat_tiles; ++i)
+			if (flat_tiles[i] != flat_tiles[unique_tiles - 1])
+				flat_tiles[unique_tiles++] = flat_tiles[i];
+		num_flat_tiles = unique_tiles;
+	}
 	num_transient_emissive_tiles = num_flat_tiles;
 	if (num_transient_emissive_tiles)
 		transient_emissive_tiles = Mem_Alloc (num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
@@ -3565,15 +3576,30 @@ static void R_FinalizeTransientEmissiveTiles (int *flat_tiles, int num_flat_tile
 	Mem_Free (pairs);
 }
 
-/* Rebuilds the transient worklist as the union of active influence after an
- * occluder move: the last source-change footprint no longer covers every
- * receiver whose visibility changed. Runs in the update task, after the TLAS
- * task detected the movement, so counts, capacities, and uploads stay ordered. */
-static void R_RebuildTransientEmissiveOccluderTiles (cb_context_t *cbx)
+/* Host-side occluder-refresh preparation: rebuilds the worklist as the union of
+ * pending source-change footprints (including vacated tiles with zero current
+ * sources, whose clear must not be lost) and current active influence, then
+ * ensures capacities. Runs at the update entry before any command recording
+ * that references the rebuilt resources, so buffer replacement and
+ * descriptor-set recreation can never invalidate already recorded commands;
+ * uploads stay in the update task behind the transfer-to-compute barrier. */
+static void R_PrepareTransientEmissiveOccluderTiles (void)
 {
-	int *flat_tiles = NULL;
+	if (!transient_emissive_occluder_tiles_pending)
+		return;
+	transient_emissive_occluder_tiles_pending = false;
+	int *const lightmap_offsets = Mem_Alloc (lightmap_count * sizeof (*lightmap_offsets));
+	R_TransientEmissiveLightmapTileOffsets (lightmap_offsets);
+	int *flat_tiles =
+		Mem_Alloc ((num_transient_emissive_tiles + num_transient_emissive_total_tiles) * sizeof (*flat_tiles));
 	int num_flat_tiles = 0;
-	int flat_capacity = 0;
+	for (int tile = 0; tile < num_transient_emissive_tiles; ++tile)
+	{
+		const emissive_logical_tile_t *const logical_tile = &transient_emissive_tiles[tile];
+		const int tiles_wide = (lightmaps[logical_tile->lightmap].surface_indices_texture->width + 7) / 8;
+		flat_tiles[num_flat_tiles++] =
+			lightmap_offsets[logical_tile->lightmap] + logical_tile->y * tiles_wide + logical_tile->x;
+	}
 	for (int flat_tile = 0; flat_tile < num_transient_emissive_total_tiles; ++flat_tile)
 	{
 		qboolean influenced = false;
@@ -3584,37 +3610,24 @@ static void R_RebuildTransientEmissiveOccluderTiles (cb_context_t *cbx)
 				influenced = true;
 				break;
 			}
-		if (!influenced)
-			continue;
-		if (num_flat_tiles == flat_capacity)
-		{
-			flat_capacity = flat_capacity ? flat_capacity * 2 : 64;
-			flat_tiles = Mem_Realloc (flat_tiles, flat_capacity * sizeof (*flat_tiles));
-		}
-		flat_tiles[num_flat_tiles++] = flat_tile;
+		if (influenced)
+			flat_tiles[num_flat_tiles++] = flat_tile;
 	}
 	if (!num_flat_tiles)
 	{
-		/* No active influence left: withhold replacement work and let selection fall
-		 * back to direct-only output rather than publishing a vacuous generation. */
+		/* No pending footprints and no active influence left: withhold
+		 * replacement work and let selection fall back to direct-only output
+		 * rather than publishing a vacuous generation. */
 		transient_emissive_detail_pending = false;
 		Mem_Free (flat_tiles);
+		Mem_Free (lightmap_offsets);
 		return;
 	}
-	int *const lightmap_offsets = Mem_Alloc (lightmap_count * sizeof (*lightmap_offsets));
-	R_TransientEmissiveLightmapTileOffsets (lightmap_offsets);
 	R_FinalizeTransientEmissiveTiles (flat_tiles, num_flat_tiles, lightmap_offsets);
 	Mem_Free (flat_tiles);
 	Mem_Free (lightmap_offsets);
 	/* Union coverage can exceed the dirty-list capacities the last setter sized. */
 	R_EnsureTransientEmissiveResources ();
-	R_UpdateTransientEmissiveBuffer (
-		cbx->cb, transient_emissive_tiles_buffer, transient_emissive_tiles,
-		num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
-	if (num_transient_emissive_tile_sources)
-		R_UpdateTransientEmissiveBuffer (
-			cbx->cb, transient_emissive_tile_sources_buffer, transient_emissive_tile_sources,
-			num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
 	Con_DPrintf (
 		"RT emissives: occluder refresh rebuilt %d union tile%s with %d source link%s\n", num_transient_emissive_tiles,
 		num_transient_emissive_tiles == 1 ? "" : "s", num_transient_emissive_tile_sources,
@@ -5944,34 +5957,44 @@ static void R_EnsureTransientEmissiveResources (void)
 						 : 0;
 	const qboolean seeds_grow = seeds_required > 0 &&
 		(transient_emissive_light_seeds_buffer == VK_NULL_HANDLE || transient_emissive_light_seeds_capacity < seeds_required);
-	const qboolean grow = lights_size > transient_emissive_lights_capacity || tiles_size > transient_emissive_tiles_capacity ||
-						  sources_size > transient_emissive_tile_sources_capacity;
-	if (grow || seeds_grow)
+	/* Buffers grow independently: replacing only the stores that outgrew their
+	 * capacity preserves the contents (and handles) of the rest, so upload
+	 * requirements follow resource replacement rather than source changes. */
+	const qboolean lights_grow = lights_size > transient_emissive_lights_capacity;
+	const qboolean tiles_grow = tiles_size > transient_emissive_tiles_capacity;
+	const qboolean sources_grow = sources_size > transient_emissive_tile_sources_capacity;
+	if (lights_grow || tiles_grow || sources_grow || seeds_grow)
 	{
 		if (transient_emissive_lights_buffer != VK_NULL_HANDLE || emissive_brush_receiver_count)
 			GL_WaitForDeviceIdle ();
 		R_FreeEmissiveBrushReceiverDescriptorSets ();
 		R_FreeTransientEmissiveDescriptorSets ();
-		if (grow)
+		if (lights_grow)
 		{
 			R_FreeBuffer (transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, &num_vulkan_bmodel_allocations);
-			R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
-			R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
 			transient_emissive_lights_capacity = R_TransientEmissiveCapacity (lights_size);
-			transient_emissive_tiles_capacity = R_TransientEmissiveCapacity (tiles_size);
-			transient_emissive_tile_sources_capacity = R_TransientEmissiveCapacity (sources_size);
 			R_CreateBuffer (
 				&transient_emissive_lights_buffer, &transient_emissive_lights_buffer_memory, transient_emissive_lights_capacity,
 				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
 				"Transient emissive source lights");
+		}
+		if (tiles_grow)
+		{
+			R_FreeBuffer (transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, &num_vulkan_bmodel_allocations);
+			transient_emissive_tiles_capacity = R_TransientEmissiveCapacity (tiles_size);
 			R_CreateBuffer (
 				&transient_emissive_tiles_buffer, &transient_emissive_tiles_buffer_memory, transient_emissive_tiles_capacity,
 				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL,
 				"Transient emissive logical tiles");
+		}
+		if (sources_grow)
+		{
+			R_FreeBuffer (transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, &num_vulkan_bmodel_allocations);
+			transient_emissive_tile_sources_capacity = R_TransientEmissiveCapacity (sources_size);
 			R_CreateBuffer (
-				&transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory, transient_emissive_tile_sources_capacity,
-				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0,
-				&num_vulkan_bmodel_allocations, NULL, "Transient emissive tile source indices");
+				&transient_emissive_tile_sources_buffer, &transient_emissive_tile_sources_buffer_memory,
+				transient_emissive_tile_sources_capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, "Transient emissive tile source indices");
 		}
 		if (seeds_grow)
 		{
@@ -6031,7 +6054,8 @@ static void R_EnsureTransientEmissiveResources (void)
 		transient_emissive_initialized = false;
 		transient_emissive_detail_cache_copied = false;
 	}
-	if (grow || seeds_grow || created_texture || (lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
+	if (lights_grow || tiles_grow || sources_grow || seeds_grow || created_texture ||
+		(lightmap_count && lightmaps[0].emissive_transient_descriptor_set == VK_NULL_HANDLE))
 	{
 		VkDescriptorBufferInfo source_buffers[6];
 		R_TransientEmissiveSourceBuffers (source_buffers);
@@ -7870,6 +7894,19 @@ static qboolean R_DispatchTransientEmissiveTiles (cb_context_t *cbx, qboolean de
 	return recorded;
 }
 
+/* Transfer writes from vkCmdUpdateBuffer are visible to compute reads only
+ * through an explicit dependency; each upload path below pairs with this
+ * barrier before its first consuming dispatch. */
+static void R_TransientEmissiveUploadBarrier (cb_context_t *cbx)
+{
+	ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
+	memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier (
+		cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+}
+
 static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 {
 	if ((!transient_emissive_pending && !transient_emissive_detail_pending) || r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f)
@@ -7880,11 +7917,6 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 		R_InitializeTransientEmissiveImages (cbx, false);
 	else if (!transient_emissive_detail_cache_copied && R_EmissiveDetailReady ())
 		R_InitializeTransientEmissiveImages (cbx, true);
-	if (transient_emissive_occluder_tiles_pending)
-	{
-		transient_emissive_occluder_tiles_pending = false;
-		R_RebuildTransientEmissiveOccluderTiles (cbx);
-	}
 	const qboolean coarse_publication = transient_emissive_pending;
 	qboolean detail_recorded = false;
 	if (coarse_publication)
@@ -7906,12 +7938,7 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 			R_UpdateTransientEmissiveBuffer (
 				cbx->cb, transient_emissive_tile_sources_buffer, transient_emissive_tile_sources,
 				num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
-		ZEROED_STRUCT (VkMemoryBarrier, memory_barrier);
-		memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		vkCmdPipelineBarrier (
-			cbx->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+		R_TransientEmissiveUploadBarrier (cbx);
 		const qboolean coarse_ok = R_DispatchTransientEmissiveTiles (cbx, false, false);
 		if (vulkan_globals.ray_query && R_TransientEmissiveDetailAvailable ())
 		{
@@ -7941,6 +7968,20 @@ static void R_UpdateTransientEmissiveLightmaps (cb_context_t *cbx)
 	else if (transient_emissive_detail_pending && R_EmissiveDirectAccelerationStructure () != VK_NULL_HANDLE &&
 		(!num_emissive_lights || transient_emissive_detail_cache_copied))
 	{
+		/* Uploads pair with the barrier below so an occluder-only refresh (or any
+		 * detail-only update) never reads transfer writes without a dependency,
+		 * in this frame or a later one. */
+		if (num_transient_emissive_tiles)
+		{
+			R_UpdateTransientEmissiveBuffer (
+				cbx->cb, transient_emissive_tiles_buffer, transient_emissive_tiles,
+				num_transient_emissive_tiles * sizeof (*transient_emissive_tiles));
+			if (num_transient_emissive_tile_sources)
+				R_UpdateTransientEmissiveBuffer (
+					cbx->cb, transient_emissive_tile_sources_buffer, transient_emissive_tile_sources,
+					num_transient_emissive_tile_sources * sizeof (*transient_emissive_tile_sources));
+		}
+		R_TransientEmissiveUploadBarrier (cbx);
 		if (R_DispatchTransientEmissiveTiles (cbx, true, false))
 		{
 			transient_emissive_detail_published_generation = transient_emissive_generation;
@@ -9535,6 +9576,10 @@ R_UpdateEmissiveLightmapsOnly
 */
 void R_UpdateEmissiveLightmapsOnly (void)
 {
+	/* Host-side worklist/resource preparation runs before any command recording
+	 * below, so capacity growth and descriptor-set recreation can never free
+	 * objects referenced by already recorded commands. */
+	R_PrepareTransientEmissiveOccluderTiles ();
 	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_UPDATE_LIGHTMAPS];
 	R_BeginDebugUtilsLabel (cbx, "Update Emissive Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
@@ -9553,6 +9598,10 @@ R_UpdateLightmapsAndIndirect
 */
 void R_UpdateLightmapsAndIndirect (void *unused)
 {
+	/* Host-side worklist/resource preparation runs before any command recording
+	 * below, so capacity growth and descriptor-set recreation can never free
+	 * objects referenced by already recorded commands. */
+	R_PrepareTransientEmissiveOccluderTiles ();
 	cb_context_t *cbx = &vulkan_globals.primary_cb_contexts[PCBX_UPDATE_LIGHTMAPS];
 	R_BeginDebugUtilsLabel (cbx, "Update Lightmaps");
 	R_UpdateEmissiveLightmaps (cbx, false);
