@@ -5501,6 +5501,14 @@ typedef struct rtperf_event_s
 
 cvar_t rtperf_spikelog = {"rtperf_spikelog", "0", CVAR_NONE};
 
+extern cvar_t r_rtshadows;
+extern cvar_t r_scale;
+extern cvar_t r_emissive_rt_resolution;
+extern cvar_t r_emissive_rt_bandlimit;
+extern cvar_t r_emissive_rt_bounce_resolution;
+extern cvar_t r_emissive_rt_bounce_rays;
+extern cvar_t r_emissive_rt_model_lights;
+
 static rtperf_event_t rtperf_ring[RTPERF_RING_SIZE];
 static atomic_uint32_t rtperf_count;
 static atomic_uint32_t rtperf_frame;
@@ -5551,6 +5559,11 @@ static void RTPerf_Dump (int count, double spike_ms)
 	}
 	Con_Printf (
 		"  generations: sources %u occluders %u\n", emissive_brush_receiver_source_generation, emissive_brush_occluder_generation);
+	Con_Printf (
+		"  settings: gpu %s rtshadows %.0f occluders %.0f bandlimit %.0f directres %.0f bounceres %.0f bouncerays %.0f modellights %.0f scale %.0f\n",
+		vulkan_globals.device_properties.deviceName, r_rtshadows.value, r_emissive_rt_occluders.value, r_emissive_rt_bandlimit.value,
+		r_emissive_rt_resolution.value, r_emissive_rt_bounce_resolution.value, r_emissive_rt_bounce_rays.value, r_emissive_rt_model_lights.value,
+		r_scale.value);
 }
 
 void RTPerf_Dump_f (void)
