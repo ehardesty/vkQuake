@@ -485,6 +485,7 @@ typedef struct
 	vulkan_pipeline_t		 emissive_bounce_pipeline;
 	vulkan_pipeline_t		 emissive_brush_receiver_pipeline;
 	vulkan_pipeline_t		 emissive_volume_pipeline;
+	vulkan_pipeline_t		 emissive_volume_shadow_pipeline;
 	vulkan_pipeline_t		 world_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 indirect_draw_pipeline;
 	vulkan_pipeline_t		 indirect_clear_pipeline;
@@ -847,8 +848,9 @@ typedef struct emissive_volume_push_s
 	float	 up_fogdensity[4];
 	uint32_t counts[4];
 	float	 params[4];
+	uint32_t extra[4];
 } emissive_volume_push_t;
-COMPILE_TIME_ASSERT (emissive_volume_push_t, sizeof (emissive_volume_push_t) == 96);
+COMPILE_TIME_ASSERT (emissive_volume_push_t, sizeof (emissive_volume_push_t) == 112);
 
 extern struct lightmap_s *lightmaps;
 extern int				  lightmap_count; // allocated lightmaps
@@ -905,6 +907,8 @@ void R_CreateEmissiveVolumePipelines (void);
 void R_DestroyEmissiveVolumePipelines (void);
 int R_EmissiveVolumeFrameSlot (void);
 void R_EmissiveVolumeParentBuffers (VkBuffer *cacheable, VkBuffer *modulations, VkBuffer *transient);
+void R_EmissiveVolumeWorldAS (VkAccelerationStructureKHR *tlas);
+qboolean R_EmissiveVolumeShadowed (void);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
 void R_EmissiveRadianceStats (
 	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,

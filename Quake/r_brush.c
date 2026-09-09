@@ -7711,6 +7711,14 @@ void R_EmissiveVolumeParentBuffers (VkBuffer *cacheable, VkBuffer *modulations, 
 	*transient = transient_emissive_lights_buffer;
 }
 
+// Immutable Tier-0 world AS borrowed for volume shadow queries. This is
+// deliberately not R_EmissiveDirectAccelerationStructure: the volume shadow
+// policy is world-only even when the surface path escalates to higher tiers.
+void R_EmissiveVolumeWorldAS (VkAccelerationStructureKHR *tlas)
+{
+	*tlas = emissive_world_tlas;
+}
+
 void R_EmissiveVolumeSourceView (
 	const emissive_light_t **cacheable_lights, const float **cacheable_modulations, int *num_cacheable,
 	const emissive_light_t **transient_lights, int *num_transient)

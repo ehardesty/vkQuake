@@ -34,6 +34,10 @@ static double				   volume_position_checksum;
 static qboolean				   volume_snapshot_valid;
 static const char			  *volume_inactive_reason = "unprepared";
 static uint32_t				   volume_prepare_cpu_us;
+// Immutable Tier-0 world AS borrowed from the parent (never owned here).
+// World-only visibility for both collections: moving doors, brush housings,
+// and monsters never shadow the air; fixed world housings do.
+static VkAccelerationStructureKHR volume_world_tlas = VK_NULL_HANDLE;
 static uint64_t				   volume_evaluated_pairs_estimate;
 
 // RV2 resource state (defined below; forward-declared for NewMap ordering).
@@ -41,6 +45,7 @@ static void R_EmissiveVolumeTeardownResources (void);
 static void R_EmissiveVolumeEnsureResources (void);
 static void R_EmissiveVolumeResourceStats (void);
 static void R_EmissiveVolumeRefreshComputeSet (int slot_index);
+static void R_EmissiveVolumePushWorldAS (cb_context_t *cbx);
 static void R_EmissiveVolumeRecordBarriers (cb_context_t *cbx, int slot_index);
 static void R_EmissiveVolumePublishSlot (cb_context_t *cbx, int slot_index);
 
@@ -73,6 +78,7 @@ void R_EmissiveVolumeNewMap (void)
 	volume_position_checksum = 0.0;
 	volume_snapshot_valid = false;
 	volume_inactive_reason = "no map snapshot";
+	volume_world_tlas = VK_NULL_HANDLE;
 	volume_prepare_cpu_us = 0;
 	volume_evaluated_pairs_estimate = 0;
 }
@@ -141,6 +147,9 @@ void R_EmissiveVolumePrepare (void)
 		volume_inactive_reason = "no positive-radiance source (zero addition, no work)";
 	else
 		volume_inactive_reason = "ready";
+	R_EmissiveVolumeWorldAS (&volume_world_tlas);
+	if (R_EmissiveVolumeActive () && R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE)
+		volume_inactive_reason = "shadowed unavailable (world AS not resident)";
 
 	// Resource creation lives here (not in Update) because before_mark is
 	// CPU-ordered before every draw and update task, so freshly allocated
@@ -219,8 +228,8 @@ static float volume_zmax;
 static float volume_viewport[4];
 static qboolean volume_resources_valid;
 static const char *volume_resource_reason = "never prepared";
-static qboolean volume_pipelines_valid;
 static qboolean volume_slot_initialized[EMISSIVE_VOLUME_SLOTS];
+#define EMISSIVE_VOLUME_OCCLUDER_MASK 0x01u
 
 static void R_EmissiveVolumeDestroySlot (emissive_volume_slot_t *slot)
 {
@@ -367,11 +376,7 @@ static void R_EmissiveVolumeEnsureResources (void)
 		for (i = 0; i < EMISSIVE_VOLUME_SLOTS; ++i)
 			volume_slot_initialized[i] = false;
 	}
-	if (!volume_pipelines_valid)
-	{
-		R_CreateEmissiveVolumePipelines ();
-		volume_pipelines_valid = true;
-	}
+	R_CreateEmissiveVolumePipelines ();
 	volume_viewport[0] = (float)r_refdef.vrect.x;
 	volume_viewport[1] = (float)(vid.height - ((glheight - r_refdef.vrect.y - r_refdef.vrect.height) + r_refdef.vrect.height));
 	volume_viewport[2] = (float)r_refdef.vrect.width;
@@ -379,10 +384,7 @@ static void R_EmissiveVolumeEnsureResources (void)
 	volume_zmax = q_max (gl_farclip.value, 1.0f);
 	volume_evaluated_pairs_estimate =
 		(uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_SEGMENTS * (uint64_t)(volume_num_cacheable + volume_num_transient);
-	if (volume_resources_valid && volume_pipelines_valid)
-		volume_resource_reason = "ready";
-	else
-		volume_resource_reason = "pipeline creation failed (zero addition)";
+	volume_resource_reason = "ready";
 }
 
 qboolean R_EmissiveVolumeReady (void)
@@ -391,9 +393,16 @@ qboolean R_EmissiveVolumeReady (void)
 		return false;
 	if (volume_cacheable_positive + volume_transient_positive <= 0)
 		return false;
-	if (!volume_resources_valid || !volume_pipelines_valid)
+	if (!volume_resources_valid)
+		return false;
+	if (vulkan_globals.emissive_volume_pipeline.handle == VK_NULL_HANDLE)
 		return false;
 	if (R_EmissiveBandlimitActive ())
+		return false;
+	// Shadowed modes never fall back silently: without a resident world AS
+	// (or its pipeline) they expose zero addition and report the reason.
+	if (R_EmissiveVolumeShadowed () &&
+		(volume_world_tlas == VK_NULL_HANDLE || vulkan_globals.emissive_volume_shadow_pipeline.handle == VK_NULL_HANDLE))
 		return false;
 	return true;
 }
@@ -402,6 +411,12 @@ qboolean R_EmissiveVolumeScatterOnly (void)
 {
 	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;
 	return debug_mode == 1 || debug_mode == 3;
+}
+
+qboolean R_EmissiveVolumeShadowed (void)
+{
+	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;
+	return debug_mode == 0 || debug_mode == 1;
 }
 
 vulkan_pipeline_t R_EmissiveVolumeWorldPipeline (int variant, int pipeline_index, qboolean scatter_only)
@@ -444,20 +459,44 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx)
 	constants.counts[1] = (uint32_t)volume_num_transient;
 	constants.counts[2] = EMISSIVE_VOLUME_SEGMENTS;
 	constants.counts[3] = 0;
+	constants.extra[0] = 0;
+	constants.extra[1] = EMISSIVE_VOLUME_OCCLUDER_MASK;
+	constants.extra[2] = 0;
+	constants.extra[3] = 0;
 	constants.params[0] = R_EmissiveVolumeClampedStrength ();
 	constants.params[1] = (float)volume_nx;
 	constants.params[2] = (float)volume_ny;
 	constants.params[3] = EMISSIVE_VOLUME_REFERENCE_LENGTH;
-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_volume_pipeline);
+	if (R_EmissiveVolumeShadowed ())
+		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_volume_shadow_pipeline);
+	else
+		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_volume_pipeline);
 	vulkan_globals.vk_cmd_bind_descriptor_sets (
-		cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, vulkan_globals.emissive_volume_pipeline.layout.handle, 0, 1,
-		&volume_slots[volume_slot].compute_set, 0, NULL);
+		cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cbx->current_pipeline.layout.handle, 0, 1, &volume_slots[volume_slot].compute_set, 0, NULL);
+	if (R_EmissiveVolumeShadowed ())
+		R_EmissiveVolumePushWorldAS (cbx);
 	R_PushConstants (cbx, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof (constants), &constants);
 	vkCmdDispatch (
 		cbx->cb, (uint32_t)((volume_nx + EMISSIVE_VOLUME_LOCAL_SIZE - 1) / EMISSIVE_VOLUME_LOCAL_SIZE),
 		(uint32_t)((volume_ny + EMISSIVE_VOLUME_LOCAL_SIZE - 1) / EMISSIVE_VOLUME_LOCAL_SIZE), 1);
 	R_EmissiveVolumePublishSlot (cbx, volume_slot);
 	R_EndDebugUtilsLabel (cbx);
+}
+
+static void R_EmissiveVolumePushWorldAS (cb_context_t *cbx)
+{
+	ZEROED_STRUCT (VkWriteDescriptorSetAccelerationStructureKHR, tlas_info);
+	tlas_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+	tlas_info.accelerationStructureCount = 1;
+	tlas_info.pAccelerationStructures = &volume_world_tlas;
+	ZEROED_STRUCT (VkWriteDescriptorSet, tlas_write);
+	tlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	tlas_write.pNext = &tlas_info;
+	tlas_write.dstBinding = 0;
+	tlas_write.descriptorCount = 1;
+	tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+	vulkan_globals.vk_cmd_push_descriptor_set (
+		cbx->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cbx->current_pipeline.layout.handle, 1, 1, &tlas_write);
 }
 
 static void R_EmissiveVolumeRefreshComputeSet (int slot_index)
@@ -582,10 +621,16 @@ static void R_EmissiveVolumeResourceStats (void)
 	}
 	logical_bytes = (uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_BOUNDARIES * 8 * EMISSIVE_VOLUME_SLOTS;
 	allocated_bytes = volume_slots[0].memory.size + volume_slots[1].memory.size + volume_dummy_memory.size;
-	Con_Printf ("   volume grid: %dx%dx%d, extent %.0f, unshadowed diagnostic (RV2)\n", volume_nx, volume_ny, EMISSIVE_VOLUME_SEGMENTS, volume_zmax);
+	Con_Printf ("   volume grid: %dx%dx%d, extent %.0f, %s\n", volume_nx, volume_ny, EMISSIVE_VOLUME_SEGMENTS, volume_zmax,
+		R_EmissiveVolumeShadowed () ? "world-shadowed" : "unshadowed diagnostic");
+	Con_Printf (
+		"   volume shadows: world AS %s, mask 0x%02x (world-only; moving occluders excluded)\n",
+		volume_world_tlas != VK_NULL_HANDLE ? "resident" : "unavailable", EMISSIVE_VOLUME_OCCLUDER_MASK);
 	Con_Printf ("   volume resources: %s, prepare %u us\n", volume_resource_reason, volume_prepare_cpu_us);
 	Con_Printf ("   volume memory: %llu logical, %llu allocated bytes\n", (unsigned long long)logical_bytes, (unsigned long long)allocated_bytes);
-	Con_Printf ("   volume work: %llu scheduled source evaluations (estimate, not executed rays)\n", (unsigned long long)volume_evaluated_pairs_estimate);
+	Con_Printf (
+		"   volume work: %llu scheduled source evaluations (estimate; bounds shadowed visibility queries)\n",
+		(unsigned long long)volume_evaluated_pairs_estimate);
 }
 
 void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5])

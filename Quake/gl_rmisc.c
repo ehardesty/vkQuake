@@ -2265,6 +2265,23 @@ void R_CreatePipelineLayouts ()
 			(uint64_t)vulkan_globals.emissive_volume_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "emissive_volume_pipeline_layout");
 		vulkan_globals.emissive_volume_pipeline.layout.push_constant_range = volume_push_constant_range;
 
+		VkDescriptorSetLayout volume_shadow_descriptor_set_layouts[2] = {
+			vulkan_globals.emissive_volume_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, volume_shadow_layout_create_info);
+		volume_shadow_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		volume_shadow_layout_create_info.setLayoutCount = countof (volume_shadow_descriptor_set_layouts);
+		volume_shadow_layout_create_info.pSetLayouts = volume_shadow_descriptor_set_layouts;
+		volume_shadow_layout_create_info.pushConstantRangeCount = 1;
+		volume_shadow_layout_create_info.pPushConstantRanges = &volume_push_constant_range;
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &volume_shadow_layout_create_info, NULL, &vulkan_globals.emissive_volume_shadow_pipeline.layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.emissive_volume_shadow_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+			"emissive_volume_shadow_pipeline_layout");
+		vulkan_globals.emissive_volume_shadow_pipeline.layout.push_constant_range = volume_push_constant_range;
+
 		VkDescriptorSetLayout bounce_layouts[2] = {vulkan_globals.emissive_bounce_set_layout.handle, vulkan_globals.ray_query_push_set_layout.handle};
 		ZEROED_STRUCT (VkPushConstantRange, bounce_push_range);
 		bounce_push_range.size = 12 * sizeof (uint32_t);
@@ -2735,6 +2752,7 @@ DECLARE_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_MODULE (emissive_coarse_comp);
 DECLARE_SHADER_MODULE (emissive_detail_comp);
 DECLARE_SHADER_MODULE (emissive_volume_comp);
+DECLARE_SHADER_MODULE (emissive_volume_shadow_comp);
 DECLARE_SHADER_MODULE (emissive_bounce_comp);
 DECLARE_SHADER_MODULE (emissive_brush_receiver_comp);
 DECLARE_SHADER_MODULE (ray_debug_comp);
@@ -3972,6 +3990,8 @@ void R_CreateEmissiveVolumePipelines (void)
 	if (emissive_volume_pipelines_created)
 		return;
 	R_CreateComputePipeline (&vulkan_globals.emissive_volume_pipeline, emissive_volume_comp_module, 0, NULL, "emissive_volume");
+	if (emissive_volume_shadow_comp_module != VK_NULL_HANDLE)
+		R_CreateComputePipeline (&vulkan_globals.emissive_volume_shadow_pipeline, emissive_volume_shadow_comp_module, 0, NULL, "emissive_volume_shadow");
 	R_InitDefaultStates (&base);
 	base.depth_stencil_state.depthTestEnable = VK_TRUE;
 	base.depth_stencil_state.depthWriteEnable = VK_TRUE;
@@ -4053,6 +4073,11 @@ void R_DestroyEmissiveVolumePipelines (void)
 	{
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_volume_pipeline.handle, NULL);
 		vulkan_globals.emissive_volume_pipeline.handle = VK_NULL_HANDLE;
+	}
+	if (vulkan_globals.emissive_volume_shadow_pipeline.handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_volume_shadow_pipeline.handle, NULL);
+		vulkan_globals.emissive_volume_shadow_pipeline.handle = VK_NULL_HANDLE;
 	}
 	for (i = 0; i < WORLD_PIPELINE_COUNT; ++i)
 		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
@@ -4652,6 +4677,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE_COND (update_lightmap_10bit_rt_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE (emissive_coarse_comp);
 	CREATE_SHADER_MODULE (emissive_volume_comp);
+	CREATE_SHADER_MODULE_COND (emissive_volume_shadow_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_detail_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_bounce_comp, vulkan_globals.ray_query);
 	CREATE_SHADER_MODULE_COND (emissive_brush_receiver_comp, vulkan_globals.ray_query);
@@ -4750,6 +4776,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (update_lightmap_10bit_rt_comp);
 	DESTROY_SHADER_MODULE (emissive_coarse_comp);
 	DESTROY_SHADER_MODULE (emissive_volume_comp);
+	DESTROY_SHADER_MODULE (emissive_volume_shadow_comp);
 	DESTROY_SHADER_MODULE (emissive_detail_comp);
 	DESTROY_SHADER_MODULE (emissive_bounce_comp);
 	DESTROY_SHADER_MODULE (emissive_brush_receiver_comp);

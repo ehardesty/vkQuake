@@ -96,6 +96,8 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx);
 qboolean R_EmissiveVolumeReady (void);
 // Scatter-only fragment selection from the volume debug mode.
 qboolean R_EmissiveVolumeScatterOnly (void);
+// Shadowed (0/1) versus unshadowed-diagnostic (2/3) generation selection.
+qboolean R_EmissiveVolumeShadowed (void);
 // Fragment push values: viewport rect (framebuffer px, y down) + z extent.
 void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5]);
 

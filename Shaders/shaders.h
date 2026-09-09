@@ -106,6 +106,7 @@ DECLARE_SHADER_SPV (update_lightmap_10bit_rt_comp);
 DECLARE_SHADER_SPV (emissive_coarse_comp);
 DECLARE_SHADER_SPV (emissive_detail_comp);
 DECLARE_SHADER_SPV (emissive_volume_comp);
+DECLARE_SHADER_SPV (emissive_volume_shadow_comp);
 DECLARE_SHADER_SPV (emissive_bounce_comp);
 DECLARE_SHADER_SPV (emissive_brush_receiver_comp);
 DECLARE_SHADER_SPV (ray_debug_comp);
