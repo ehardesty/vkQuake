@@ -96,6 +96,11 @@ void R_EmissiveVolumeUpdate (struct cb_context_s *cbx);
 qboolean R_EmissiveVolumeReady (void);
 // Scatter-only fragment selection from the volume debug mode.
 qboolean R_EmissiveVolumeScatterOnly (void);
+// True for the three main-pass render passes (standard/OIT/MBOIT main).
+// Opaque draws execute in the OIT/MBOIT main pass when those modes are on,
+// so testing only RENDER_PASS_INDEX_MAIN would silently disable the volume
+// there. WBOIT/moment/composite/resolve/UI passes are never main passes.
+qboolean R_EmissiveVolumeMainPass (int render_pass_index);
 // Shadowed (0/1) versus unshadowed-diagnostic (2/3) generation selection.
 qboolean R_EmissiveVolumeShadowed (void);
 // Fragment push values: viewport rect (framebuffer px, y down) + z extent.

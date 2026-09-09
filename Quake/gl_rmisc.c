@@ -1967,6 +1967,66 @@ void R_CreatePipelineLayouts ()
 	}
 
 	{
+		// Alias volume: base alias sets plus the shared volume sampler set.
+		// Alias fragments sample it at set 4 (see VOLUME_SAMPLER_SET).
+		VkDescriptorSetLayout alias_volume_descriptor_set_layouts[5] = {
+			vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.ubo_set_layout.handle,
+			vulkan_globals.mboit_input_attachment_set_layout.handle, vulkan_globals.single_texture_set_layout.handle};
+
+		ZEROED_STRUCT (VkPushConstantRange, alias_volume_push_constant_range);
+		alias_volume_push_constant_range.offset = 0;
+		alias_volume_push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
+		alias_volume_push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, alias_volume_layout_create_info);
+		alias_volume_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		alias_volume_layout_create_info.setLayoutCount = countof (alias_volume_descriptor_set_layouts);
+		alias_volume_layout_create_info.pSetLayouts = alias_volume_descriptor_set_layouts;
+		alias_volume_layout_create_info.pushConstantRangeCount = 1;
+		alias_volume_layout_create_info.pPushConstantRanges = &alias_volume_push_constant_range;
+
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &alias_volume_layout_create_info, NULL, &vulkan_globals.alias_volume_pipeline_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.alias_volume_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "alias_volume_pipeline_layout");
+		vulkan_globals.alias_volume_pipeline_layout.push_constant_range = alias_volume_push_constant_range;
+		vulkan_globals.alias_volume_pipeline_layout.mboit_input_attachment_set = 3;
+	}
+
+	{
+		// MD5 volume: base MD5 sets plus the shared volume sampler set at
+		// index 5 (set 4 stays the MBOIT input). MD5 volume fragments are
+		// compiled from alias.frag with -DVOLUME_SAMPLER_SET=5.
+		VkDescriptorSetLayout md5_volume_descriptor_set_layouts[6] = {
+			vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.ubo_set_layout.handle,
+			vulkan_globals.joints_buffer_set_layout.handle, vulkan_globals.mboit_input_attachment_set_layout.handle,
+			vulkan_globals.single_texture_set_layout.handle};
+
+		ZEROED_STRUCT (VkPushConstantRange, md5_volume_push_constant_range);
+		md5_volume_push_constant_range.offset = 0;
+		md5_volume_push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
+		md5_volume_push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, md5_volume_layout_create_info);
+		md5_volume_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		md5_volume_layout_create_info.setLayoutCount = countof (md5_volume_descriptor_set_layouts);
+		md5_volume_layout_create_info.pSetLayouts = md5_volume_descriptor_set_layouts;
+		md5_volume_layout_create_info.pushConstantRangeCount = 1;
+		md5_volume_layout_create_info.pPushConstantRanges = &md5_volume_push_constant_range;
+
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &md5_volume_layout_create_info, NULL, &vulkan_globals.md5_volume_pipeline_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.md5_volume_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "md5_volume_pipeline_layout");
+		vulkan_globals.md5_volume_pipeline_layout.push_constant_range = md5_volume_push_constant_range;
+		vulkan_globals.md5_volume_pipeline_layout.mboit_input_attachment_set = 4;
+	}
+
+	{
 		// MD5
 		VkDescriptorSetLayout md5_descriptor_set_layouts[5] = {
 			vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.ubo_set_layout.handle,
@@ -2027,6 +2087,53 @@ void R_CreatePipelineLayouts ()
 			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
 		GL_SetObjectName ((uint64_t)vulkan_globals.sky_pipeline_layout[1].handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "sky_layer_pipeline_layout");
 		vulkan_globals.sky_pipeline_layout[1].push_constant_range = push_constant_range;
+	}
+
+	{
+		// Sky volume layouts append the shared volume sampler set: cube/box
+		// sample it at set 1, animated layers at set 2. Push ranges cover
+		// the appended sampling rect (the layer layout's fixed 25-float
+		// range does not).
+		VkDescriptorSetLayout sky_volume_descriptor_set_layouts[2] = {
+			vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle};
+		VkDescriptorSetLayout sky_layer_volume_descriptor_set_layouts[3] = {
+			vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle,
+			vulkan_globals.single_texture_set_layout.handle};
+
+		ZEROED_STRUCT (VkPushConstantRange, sky_volume_push_constant_range);
+		sky_volume_push_constant_range.offset = 0;
+		sky_volume_push_constant_range.size = MAIN_GRAPHICS_PUSH_CONSTANT_FLOATS * sizeof (float);
+		sky_volume_push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, sky_volume_layout_create_info);
+		sky_volume_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		sky_volume_layout_create_info.setLayoutCount = countof (sky_volume_descriptor_set_layouts);
+		sky_volume_layout_create_info.pSetLayouts = sky_volume_descriptor_set_layouts;
+		sky_volume_layout_create_info.pushConstantRangeCount = 1;
+		sky_volume_layout_create_info.pPushConstantRanges = &sky_volume_push_constant_range;
+
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &sky_volume_layout_create_info, NULL, &vulkan_globals.sky_volume_pipeline_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.sky_volume_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "sky_volume_pipeline_layout");
+		vulkan_globals.sky_volume_pipeline_layout.push_constant_range = sky_volume_push_constant_range;
+
+		ZEROED_STRUCT (VkPipelineLayoutCreateInfo, sky_layer_volume_layout_create_info);
+		sky_layer_volume_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		sky_layer_volume_layout_create_info.setLayoutCount = countof (sky_layer_volume_descriptor_set_layouts);
+		sky_layer_volume_layout_create_info.pSetLayouts = sky_layer_volume_descriptor_set_layouts;
+		sky_layer_volume_layout_create_info.pushConstantRangeCount = 1;
+		sky_layer_volume_layout_create_info.pPushConstantRanges = &sky_volume_push_constant_range;
+
+		err = vkCreatePipelineLayout (
+			vulkan_globals.device, &sky_layer_volume_layout_create_info, NULL, &vulkan_globals.sky_layer_volume_pipeline_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreatePipelineLayout failed with code %i", (int)err);
+		GL_SetObjectName (
+			(uint64_t)vulkan_globals.sky_layer_volume_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "sky_layer_volume_pipeline_layout");
+		vulkan_globals.sky_layer_volume_pipeline_layout.push_constant_range = sky_volume_push_constant_range;
 	}
 
 	{
@@ -2717,6 +2824,13 @@ DECLARE_SHADER_MODULE (alias_mboit_composite_msaa_frag);
 DECLARE_SHADER_MODULE (alias_alphatest_mboit_moment_frag);
 DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_frag);
 DECLARE_SHADER_MODULE (alias_alphatest_mboit_composite_msaa_frag);
+DECLARE_SHADER_MODULE (alias_volume_frag);
+DECLARE_SHADER_MODULE (alias_alphatest_volume_frag);
+DECLARE_SHADER_MODULE (md5_volume_frag);
+DECLARE_SHADER_MODULE (md5_alphatest_volume_frag);
+DECLARE_SHADER_MODULE (sky_layer_volume_frag);
+DECLARE_SHADER_MODULE (sky_cube_volume_frag);
+DECLARE_SHADER_MODULE (sky_box_volume_frag);
 DECLARE_SHADER_MODULE (md5_mboit_composite_frag);
 DECLARE_SHADER_MODULE (md5_mboit_composite_msaa_frag);
 DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_frag);
@@ -3973,6 +4087,13 @@ static void R_CreateWorldPipelines ()
 
 static qboolean emissive_volume_pipelines_created;
 
+static void R_CreateAliasVolumePipelines (void);
+static void R_CreateMD5VolumePipelineSet (
+	vulkan_pipeline_t pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2],
+	VkVertexInputAttributeDescription *vertex_attributes, uint32_t vertex_attribute_count, VkVertexInputBindingDescription *vertex_binding,
+	VkShaderModule vertex_module, const char *name);
+static void R_CreateSkyVolumePipelines (void);
+
 void R_CreateEmissiveVolumePipelines (void)
 {
 	pipeline_create_infos_t base;
@@ -4062,8 +4183,188 @@ void R_CreateEmissiveVolumePipelines (void)
 							}
 					}
 		}
+	R_CreateAliasVolumePipelines ();
+	R_CreateMD5VolumePipelineSet (
+		vulkan_globals.md5_volume_pipelines, md5_vertex_input_attribute_descriptions, countof (md5_vertex_input_attribute_descriptions),
+		&md5_vertex_binding_description, md5_vert_module, "md5");
+	R_CreateMD5VolumePipelineSet (
+		vulkan_globals.md5_8_volume_pipelines, md5_8_vertex_input_attribute_descriptions, countof (md5_8_vertex_input_attribute_descriptions),
+		&md5_8_vertex_binding_description, md5_8_vert_module, "md5_8");
+	R_CreateSkyVolumePipelines ();
 	emissive_volume_pipelines_created = true;
 }
+
+static void R_CreateEmissiveVolumeSpecInfo (VkSpecializationMapEntry *entries, uint32_t *data, VkSpecializationInfo *info)
+{
+	entries[0].constantID = 0;
+	entries[0].offset = 0;
+	entries[0].size = 4;
+	info->mapEntryCount = 1;
+	info->pMapEntries = entries;
+	info->dataSize = sizeof (uint32_t);
+	info->pData = data;
+}
+
+static void R_CreateAliasVolumePipelines (void)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry spec_entry;
+	uint32_t spec_data;
+	VkSpecializationInfo spec_info;
+	int pipeline_index;
+	int variant;
+	int scatter_only;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_TRUE;
+	base.vertex_input_state.vertexAttributeDescriptionCount = 5;
+	base.vertex_input_state.pVertexAttributeDescriptions = alias_vertex_input_attribute_descriptions;
+	base.vertex_input_state.vertexBindingDescriptionCount = 3;
+	base.vertex_input_state.pVertexBindingDescriptions = alias_vertex_binding_descriptions;
+	base.shader_stages[0].module = alias_vert_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	R_CreateEmissiveVolumeSpecInfo (&spec_entry, &spec_data, &spec_info);
+	for (pipeline_index = 0; pipeline_index < MODEL_PIPELINE_SHOWTRIS; ++pipeline_index)
+	{
+		const qboolean alpha_test = !!(pipeline_index & MODEL_PIPELINE_ALPHA_TEST_BIT);
+		if (pipeline_index & MODEL_PIPELINE_ALPHA_BLEND_BIT)
+			continue;
+		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+			for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+			{
+				spec_data = (uint32_t)scatter_only;
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+				infos.shader_stages[1].module = alpha_test ? alias_alphatest_volume_frag_module : alias_volume_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &spec_info;
+				infos.blend_attachment_states[0].blendEnable = VK_FALSE;
+				infos.depth_stencil_state.depthWriteEnable = VK_TRUE;
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.alias_volume_pipelines[variant][pipeline_index][scatter_only], &infos,
+					vulkan_globals.alias_volume_pipeline_layout, va ("alias_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+			}
+	}
+}
+
+static void R_CreateMD5VolumePipelineSet (
+	vulkan_pipeline_t pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2],
+	VkVertexInputAttributeDescription *vertex_attributes, uint32_t vertex_attribute_count, VkVertexInputBindingDescription *vertex_binding,
+	VkShaderModule vertex_module, const char *name)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry spec_entry;
+	uint32_t spec_data;
+	VkSpecializationInfo spec_info;
+	int pipeline_index;
+	int variant;
+	int scatter_only;
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_TRUE;
+	base.depth_stencil_state.depthWriteEnable = VK_TRUE;
+	base.vertex_input_state.vertexAttributeDescriptionCount = vertex_attribute_count;
+	base.vertex_input_state.pVertexAttributeDescriptions = vertex_attributes;
+	base.vertex_input_state.vertexBindingDescriptionCount = 1;
+	base.vertex_input_state.pVertexBindingDescriptions = vertex_binding;
+	base.shader_stages[0].module = vertex_module;
+	base.shader_stages[0].pSpecializationInfo = NULL;
+	R_CreateEmissiveVolumeSpecInfo (&spec_entry, &spec_data, &spec_info);
+	for (pipeline_index = 0; pipeline_index < MODEL_PIPELINE_SHOWTRIS; ++pipeline_index)
+	{
+		const qboolean alpha_test = !!(pipeline_index & MODEL_PIPELINE_ALPHA_TEST_BIT);
+		if (pipeline_index & MODEL_PIPELINE_ALPHA_BLEND_BIT)
+			continue;
+		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+			for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+			{
+				spec_data = (uint32_t)scatter_only;
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+				infos.shader_stages[1].module = alpha_test ? md5_alphatest_volume_frag_module : md5_volume_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &spec_info;
+				infos.blend_attachment_states[0].blendEnable = VK_FALSE;
+				infos.depth_stencil_state.depthWriteEnable = VK_TRUE;
+				R_CreateGraphicsPipeline (
+					&pipelines[variant][pipeline_index][scatter_only], &infos, vulkan_globals.md5_volume_pipeline_layout,
+					va ("%s_volume %d%s", name, pipeline_index, scatter_only ? " scatter" : ""));
+			}
+	}
+}
+
+static void R_CreateSkyVolumePipelines (void)
+{
+	pipeline_create_infos_t base;
+	pipeline_create_infos_t infos;
+	VkSpecializationMapEntry spec_entry;
+	uint32_t spec_data;
+	VkSpecializationInfo spec_info;
+	int i;
+	int variant;
+	int scatter_only;
+	R_CreateEmissiveVolumeSpecInfo (&spec_entry, &spec_data, &spec_info);
+	for (i = 0; i < 2; i++)
+	{
+		R_InitDefaultStates (&base);
+		if (i)
+		{
+			base.vertex_input_state.vertexAttributeDescriptionCount = 3;
+			base.vertex_input_state.pVertexAttributeDescriptions = world_vertex_input_attribute_descriptions;
+			base.vertex_input_state.vertexBindingDescriptionCount = 1;
+			base.vertex_input_state.pVertexBindingDescriptions = &world_vertex_binding_description;
+		}
+		base.depth_stencil_state.depthTestEnable = VK_TRUE;
+		base.depth_stencil_state.depthWriteEnable = VK_TRUE;
+		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+		{
+			const VkRenderPass render_pass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+			{
+				spec_data = (uint32_t)scatter_only;
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = render_pass;
+				infos.shader_stages[0].module = sky_layer_vert_module;
+				infos.shader_stages[1].module = sky_layer_volume_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &spec_info;
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.sky_layer_volume_pipelines[variant][i][scatter_only], &infos, vulkan_globals.sky_layer_volume_pipeline_layout,
+					va ("sky_layer_volume%s%s", i ? "_indirect" : "", scatter_only ? " scatter" : ""));
+				R_CopyPipelineCreateInfos (&infos, &base);
+				infos.graphics_pipeline.renderPass = render_pass;
+				infos.shader_stages[0].module = sky_cube_vert_module;
+				infos.shader_stages[1].module = sky_cube_volume_frag_module;
+				infos.shader_stages[1].pSpecializationInfo = &spec_info;
+				R_CreateGraphicsPipeline (
+					&vulkan_globals.sky_cube_volume_pipelines[variant][i][scatter_only], &infos, vulkan_globals.sky_volume_pipeline_layout,
+					va ("sky_cube_volume%s%s", i ? "_indirect" : "", scatter_only ? " scatter" : ""));
+			}
+		}
+	}
+	R_InitDefaultStates (&base);
+	base.depth_stencil_state.depthTestEnable = VK_FALSE;
+	base.depth_stencil_state.depthWriteEnable = VK_FALSE;
+	base.depth_stencil_state.stencilTestEnable = VK_TRUE;
+	base.depth_stencil_state.front.compareOp = VK_COMPARE_OP_EQUAL;
+	base.depth_stencil_state.front.failOp = VK_STENCIL_OP_KEEP;
+	base.depth_stencil_state.front.depthFailOp = VK_STENCIL_OP_KEEP;
+	base.depth_stencil_state.front.passOp = VK_STENCIL_OP_KEEP;
+	base.depth_stencil_state.front.compareMask = 0xFF;
+	base.depth_stencil_state.front.writeMask = 0x0;
+	base.depth_stencil_state.front.reference = 0x1;
+	for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+		for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+		{
+			spec_data = (uint32_t)scatter_only;
+			R_CopyPipelineCreateInfos (&infos, &base);
+			infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+			infos.shader_stages[1].module = sky_box_volume_frag_module;
+			infos.shader_stages[1].pSpecializationInfo = &spec_info;
+			R_CreateGraphicsPipeline (
+				&vulkan_globals.sky_box_volume_pipelines[variant][scatter_only], &infos, vulkan_globals.sky_volume_pipeline_layout,
+				va ("sky_box_volume%s", scatter_only ? " scatter" : ""));
+		}
+}
+
 
 void R_DestroyEmissiveVolumePipelines (void)
 {
@@ -4080,6 +4381,32 @@ void R_DestroyEmissiveVolumePipelines (void)
 		vkDestroyPipeline (vulkan_globals.device, vulkan_globals.emissive_volume_shadow_pipeline.handle, NULL);
 		vulkan_globals.emissive_volume_shadow_pipeline.handle = VK_NULL_HANDLE;
 	}
+	for (i = 0; i < MODEL_PIPELINE_COUNT; ++i)
+		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+			for (s = 0; s < 2; ++s)
+			{
+				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.alias_volume_pipelines[variant][i][s].handle, NULL);
+				vulkan_globals.alias_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_volume_pipelines[variant][i][s].handle, NULL);
+				vulkan_globals.md5_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.md5_8_volume_pipelines[variant][i][s].handle, NULL);
+				vulkan_globals.md5_8_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+			}
+	for (i = 0; i < 2; ++i)
+		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+			for (s = 0; s < 2; ++s)
+			{
+				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sky_layer_volume_pipelines[variant][i][s].handle, NULL);
+				vulkan_globals.sky_layer_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sky_cube_volume_pipelines[variant][i][s].handle, NULL);
+				vulkan_globals.sky_cube_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+			}
+	for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+		for (s = 0; s < 2; ++s)
+		{
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.sky_box_volume_pipelines[variant][s].handle, NULL);
+			vulkan_globals.sky_box_volume_pipelines[variant][s].handle = VK_NULL_HANDLE;
+		}
 	for (i = 0; i < WORLD_PIPELINE_COUNT; ++i)
 		for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
 			for (s = 0; s < 2; ++s)
@@ -4635,6 +4962,10 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (alias_vert);
 	CREATE_SHADER_MODULE (alias_frag);
 	CREATE_SHADER_MODULE (alias_alphatest_frag);
+	CREATE_SHADER_MODULE (alias_volume_frag);
+	CREATE_SHADER_MODULE (alias_alphatest_volume_frag);
+	CREATE_SHADER_MODULE (md5_volume_frag);
+	CREATE_SHADER_MODULE (md5_alphatest_volume_frag);
 	CREATE_SHADER_MODULE (alias_oit_frag);
 	CREATE_SHADER_MODULE (alias_alphatest_oit_frag);
 	CREATE_SHADER_MODULE (alias_mboit_moment_frag);
@@ -4652,9 +4983,12 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (md5_debug_vert);
 	CREATE_SHADER_MODULE (sky_layer_vert);
 	CREATE_SHADER_MODULE (sky_layer_frag);
+	CREATE_SHADER_MODULE (sky_layer_volume_frag);
 	CREATE_SHADER_MODULE (sky_box_frag);
+	CREATE_SHADER_MODULE (sky_box_volume_frag);
 	CREATE_SHADER_MODULE (sky_cube_vert);
 	CREATE_SHADER_MODULE (sky_cube_frag);
+	CREATE_SHADER_MODULE (sky_cube_volume_frag);
 	CREATE_SHADER_MODULE (postprocess_vert);
 	CREATE_SHADER_MODULE (postprocess_frag);
 	CREATE_SHADER_MODULE (wboit_resolve_frag);
@@ -4734,6 +5068,10 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (alias_vert);
 	DESTROY_SHADER_MODULE (alias_frag);
 	DESTROY_SHADER_MODULE (alias_alphatest_frag);
+	DESTROY_SHADER_MODULE (alias_volume_frag);
+	DESTROY_SHADER_MODULE (alias_alphatest_volume_frag);
+	DESTROY_SHADER_MODULE (md5_volume_frag);
+	DESTROY_SHADER_MODULE (md5_alphatest_volume_frag);
 	DESTROY_SHADER_MODULE (alias_oit_frag);
 	DESTROY_SHADER_MODULE (alias_alphatest_oit_frag);
 	DESTROY_SHADER_MODULE (alias_mboit_moment_frag);
@@ -4751,9 +5089,12 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (md5_debug_vert);
 	DESTROY_SHADER_MODULE (sky_layer_vert);
 	DESTROY_SHADER_MODULE (sky_layer_frag);
+	DESTROY_SHADER_MODULE (sky_layer_volume_frag);
 	DESTROY_SHADER_MODULE (sky_box_frag);
+	DESTROY_SHADER_MODULE (sky_box_volume_frag);
 	DESTROY_SHADER_MODULE (sky_cube_vert);
 	DESTROY_SHADER_MODULE (sky_cube_frag);
+	DESTROY_SHADER_MODULE (sky_cube_volume_frag);
 	DESTROY_SHADER_MODULE (postprocess_vert);
 	DESTROY_SHADER_MODULE (postprocess_frag);
 	DESTROY_SHADER_MODULE (wboit_resolve_frag);

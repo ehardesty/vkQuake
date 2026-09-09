@@ -1177,12 +1177,12 @@ static void R_FlushBatch (
 		// (RV6B), OIT stages (RV6C), bandlimit-combined draws, and surface
 		// debug draws keep their original pipelines and bind nothing new.
 		const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
-		const qboolean volume_wanted =
-			!alpha_blend && !emissive_add && !bandlimit_enabled && !emissive_debug && R_EmissiveVolumeReady ();
+		const qboolean volume_wanted = !alpha_blend && !emissive_add && !bandlimit_enabled && !emissive_debug && !r_fullbright_cheatsafe &&
+										 !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
 		vulkan_pipeline_t volume_pipeline;
 		qboolean volume_selected = false;
 		memset (&volume_pipeline, 0, sizeof (volume_pipeline));
-		if (volume_wanted && cbx->render_pass_index == RENDER_PASS_INDEX_MAIN)
+		if (volume_wanted && R_EmissiveVolumeMainPass (cbx->render_pass_index))
 		{
 			volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
 			volume_selected =

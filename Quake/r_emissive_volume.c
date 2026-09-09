@@ -623,6 +623,12 @@ qboolean R_EmissiveVolumeScatterOnly (void)
 	return debug_mode == 1 || debug_mode == 3;
 }
 
+qboolean R_EmissiveVolumeMainPass (int render_pass_index)
+{
+	return render_pass_index == RENDER_PASS_INDEX_MAIN || render_pass_index == RENDER_PASS_INDEX_MAIN_OIT ||
+		   render_pass_index == RENDER_PASS_INDEX_MAIN_MBOIT;
+}
+
 qboolean R_EmissiveVolumeShadowed (void)
 {
 	const int debug_mode = (int)r_emissive_rt_volumetrics_debug.value;

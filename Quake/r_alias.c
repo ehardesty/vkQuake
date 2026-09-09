@@ -159,7 +159,41 @@ static void GL_DrawAliasFrame (
 			vulkan_globals.alias_wboit_pipelines[pipeline_index], vulkan_globals.alias_mboit_moment_pipelines[pipeline_index],
 			vulkan_globals.alias_mboit_composite_pipelines[pipeline_index]);
 
+	// RV6A volume: opaque/alpha-tested alias and MD5 draws sample foreground
+	// air scattering at their own depth. Excluded: viewmodel, blended/OIT and
+	// showtris draws, and diagnostic unlit/lightmap modes. Model meshes never
+	// enter any ray-traced occluder set for this; no model AS work is enabled.
+	const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
+	const qboolean volume_wanted = showtris == 0 && !has_alpha && !oit_pass && e != &cl.viewent && !r_fullbright_cheatsafe &&
+									!r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
+	vulkan_pipeline_t volume_pipeline;
+	qboolean volume_selected = false;
+	memset (&volume_pipeline, 0, sizeof (volume_pipeline));
+	if (volume_wanted && R_EmissiveVolumeMainPass (cbx->render_pass_index))
+	{
+		const int variant = R_MainPassPipelineVariant (cbx->render_pass_index);
+		if (paliashdr->poseverttype == PV_MD5 || paliashdr->poseverttype == PV_MD5_8)
+			volume_pipeline = (paliashdr->poseverttype == PV_MD5_8 ? vulkan_globals.md5_8_volume_pipelines : vulkan_globals.md5_volume_pipelines)[variant]
+																																											[pipeline_index][volume_scatter_only ? 1 : 0];
+		else
+			volume_pipeline = vulkan_globals.alias_volume_pipelines[variant][pipeline_index][volume_scatter_only ? 1 : 0];
+		volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+	}
+	if (volume_selected)
+		pipeline = volume_pipeline;
+
 	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+	if (volume_selected)
+	{
+		const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
+		float volume_push[5];
+		const qboolean is_md5 = paliashdr->poseverttype == PV_MD5 || paliashdr->poseverttype == PV_MD5_8;
+		vulkan_globals.vk_cmd_bind_descriptor_sets (
+			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout.handle, is_md5 ? 5 : 4, 1, &volume_set, 0, NULL);
+		R_EmissiveVolumeFragmentPush (volume_push);
+		R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 20 * sizeof (float), sizeof (volume_push), volume_push);
+	}
 
 	float blend;
 

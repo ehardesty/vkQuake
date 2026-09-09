@@ -57,6 +57,8 @@ layout (constant_id = 7) const bool emissive_bandlimit_enabled = false;
 #endif
 
 #ifdef EMISSIVE_VOLUME
+#define VOLUME_SAMPLER_SET 7
+#define VOLUME_SCATTER_ID 8
 #include "emissive_volume.inc"
 #endif
 #include "world_common.inc"

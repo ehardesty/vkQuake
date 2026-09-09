@@ -12,6 +12,9 @@ layout (push_constant) uniform PushConsts
 	mat4  mvp;
 	vec3  fog_color;
 	float fog_density;
+	// RT-emissive volume sampling rect (framebuffer px, y down) and forward-depth extent.
+	vec4  volume_viewport;
+	float volume_z_max;
 }
 push_constants;
 
@@ -43,6 +46,17 @@ layout (location = 2) in float in_fog_frag_coord;
 
 #ifndef ALIAS_ALPHA_TEST
 #define ALIAS_ALPHA_TEST 0
+#endif
+#ifdef EMISSIVE_VOLUME
+// Alias volume pipelines bind the volume texture at set 4; MD5 volume
+// pipelines reuse this source with -DVOLUME_SAMPLER_SET=5 (their set 4 is
+// the MBOIT input). Scatter selection is specialization id 0 (alias.frag
+// otherwise uses none).
+#ifndef VOLUME_SAMPLER_SET
+#define VOLUME_SAMPLER_SET 4
+#endif
+#define VOLUME_SCATTER_ID 0
+#include "emissive_volume.inc"
 #endif
 #include "alias_common.inc"
 

@@ -143,7 +143,11 @@ SYSOBJ_MAIN:= main_sdl.o
 SHADER_OBJS = \
 	alias_frag.o \
 	alias_oit_frag.o \
+	alias_volume_frag.o \
 	alias_alphatest_frag.o \
+	alias_alphatest_volume_frag.o \
+	md5_volume_frag.o \
+	md5_alphatest_volume_frag.o \
 	alias_alphatest_oit_frag.o \
 	alias_mboit_moment_frag.o \
 	alias_alphatest_mboit_moment_frag.o \
@@ -187,9 +191,12 @@ SHADER_OBJS = \
 	basic_notex_frag.o \
 	basic_vert.o \
 	sky_layer_frag.o \
+	sky_layer_volume_frag.o \
 	sky_layer_vert.o \
 	sky_box_frag.o \
+	sky_box_volume_frag.o \
 	sky_cube_frag.o \
+	sky_cube_volume_frag.o \
 	sky_cube_vert.o \
 	postprocess_frag.o \
 	postprocess_vert.o \
@@ -376,6 +383,13 @@ $(eval $(call SHADER_VARIANT,world_liquid_emissive_mboit_moment_frag,world.frag,
 $(eval $(call SHADER_VARIANT,world_liquid_emissive_mboit_composite_frag,world.frag,-DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1))
 $(eval $(call SHADER_VARIANT,world_liquid_emissive_mboit_composite_msaa_frag,world.frag,-DEMISSIVE_ADD=1 -DMBOIT=1 -DMBOIT_COMPOSITE=1 -DMSAA=1))
 $(eval $(call SHADER_VARIANT,alias_alphatest_frag,alias.frag,-DALIAS_ALPHA_TEST=1))
+$(eval $(call SHADER_VARIANT,alias_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1))
+$(eval $(call SHADER_VARIANT,alias_alphatest_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1))
+$(eval $(call SHADER_VARIANT,md5_volume_frag,alias.frag,-DEMISSIVE_VOLUME=1 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,md5_alphatest_volume_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DEMISSIVE_VOLUME=1 -DVOLUME_SAMPLER_SET=5))
+$(eval $(call SHADER_VARIANT,sky_layer_volume_frag,sky_layer.frag,-DEMISSIVE_VOLUME=1))
+$(eval $(call SHADER_VARIANT,sky_cube_volume_frag,sky_cube.frag,-DEMISSIVE_VOLUME=1))
+$(eval $(call SHADER_VARIANT,sky_box_volume_frag,sky_box.frag,-DEMISSIVE_VOLUME=1))
 $(eval $(call SHADER_VARIANT,alias_oit_frag,alias.frag,-DWBOIT=1))
 $(eval $(call SHADER_VARIANT,alias_alphatest_oit_frag,alias.frag,-DALIAS_ALPHA_TEST=1 -DWBOIT=1))
 $(eval $(call SHADER_VARIANT,alias_mboit_moment_frag,alias.frag,-DMBOIT=1))

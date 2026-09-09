@@ -419,6 +419,10 @@ typedef struct
 	vulkan_pipeline_t		 liquid_emissive_mboit_moment_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
 	vulkan_pipeline_t		 liquid_emissive_mboit_composite_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT];
 	vulkan_pipeline_layout_t world_pipeline_layout;
+	vulkan_pipeline_layout_t alias_volume_pipeline_layout;
+	vulkan_pipeline_layout_t md5_volume_pipeline_layout;
+	vulkan_pipeline_layout_t sky_volume_pipeline_layout;
+	vulkan_pipeline_layout_t sky_layer_volume_pipeline_layout;
 	vulkan_pipeline_t		 raster_tex_warp_pipeline;
 	vulkan_pipeline_t		 particle_pipeline;
 	vulkan_pipeline_t		 particle_emissive_pipeline;
@@ -443,7 +447,11 @@ typedef struct
 	vulkan_pipeline_t		 sky_box_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT];
 	vulkan_pipeline_t		 sky_cube_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT][2];
 	vulkan_pipeline_t		 sky_layer_pipeline[MAIN_RENDER_PASS_VARIANT_COUNT][2];
+	vulkan_pipeline_t		 sky_layer_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][2][2];
+	vulkan_pipeline_t		 sky_cube_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][2][2];
+	vulkan_pipeline_t		 sky_box_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][2];
 	vulkan_pipeline_t		 alias_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT];
+	vulkan_pipeline_t		 alias_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 alias_wboit_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 alias_mboit_moment_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 alias_mboit_composite_pipelines[MODEL_PIPELINE_COUNT];
@@ -452,6 +460,8 @@ typedef struct
 	vulkan_pipeline_t		 md5_mboit_moment_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 md5_mboit_composite_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 md5_8_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT];
+	vulkan_pipeline_t		 md5_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2];
+	vulkan_pipeline_t		 md5_8_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][MODEL_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 md5_8_wboit_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 md5_8_mboit_moment_pipelines[MODEL_PIPELINE_COUNT];
 	vulkan_pipeline_t		 md5_8_mboit_composite_pipelines[MODEL_PIPELINE_COUNT];
@@ -911,6 +921,7 @@ int R_EmissiveVolumeFrameSlot (void);
 void R_EmissiveVolumeParentBuffers (VkBuffer *cacheable, VkBuffer *modulations, VkBuffer *transient);
 void R_EmissiveVolumeWorldAS (VkAccelerationStructureKHR *tlas);
 qboolean R_EmissiveVolumeShadowed (void);
+qboolean R_EmissiveVolumeMainPass (int render_pass_index);
 void R_EmissiveTileStats (int *affected_tiles, int *total_tiles, int *source_links, int *dispatches, uint64_t *cpu_bytes, uint64_t *gpu_bytes);
 void R_EmissiveRadianceStats (
 	int *groups, int *dirty_tiles, int *source_links, int *tile_groups, int *max_groups_per_tile, uint64_t *cpu_bytes, uint64_t *gpu_bytes,

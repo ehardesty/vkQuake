@@ -25,5 +25,20 @@ vec4 AliasFragmentColor ()
 	fog = clamp (fog, 0.0, 1.0);
 	result.rgb = mix (push_constants.fog_color, result.rgb, fog);
 
+#if defined(EMISSIVE_VOLUME) && !defined(WBOIT) && !defined(MBOIT)
+	// Foreground air scattering at this fragment's own depth, after ordinary
+	// fog. Alpha-tested fragments were already discarded above, so cutout
+	// coverage is unchanged. MBOIT moment-only and WBOIT modules never take
+	// this path (see RV6C).
+	{
+		const vec3 volume_scattering = EmissiveVolumeSample (
+			gl_FragCoord.xy, in_fog_frag_coord, push_constants.volume_viewport, push_constants.volume_z_max);
+		if (volume_scatter_only)
+			result.rgb = volume_scattering;
+		else
+			result.rgb += volume_scattering;
+	}
+#endif
+
 	return result;
 }

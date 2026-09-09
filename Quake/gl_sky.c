@@ -1131,9 +1131,11 @@ void Sky_DrawSkyBox (cb_context_t *cbx, int *skypolys)
 		if (skymins[0][i] >= skymaxs[0][i] || skymins[1][i] >= skymaxs[1][i])
 			continue;
 
-		const main_render_pass_variant_t variant = R_MainPassPipelineVariant (cbx->render_pass_index);
+		// Bind through the currently bound pipeline's layout: the caller may
+		// have selected the volume variant, whose set 0 shares the base
+		// single-texture layout while set 1 carries the volume texture.
 		vkCmdBindDescriptorSets (
-			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_stencil_pipeline[variant][indirect].layout.handle, 0, 1,
+			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, cbx->current_pipeline.layout.handle, 0, 1,
 			&skybox.textures[skytexorder[i]]->descriptor_set, 0, NULL);
 
 		VkBuffer	   buffer;
@@ -1237,7 +1239,20 @@ void Sky_DrawSky (cb_context_t *cbx)
 	else
 		memcpy (color, skyflatcolor, 3 * sizeof (float));
 
-	float constant_values[27];
+	float constant_values[32];
+	// RV6A sky volume: color draws sample accumulated foreground scattering
+	// at the far extent. Flat-color (fast) sky keeps its original path, as do
+	// stencil mask passes. Push rects below extend the per-branch constant
+	// uploads; descriptor sets stay bound across the sky surface draws.
+	const qboolean sky_volume_wanted =
+		!flat_color && !r_fullbright_cheatsafe && R_EmissiveVolumeMainPass (cbx->render_pass_index) && R_EmissiveVolumeReady ();
+	const qboolean sky_volume_scatter = R_EmissiveVolumeScatterOnly ();
+	const VkDescriptorSet sky_volume_set = sky_volume_wanted ? R_EmissiveVolumeFragmentSet () : VK_NULL_HANDLE;
+	float sky_volume_push[5];
+	qboolean sky_layer_volume_selected = false;
+	qboolean sky_cube_volume_selected = false;
+	if (sky_volume_wanted && sky_volume_set != VK_NULL_HANDLE)
+		R_EmissiveVolumeFragmentPush (sky_volume_push);
 	memcpy (constant_values, vulkan_globals.view_projection_matrix, sizeof (vulkan_globals.view_projection_matrix));
 	constant_values[16] = CLAMP (0.0f, color[0], 1.0f);
 	constant_values[17] = CLAMP (0.0f, color[1], 1.0f);
@@ -1255,15 +1270,33 @@ void Sky_DrawSky (cb_context_t *cbx)
 	}
 	else if (skybox.cubemap)
 	{
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_cube_pipeline[variant][indirect]);
+		vulkan_pipeline_t sky_pipeline = vulkan_globals.sky_cube_pipeline[variant][indirect];
+		if (sky_volume_wanted && sky_volume_set != VK_NULL_HANDLE)
+		{
+			const vulkan_pipeline_t volume_pipeline =
+				vulkan_globals.sky_cube_volume_pipelines[variant][indirect][sky_volume_scatter ? 1 : 0];
+			if (volume_pipeline.handle != VK_NULL_HANDLE)
+			{
+				sky_pipeline = volume_pipeline;
+				sky_cube_volume_selected = true;
+			}
+		}
+		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline);
 		vkCmdBindDescriptorSets (
-			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_cube_pipeline[variant][indirect].layout.handle, 0, 1, &skybox.cubemap->descriptor_set,
-			0, NULL);
+			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 0, 1, &skybox.cubemap->descriptor_set, 0, NULL);
 		memcpy (&constant_values[20], r_refdef.vieworg, sizeof (r_refdef.vieworg));
 
 		Skywind_UpdateParams (&constant_values[23], &constant_values[24]);
 
-		R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 27 * sizeof (float), constant_values);
+		if (sky_cube_volume_selected)
+		{
+			vulkan_globals.vk_cmd_bind_descriptor_sets (
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 1, 1, &sky_volume_set, 0, NULL);
+			memcpy (&constant_values[27], sky_volume_push, 4 * sizeof (float));
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 31 * sizeof (float), constant_values);
+		}
+		else
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 27 * sizeof (float), constant_values);
 	}
 	else if (!skybox.name[0])
 	{
@@ -1272,14 +1305,32 @@ void Sky_DrawSky (cb_context_t *cbx)
 			R_EndDebugUtilsLabel (cbx);
 			return;
 		}
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_layer_pipeline[variant][indirect]);
+		vulkan_pipeline_t sky_pipeline = vulkan_globals.sky_layer_pipeline[variant][indirect];
+		if (sky_volume_wanted && sky_volume_set != VK_NULL_HANDLE)
+		{
+			const vulkan_pipeline_t volume_pipeline =
+				vulkan_globals.sky_layer_volume_pipelines[variant][indirect][sky_volume_scatter ? 1 : 0];
+			if (volume_pipeline.handle != VK_NULL_HANDLE)
+			{
+				sky_pipeline = volume_pipeline;
+				sky_layer_volume_selected = true;
+			}
+		}
+		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline);
 		VkDescriptorSet descriptor_sets[2] = {solidskytexture->descriptor_set, alphaskytexture->descriptor_set};
-		vkCmdBindDescriptorSets (
-			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_layer_pipeline[variant][indirect].layout.handle, 0, 2, descriptor_sets, 0, NULL);
+		vkCmdBindDescriptorSets (cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 0, 2, descriptor_sets, 0, NULL);
 		memcpy (&constant_values[20], r_refdef.vieworg, sizeof (r_refdef.vieworg));
 		constant_values[23] = cl.time - (int)cl.time / 16 * 16;
 		constant_values[24] = r_skyalpha.value;
-		R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 25 * sizeof (float), constant_values);
+		if (sky_layer_volume_selected)
+		{
+			vulkan_globals.vk_cmd_bind_descriptor_sets (
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 2, 1, &sky_volume_set, 0, NULL);
+			memcpy (&constant_values[25], sky_volume_push, 4 * sizeof (float));
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 29 * sizeof (float), constant_values);
+		}
+		else
+			R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 0, 25 * sizeof (float), constant_values);
 	}
 	else
 	{
@@ -1300,8 +1351,14 @@ void Sky_DrawSky (cb_context_t *cbx)
 		vkCmdBindIndexBuffer (cbx->cb, vulkan_globals.fan_index_buffer, 0, VK_INDEX_TYPE_UINT16);
 		if (flat_color)
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_color_pipeline[variant][0]);
+		else if (skybox.cubemap && sky_cube_volume_selected)
+			R_BindPipeline (
+				cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_cube_volume_pipelines[variant][0][sky_volume_scatter ? 1 : 0]);
 		else if (skybox.cubemap)
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_cube_pipeline[variant][0]);
+		else if (!skybox.name[0] && sky_layer_volume_selected)
+			R_BindPipeline (
+				cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_layer_volume_pipelines[variant][0][sky_volume_scatter ? 1 : 0]);
 		else if (!skybox.name[0])
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_layer_pipeline[variant][0]);
 		else
@@ -1317,7 +1374,24 @@ void Sky_DrawSky (cb_context_t *cbx)
 	//
 	if (!flat_color && !skybox.cubemap && skybox.name[0])
 	{
-		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.sky_box_pipeline[variant]);
+		vulkan_pipeline_t sky_pipeline = vulkan_globals.sky_box_pipeline[variant];
+		qboolean sky_box_volume_selected = false;
+		if (sky_volume_wanted && sky_volume_set != VK_NULL_HANDLE)
+		{
+			const vulkan_pipeline_t volume_pipeline = vulkan_globals.sky_box_volume_pipelines[variant][sky_volume_scatter ? 1 : 0];
+			if (volume_pipeline.handle != VK_NULL_HANDLE)
+			{
+				sky_pipeline = volume_pipeline;
+				sky_box_volume_selected = true;
+			}
+		}
+		R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline);
+		if (sky_box_volume_selected)
+		{
+			vulkan_globals.vk_cmd_bind_descriptor_sets (
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline.layout.handle, 1, 1, &sky_volume_set, 0, NULL);
+			R_PushConstants (cbx, VK_SHADER_STAGE_FRAGMENT_BIT, 20 * sizeof (float), 4 * sizeof (float), sky_volume_push);
+		}
 		Sky_DrawSkyBox (cbx, &skypolys);
 	}
 

@@ -11,12 +11,13 @@
 
 #if defined(EMISSIVE_VOLUME) && !defined(WBOIT) && !defined(MBOIT)
 
-// Reuses the world pipeline layout's set 7 combined-sampler slot, which is
-// unbound in every non-bandlimit variant. Bandlimit + volume is therefore an
-// explicit unsupported combination (reported, zero addition) rather than a
-// silent binding collision.
-layout (set = 7, binding = 0) uniform sampler3D emissive_volume_tex;
-layout (constant_id = 8) const bool volume_scatter_only = false;
+// Including shaders define VOLUME_SAMPLER_SET (descriptor set holding the
+// volume texture) and VOLUME_SCATTER_ID (scatter-only specialization id)
+// before this include. World reuses its layout's set 7 slot, unbound in
+// every non-bandlimit variant; alias/MD5/sky families use their own
+// volume-layout sets. Bandlimit + volume stays explicitly unsupported.
+layout (set = VOLUME_SAMPLER_SET, binding = 0) uniform sampler3D emissive_volume_tex;
+layout (constant_id = VOLUME_SCATTER_ID) const bool volume_scatter_only = false;
 
 vec3 EmissiveVolumeSample (const vec2 frag_xy, const float fwd_depth, const vec4 viewport, const float z_max)
 {
