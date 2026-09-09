@@ -398,7 +398,11 @@ static void R_EmissiveVolumeBuildLists (void)
 	volume_list_cpu_us = 0;
 	volume_list_groups_x = 0;
 	volume_list_groups_y = 0;
-	if (!volume_resources_valid || total_sources <= EMISSIVE_VOLUME_BRUTE_FORCE_SOURCES)
+	// Lists build only for frames that can actually generate: Ready covers
+	// resources, positive radiance, AS residency, viewport, and pipelines,
+	// so dormant frames with retained allocations skip the geometric loops
+	// and leave the counters above at zero.
+	if (!R_EmissiveVolumeReady () || total_sources <= EMISSIVE_VOLUME_BRUTE_FORCE_SOURCES)
 		return;
 	// Forced reference (debug bit 2): skip the lists so the same populated
 	// scene evaluates the brute-force loop; the estimate below stays at the
@@ -607,19 +611,24 @@ static void R_EmissiveVolumeEnsureResources (void)
 	if (r_refdef.vrect.height <= 0 || r_refdef.vrect.width <= 0)
 	{
 		volume_resource_reason = "degenerate viewport (retained)";
+		volume_evaluated_pairs_estimate = 0;
 		return;
 	}
 	// Dormant states retain every reusable allocation: Ready is false, so no
 	// frame dispatches, binds, or samples the volume, and returning
 	// contribution resumes without device-idle waits or reallocation.
+	// Counters are zeroed so stats never report scheduled work that Update
+	// will not dispatch.
 	if (volume_cacheable_positive + volume_transient_positive <= 0)
 	{
 		volume_resource_reason = "dormant (no positive-radiance source, retained)";
+		volume_evaluated_pairs_estimate = 0;
 		return;
 	}
 	if (R_EmissiveVolumeShadowed () && volume_world_tlas == VK_NULL_HANDLE)
 	{
 		volume_resource_reason = "dormant (shadowed AS not resident, retained)";
+		volume_evaluated_pairs_estimate = 0;
 		return;
 	}
 	wanted_nx = EMISSIVE_VOLUME_BASE_NX;
@@ -674,6 +683,11 @@ qboolean R_EmissiveVolumeReady (void)
 	if (volume_cacheable_positive + volume_transient_positive <= 0)
 		return false;
 	if (!volume_resources_valid)
+		return false;
+	// A degenerate viewport generates nothing; this keeps the shared
+	// generation predicate (not just the diagnostic reason string)
+	// authoritative for dormant frames with resident resources.
+	if (r_refdef.vrect.height <= 0 || r_refdef.vrect.width <= 0)
 		return false;
 	if (vulkan_globals.emissive_volume_pipeline.handle == VK_NULL_HANDLE)
 		return false;
@@ -798,6 +812,15 @@ static void R_EmissiveVolumeUploadLists (cb_context_t *cbx)
 	int seg;
 	if (!volume_use_lists)
 		return;
+	// Write-after-read protection for the shared list buffer: a previous
+	// frame's compute dispatch may still be reading it when this frame
+	// uploads. Same-queue submission order plus this execution-only barrier
+	// (prior compute reads complete before these transfer writes begin)
+	// closes the hazard; the transfer-to-compute barrier in RecordBarriers
+	// covers the other direction. No memory barrier is needed for the old
+	// reads, and unrelated passes must never be relied on to serialize this.
+	vkCmdPipelineBarrier (
+		cbx->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 0, NULL);
 	segments[0] = volume_list_headers;
 	segment_sizes[0] = (size_t)volume_list_groups_x * volume_list_groups_y * 2 * sizeof (uint32_t);
 	segments[1] = volume_list_indices;
@@ -990,6 +1013,8 @@ static void R_EmissiveVolumeResourceStats (void)
 			volume_list_groups_x, volume_list_groups_y, volume_list_admitted, volume_list_fallback_groups, volume_list_cpu_us,
 			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + volume_list_admitted) * 4u,
 			(unsigned)(volume_list_groups_x * volume_list_groups_y * 2 + EMISSIVE_VOLUME_LIST_INDEX_CAP) * 4u);
+	else if (!R_EmissiveVolumeReady ())
+		Con_Printf ("   volume lists: dormant (no generation this frame)\n");
 	else
 		Con_Printf (
 			"   volume lists: brute-force reference (%s)\n",
