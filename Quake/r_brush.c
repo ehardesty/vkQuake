@@ -5235,6 +5235,44 @@ static void R_MarkEmissiveOccluderStateTiles (const emissive_occluder_state_t *s
 	}
 }
 
+// Attribution: which occluder changed and how. Bits: 0-23 entity slot,
+// 24 static (vs client entity), 25 alias model, 26 transform changed,
+// 27 alias pose changed, 28 removed.
+static void R_RecordEmissiveOccluderChange (const emissive_occluder_state_t *previous, const emissive_occluder_state_t *current)
+{
+	uint64_t info = 0;
+	const entity_t *const entity = current ? current->entity : previous->entity;
+	if (entity >= cl.entities && entity < cl.entities + cl.num_entities)
+		info |= (uint64_t)(entity - cl.entities);
+	else
+	{
+		for (int i = 0; i < cl.num_statics; ++i)
+		{
+			if (cl.static_entities[i] == entity)
+			{
+				info |= (uint64_t)(uint32_t)i | ((uint64_t)1 << 24);
+				break;
+			}
+		}
+	}
+	const qmodel_t *const model = current ? current->model : previous->model;
+	if (model && model->type == mod_alias)
+		info |= ((uint64_t)1 << 25);
+	if (!current)
+		info |= ((uint64_t)1 << 28);
+	else if (!previous)
+		info |= ((uint64_t)1 << 26);
+	else
+	{
+		if (memcmp (previous->origin, current->origin, sizeof (current->origin)) || memcmp (previous->angles, current->angles, sizeof (current->angles)) ||
+			previous->scale != current->scale || previous->model != current->model)
+			info |= ((uint64_t)1 << 26);
+		if (previous->pose1 != current->pose1 || previous->pose2 != current->pose2)
+			info |= ((uint64_t)1 << 27);
+	}
+	RTPerf_Record ("occ_chg", 0.0, info);
+}
+
 static void R_BuildEmissiveOccluderDirtyTiles (
 	const emissive_occluder_state_t *previous_states, int previous_count, const emissive_occluder_state_t *current_states, int current_count)
 {
@@ -5266,6 +5304,8 @@ static void R_BuildEmissiveOccluderDirtyTiles (
 			++previous;
 		if (previous < previous_count && !memcmp (&previous_states[previous], &current_states[current], sizeof (current_states[current])))
 			continue;
+		R_RecordEmissiveOccluderChange (
+			previous < previous_count ? &previous_states[previous] : NULL, &current_states[current]);
 		if (previous < previous_count)
 			R_MarkEmissiveOccluderStateTiles (&previous_states[previous]);
 		R_MarkEmissiveOccluderStateTiles (&current_states[current]);
@@ -5277,7 +5317,10 @@ static void R_BuildEmissiveOccluderDirtyTiles (
 			current_states[current].model != previous_states[previous].model))
 			++current;
 		if (current == current_count)
+		{
+			R_RecordEmissiveOccluderChange (&previous_states[previous], NULL);
 			R_MarkEmissiveOccluderStateTiles (&previous_states[previous]);
+		}
 	}
 	for (int tile = 0; tile < num_emissive_logical_tiles; ++tile)
 		if (emissive_occluder_dirty_tile_bits[tile])

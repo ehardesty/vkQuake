@@ -3551,6 +3551,16 @@ void GL_BeginRenderingTask (void *unused)
 			Sys_Error ("vkWaitForFences failed with code %i", (int)err);
 		rs_gpuwaitaccum_us += (uint32_t)((Sys_DoubleTime () - wait_start) * 1000000.0);
 	}
+	{
+		// CPU time blocked on GPU progress (submit fence plus any present wait
+		// accumulated since the last slot recycle). This is where a 95 ms frame
+		// with clean submission events shows its cost.
+		static uint32_t rtperf_last_gpuwait_us;
+		const uint32_t gpuwait_us = rs_gpuwaitaccum_us;
+		if (gpuwait_us >= rtperf_last_gpuwait_us)
+			RTPerf_Record ("gpu_wait", (double)(gpuwait_us - rtperf_last_gpuwait_us) / 1000.0, 0);
+		rtperf_last_gpuwait_us = gpuwait_us;
+	}
 
 	err = vkResetFences (vulkan_globals.device, 1, &command_buffer_fences[current_cb_index]);
 	if (err != VK_SUCCESS)
@@ -3564,7 +3574,10 @@ void GL_BeginRenderingTask (void *unused)
 				vulkan_globals.device, timestamp_query_pool, (current_cb_index * TIMESTAMP_QUERY_COUNT) + TIMESTAMP_QUERY_FRAME_START, 2, sizeof (timestamps),
 				timestamps, sizeof (uint64_t),
 				VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+		{
 			rs_gputime_us = (uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
+			RTPerf_Record ("gpu_frame", (double)rs_gputime_us / 1000.0, 0);
+		}
 	}
 	if ((timestamp_query_pool != VK_NULL_HANDLE) && emissive_coarse_timestamps_written[current_cb_index])
 	{
@@ -3576,6 +3589,7 @@ void GL_BeginRenderingTask (void *unused)
 			rs_emissive_coarse_gputime_us =
 				(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 			rs_emissive_coarse_gputime_valid = true;
+			RTPerf_Record ("gpu_coarse", (double)rs_emissive_coarse_gputime_us / 1000.0, 0);
 		}
 		emissive_coarse_timestamps_written[current_cb_index] = false;
 	}
@@ -3591,6 +3605,7 @@ void GL_BeginRenderingTask (void *unused)
 				rs_emissive_detail_gputime_us =
 					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_detail_gputime_valid = true;
+				RTPerf_Record ("gpu_detail", (double)rs_emissive_detail_gputime_us / 1000.0, 0);
 			}
 		}
 		R_EmissiveDetailCompleted ();
@@ -3613,6 +3628,7 @@ void GL_BeginRenderingTask (void *unused)
 				filter_time_us = (uint32_t)((double)(timestamps[3] - timestamps[2]) * period);
 				combine_time_us = (uint32_t)(((double)(timestamps[4] - timestamps[3]) + (double)(timestamps[6] - timestamps[5])) * period);
 				valid = true;
+				RTPerf_Record ("gpu_bounce", (double)(build_time_us + resolve_time_us + filter_time_us + combine_time_us) / 1000.0, 0);
 			}
 		}
 		R_EmissiveBounceCompleted (build_time_us, resolve_time_us, filter_time_us, combine_time_us, valid);
@@ -3630,6 +3646,7 @@ void GL_BeginRenderingTask (void *unused)
 				rs_emissive_bounce_refresh_gputime_us =
 					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_bounce_refresh_gputime_valid = true;
+				RTPerf_Record ("gpu_bounce_ref", (double)rs_emissive_bounce_refresh_gputime_us / 1000.0, 0);
 			}
 		}
 		emissive_bounce_refresh_timestamps_written[current_cb_index] = false;
@@ -3646,6 +3663,7 @@ void GL_BeginRenderingTask (void *unused)
 				rs_emissive_transient_gputime_us =
 					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_transient_gputime_valid = true;
+				RTPerf_Record ("gpu_transient", (double)rs_emissive_transient_gputime_us / 1000.0, 0);
 			}
 		}
 		emissive_transient_timestamps_written[current_cb_index] = false;
@@ -3667,6 +3685,7 @@ void GL_BeginRenderingTask (void *unused)
 				rs_emissive_brush_receiver_gputime_us =
 					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_brush_receiver_gputime_valid = true;
+				RTPerf_Record ("gpu_brushrcv", (double)rs_emissive_brush_receiver_gputime_us / 1000.0, 0);
 			}
 		}
 		emissive_brush_receiver_timestamps_written[current_cb_index] = false;
@@ -3683,6 +3702,7 @@ void GL_BeginRenderingTask (void *unused)
 				rs_emissive_radiance_gputime_us =
 					(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 				rs_emissive_radiance_gputime_valid = true;
+				RTPerf_Record ("gpu_radiance", (double)rs_emissive_radiance_gputime_us / 1000.0, 0);
 			}
 		}
 		emissive_radiance_timestamps_written[current_cb_index] = false;
@@ -3697,6 +3717,7 @@ void GL_BeginRenderingTask (void *unused)
 			rs_live_as_gputime_us =
 				(uint32_t)((double)(timestamps[1] - timestamps[0]) * (double)vulkan_globals.device_properties.limits.timestampPeriod / 1000.0);
 			rs_live_as_gputime_valid = true;
+			RTPerf_Record ("gpu_liveas", (double)rs_live_as_gputime_us / 1000.0, 0);
 		}
 		live_as_timestamps_written[current_cb_index] = false;
 	}
