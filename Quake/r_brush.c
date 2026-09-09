@@ -5061,7 +5061,8 @@ static void R_EmissiveOccluderStateBounds (const emissive_occluder_state_t *stat
 	vec3_t origin, angles;
 	VectorCopy (state->origin, origin);
 	VectorCopy (state->angles, angles);
-	angles[0] = -angles[0];
+	if (state->model->type != mod_alias)
+		angles[0] = -angles[0]; // quake bug: brush raster pre-negates pitch, alias raster does not
 	float model_matrix[16];
 	IdentityMatrix (model_matrix);
 	R_RotateForEntity (model_matrix, origin, angles, state->scale);
