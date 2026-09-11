@@ -282,6 +282,15 @@ frames select the original pipelines and bind nothing.
 
 #define EMISSIVE_VOLUME_SLOTS 2
 #define EMISSIVE_VOLUME_BASE_NX 128
+// RVQ3 depth-resolution test knob (private test-build setting, not a cvar).
+// Sweep values 64/96/128 (plus 256 as an offline convergence reference) by
+// editing this line and rebuilding; every depth below derives from it
+// (image depth, push segment count, work estimates, statistics), the compute
+// shader takes it at runtime via counts.z, and fragment sampling derives
+// N/B from the image itself, so all slots and consumers always agree on
+// N+1 planes within a build. Keep the far extent, XY grid, sources, fog,
+// and gain identical across the sweep; each value runs in a fresh process
+// (no in-place depth switching: old dormant content is never compatible).
 #define EMISSIVE_VOLUME_SEGMENTS 64
 #define EMISSIVE_VOLUME_BOUNDARIES (EMISSIVE_VOLUME_SEGMENTS + 1)
 #define EMISSIVE_VOLUME_REFERENCE_LENGTH 256.0f
