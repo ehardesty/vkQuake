@@ -1110,7 +1110,7 @@ static void R_EmissiveVolumeResourceStats (void)
 		volume_world_tlas != VK_NULL_HANDLE ? "resident" : "unavailable", EMISSIVE_VOLUME_OCCLUDER_MASK);
 	Con_Printf ("   volume resources: %s, prepare %u us\n", volume_resource_reason, volume_prepare_cpu_us);
 	Con_Printf (
-		"   volume reconstruction: filtered trilinear (VOLUME_SPATIAL_RECONSTRUCTION=1) via private clamp-linear sampler (%s)\n",
+		"   volume reconstruction sampler: private clamp-linear (%s); the filtered shader path requires it, texelFetch reference builds ignore it\n",
 		volume_filter_sampler != VK_NULL_HANDLE ? "bound" : "missing");
 	Con_Printf ("   volume memory: %llu logical, %llu allocated bytes\n", (unsigned long long)logical_bytes, (unsigned long long)allocated_bytes);
 	Con_Printf (
