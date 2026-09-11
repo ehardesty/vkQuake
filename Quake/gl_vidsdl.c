@@ -818,6 +818,20 @@ void GL_SetObjectName (uint64_t object, VkObjectType object_type, const char *na
 
 /*
 ===============
+GL_SampledImageSupportsLinearFilter
+===============
+*/
+qboolean GL_SampledImageSupportsLinearFilter (VkFormat format)
+{
+	VkFormatProperties format_properties;
+	if (vulkan_physical_device == VK_NULL_HANDLE)
+		return false;
+	vkGetPhysicalDeviceFormatProperties (vulkan_physical_device, format, &format_properties);
+	return (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+}
+
+/*
+===============
 GL_InitInstance
 ===============
 */

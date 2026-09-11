@@ -331,6 +331,14 @@ static uint32_t volume_list_cpu_us;
 static qboolean volume_use_lists;
 static VkBuffer volume_list_buffer = VK_NULL_HANDLE;
 static vulkan_memory_t volume_list_memory;
+// RVQ1 reconstruction sampler: privately owned clamp-to-edge linear sampler
+// for the filtered 3D volume lookup. Created lazily with the volume
+// resources; never a shared material sampler. Fragment descriptors bind it
+// once at slot creation, so no per-frame update can race an in-flight read,
+// and destruction waits for device idle with the slots it serves.
+static VkSampler volume_filter_sampler = VK_NULL_HANDLE;
+static qboolean volume_linear_checked = false;
+static qboolean volume_linear_supported = false;
 #define EMISSIVE_VOLUME_OCCLUDER_MASK 0x01u
 
 static void R_EmissiveVolumeDestroySlot (emissive_volume_slot_t *slot)
@@ -367,7 +375,8 @@ static void R_EmissiveVolumeTeardownResources (void)
 	// still free everything it owns. When nothing is owned this returns
 	// without touching the device.
 	qboolean owned =
-		volume_resources_valid || volume_dummy_buffer != VK_NULL_HANDLE || volume_list_buffer != VK_NULL_HANDLE;
+		volume_resources_valid || volume_dummy_buffer != VK_NULL_HANDLE || volume_list_buffer != VK_NULL_HANDLE ||
+		volume_filter_sampler != VK_NULL_HANDLE;
 	for (i = 0; i < EMISSIVE_VOLUME_SLOTS && !owned; ++i)
 		owned = volume_slots[i].image != VK_NULL_HANDLE || volume_slots[i].view != VK_NULL_HANDLE ||
 				volume_slots[i].compute_set != VK_NULL_HANDLE || volume_slots[i].fragment_set != VK_NULL_HANDLE;
@@ -382,6 +391,11 @@ static void R_EmissiveVolumeTeardownResources (void)
 	R_FreeBuffer (volume_list_buffer, &volume_list_memory, &num_vulkan_bmodel_allocations);
 	volume_list_buffer = VK_NULL_HANDLE;
 	memset (&volume_list_memory, 0, sizeof (volume_list_memory));
+	if (volume_filter_sampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler (vulkan_globals.device, volume_filter_sampler, NULL);
+		volume_filter_sampler = VK_NULL_HANDLE;
+	}
 	R_EmissiveVolumeFreeLists ();
 	volume_resources_valid = false;
 	volume_resource_reason = "released";
@@ -533,9 +547,68 @@ static void R_EmissiveVolumeFreeLists (void)
 	volume_use_lists = false;
 }
 
+// RVQ1: query once whether the selected volume format supports sampled-image
+// linear filtering (optimal tiling). The filtered reconstruction requires it;
+// texelFetch reference builds ignore sampler filtering.
+static qboolean R_EmissiveVolumeLinearFilterSupported (void)
+{
+	if (!volume_linear_checked)
+	{
+		// Do not latch a negative answer before the device exists: the
+		// physical-device query below reports unsupported while NULL.
+		if (vulkan_globals.device == VK_NULL_HANDLE)
+			return false;
+		volume_linear_supported = GL_SampledImageSupportsLinearFilter (VK_FORMAT_R16G16B16A16_SFLOAT);
+		volume_linear_checked = true;
+	}
+	return volume_linear_supported;
+}
+
+// RVQ1: lazily create the privately owned clamp-to-edge linear sampler.
+// Linear min/mag, no mip chain (min/max LOD 0), no anisotropy or compare.
+// Returns false without touching the sampler handle on failure.
+static qboolean R_EmissiveVolumeEnsureFilterSampler (void)
+{
+	VkResult err;
+	ZEROED_STRUCT (VkSamplerCreateInfo, sampler_info);
+	if (volume_filter_sampler != VK_NULL_HANDLE)
+		return true;
+	if (!R_EmissiveVolumeLinearFilterSupported ())
+		return false;
+	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	sampler_info.magFilter = VK_FILTER_LINEAR;
+	sampler_info.minFilter = VK_FILTER_LINEAR;
+	sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.mipLodBias = 0.0f;
+	sampler_info.anisotropyEnable = VK_FALSE;
+	sampler_info.maxAnisotropy = 1.0f;
+	sampler_info.compareEnable = VK_FALSE;
+	sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+	sampler_info.minLod = 0.0f;
+	sampler_info.maxLod = 0.0f;
+	sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+	sampler_info.unnormalizedCoordinates = VK_FALSE;
+	err = vkCreateSampler (vulkan_globals.device, &sampler_info, NULL, &volume_filter_sampler);
+	if (err != VK_SUCCESS)
+	{
+		volume_filter_sampler = VK_NULL_HANDLE;
+		return false;
+	}
+	GL_SetObjectName ((uint64_t)volume_filter_sampler, VK_OBJECT_TYPE_SAMPLER, "emissive_volume_linear");
+	return true;
+}
+
 static qboolean R_EmissiveVolumeCreateSlot (emissive_volume_slot_t *slot, int nx, int ny)
 {
 	VkResult err;
+	// Sampler ownership: slots never create or fall back to a shared sampler
+	// here. EnsureResources creates the private filter sampler first; a
+	// missing handle fails the slot so Teardown releases partial work.
+	if (volume_filter_sampler == VK_NULL_HANDLE)
+		return false;
 	memset (slot, 0, sizeof (*slot));
 	ZEROED_STRUCT (VkImageCreateInfo, image_info);
 	image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -581,8 +654,11 @@ static qboolean R_EmissiveVolumeCreateSlot (emissive_volume_slot_t *slot, int nx
 		return false;
 	slot->compute_set = R_AllocateDescriptorSet (&vulkan_globals.emissive_volume_set_layout);
 	slot->fragment_set = R_AllocateDescriptorSet (&vulkan_globals.single_texture_set_layout);
+	// RVQ1 filtered reconstruction: bind the privately owned clamp-linear
+	// sampler. texelFetch reference builds ignore this sampler. The handle
+	// is guaranteed valid by EnsureResources before any slot is created.
 	ZEROED_STRUCT (VkDescriptorImageInfo, fragment_image);
-	fragment_image.sampler = vulkan_globals.point_sampler;
+	fragment_image.sampler = volume_filter_sampler;
 	fragment_image.imageView = slot->view;
 	fragment_image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	ZEROED_STRUCT (VkWriteDescriptorSet, fragment_write);
@@ -631,6 +707,20 @@ static void R_EmissiveVolumeEnsureResources (void)
 		volume_evaluated_pairs_estimate = 0;
 		return;
 	}
+	// RVQ1 filtered reconstruction requires sampled-image linear filtering
+	// for RGBA16F. Without it the candidate textureLod path is invalid, so
+	// the volume stays at zero addition (original path intact) instead of
+	// sampling with an unsupported filter. Reference texelFetch builds do
+	// not need this capability but are only selected via explicit test
+	// builds on capable hardware; no silent fallback is attempted here.
+	if (!R_EmissiveVolumeLinearFilterSupported ())
+	{
+		if (volume_resources_valid)
+			R_EmissiveVolumeTeardownResources ();
+		volume_resource_reason = "refinement unavailable (RGBA16F linear filtering unsupported, zero addition)";
+		volume_evaluated_pairs_estimate = 0;
+		return;
+	}
 	wanted_nx = EMISSIVE_VOLUME_BASE_NX;
 	wanted_ny = (int)(EMISSIVE_VOLUME_BASE_NX * ((float)r_refdef.vrect.height / (float)r_refdef.vrect.width) + 0.5f);
 	wanted_ny = CLAMP (32, wanted_ny, 128);
@@ -639,8 +729,20 @@ static void R_EmissiveVolumeEnsureResources (void)
 		volume_slot = 0;
 	if (volume_resources_valid && (wanted_nx != volume_nx || wanted_ny != volume_ny))
 		R_EmissiveVolumeTeardownResources ();
+	// A retained bundle without its sampler is not bindable; rebuild it
+	// rather than sampling through a missing handle.
+	if (volume_resources_valid && volume_filter_sampler == VK_NULL_HANDLE)
+		R_EmissiveVolumeTeardownResources ();
 	if (!volume_resources_valid)
 	{
+		// Private filter sampler must exist before any slot binds it.
+		// A sampler failure releases partial work and keeps zero addition.
+		if (!R_EmissiveVolumeEnsureFilterSampler ())
+		{
+			R_EmissiveVolumeTeardownResources ();
+			volume_resource_reason = "filter sampler creation failed (zero addition)";
+			return;
+		}
 		for (i = 0; i < EMISSIVE_VOLUME_SLOTS; ++i)
 			if (!R_EmissiveVolumeCreateSlot (&volume_slots[i], wanted_nx, wanted_ny))
 			{
@@ -683,6 +785,10 @@ qboolean R_EmissiveVolumeReady (void)
 	if (volume_cacheable_positive + volume_transient_positive <= 0)
 		return false;
 	if (!volume_resources_valid)
+		return false;
+	// RVQ1: the filtered reconstruction binds the private sampler in every
+	// slot's fragment set. Without it no frame may sample the volume.
+	if (volume_filter_sampler == VK_NULL_HANDLE)
 		return false;
 	// A degenerate viewport generates nothing; this keeps the shared
 	// generation predicate (not just the diagnostic reason string)
@@ -1003,6 +1109,9 @@ static void R_EmissiveVolumeResourceStats (void)
 		"   volume shadows: world AS %s, mask 0x%02x (world-only; moving occluders excluded)\n",
 		volume_world_tlas != VK_NULL_HANDLE ? "resident" : "unavailable", EMISSIVE_VOLUME_OCCLUDER_MASK);
 	Con_Printf ("   volume resources: %s, prepare %u us\n", volume_resource_reason, volume_prepare_cpu_us);
+	Con_Printf (
+		"   volume reconstruction: filtered trilinear (VOLUME_SPATIAL_RECONSTRUCTION=1) via private clamp-linear sampler (%s)\n",
+		volume_filter_sampler != VK_NULL_HANDLE ? "bound" : "missing");
 	Con_Printf ("   volume memory: %llu logical, %llu allocated bytes\n", (unsigned long long)logical_bytes, (unsigned long long)allocated_bytes);
 	Con_Printf (
 		"   volume work: %llu scheduled source evaluations (exact scheduled count, not measured queries)\n",

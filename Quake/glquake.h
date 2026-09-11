@@ -1150,6 +1150,7 @@ float GL_WaterAlphaForEntityTextureType (entity_t *ent, textype_t type);
 qboolean R_EmissiveApproximateSurfaceLight (const msurface_t *surface, const entity_t *entity, vec3_t color);
 
 int GL_MemoryTypeFromProperties (uint32_t type_bits, VkFlags requirements_mask, VkFlags preferred_mask);
+qboolean GL_SampledImageSupportsLinearFilter (VkFormat format);
 
 void R_CreateDescriptorPool ();
 void R_CreateDescriptorSetLayouts ();
