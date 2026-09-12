@@ -1155,7 +1155,7 @@ Draw the current batch if non-empty and clears it, ready for more R_BatchSurface
 */
 static void R_FlushBatch (
 	cb_context_t *cbx, qboolean fullbright_enabled, qboolean alpha_test, qboolean alpha_blend, qboolean use_zbias, gltexture_t *lightmap_texture,
-	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, qboolean receiver_detail_ready,
+	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, VkDescriptorSet surface_trio, qboolean receiver_detail_ready,
 	const vec3_t emissive_add, uint32_t *brushpasses)
 {
 	if (cbx->num_vbo_indices > 0)
@@ -1174,21 +1174,36 @@ static void R_FlushBatch (
 										(bandlimit_enabled ? 64 : 0);
 		// RV2 volume: opaque/alpha-tested world and brush draws sample the
 		// air-scattering volume at their own depth. Liquid/additive draws
-		// (RV6B), OIT stages (RV6C), bandlimit-combined draws, and surface
-		// debug draws keep their original pipelines and bind nothing new.
+		// (RV6B), OIT stages (RV6C), and surface debug draws keep their
+		// original pipelines and bind nothing new. Bandlimit-combined draws
+		// select the dedicated bandlimit+volume family below.
 		const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
 		// RV6B: ordinary alpha-blend draws participate at their own depth;
 		// liquid emissive_add draws select their own volume variant below.
 		const qboolean volume_wanted =
-			!emissive_add && !bandlimit_enabled && !emissive_debug && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
+			!emissive_add && !emissive_debug && !r_fullbright_cheatsafe && !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
 		vulkan_pipeline_t volume_pipeline;
 		qboolean volume_selected = false;
 		memset (&volume_pipeline, 0, sizeof (volume_pipeline));
+		// Bandlimit+volume coexistence: same air, bandlimited surface. The
+		// trio must be present (selection requires what the binds require);
+		// otherwise this batch keeps the original bandlimit pipeline below
+		// (zero air addition, base scene intact).
+		vulkan_pipeline_t bandlimit_volume_pipeline;
+		qboolean bandlimit_volume_selected = false;
+		memset (&bandlimit_volume_pipeline, 0, sizeof (bandlimit_volume_pipeline));
 		if (volume_wanted && R_EmissiveVolumeMainPass (cbx->render_pass_index))
 		{
 			volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
 			volume_selected =
 				volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+		}
+		if (volume_wanted && bandlimit_enabled && emissive_enabled && surface_trio != VK_NULL_HANDLE && R_EmissiveVolumeMainPass (cbx->render_pass_index))
+		{
+			bandlimit_volume_pipeline = R_EmissiveVolumeBandlimitWorldPipeline (
+				R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
+			bandlimit_volume_selected =
+				bandlimit_volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
 		}
 		// RV6C: WBOIT accumulation and MBOIT composite (color-producing OIT
 		// stages) sample the volume under their existing conventions.
@@ -1250,7 +1265,7 @@ static void R_FlushBatch (
 				const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 				float volume_push[5];
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1, &volume_set, 0, NULL);
 				R_EmissiveVolumeFragmentPush (volume_push);
 				// Split upload: the shader places volume_z_max (push[4]) at
 				// float 27 and volume_viewport (push[0..3]) at floats 28-31
@@ -1265,7 +1280,12 @@ static void R_FlushBatch (
 				alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
 			pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
 		}
-		else if (volume_selected)
+		else if (bandlimit_volume_selected)
+			pipeline = bandlimit_volume_pipeline;
+		// Bandlimit draws without an emissive triple (plain batches) take the
+		// classic volume-only path: same air, no surface atlas. Bandlimit
+		// draws WITH a triple must never reach it (wrong reconstruction).
+		else if (volume_selected && (!bandlimit_enabled || !emissive_enabled))
 			pipeline = volume_pipeline;
 		else if (volume_oit_selected)
 			pipeline = volume_oit_pipeline;
@@ -1298,25 +1318,15 @@ static void R_FlushBatch (
 		else
 			vulkan_globals.vk_cmd_bind_descriptor_sets (
 				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 1, 1, &greylightmap->descriptor_set, 0, NULL);
-		if (emissive_enabled)
+		if (emissive_enabled && surface_trio != VK_NULL_HANDLE)
 			vulkan_globals.vk_cmd_bind_descriptor_sets (
-				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &emissive_texture->descriptor_set, 0, NULL);
-		if (emissive_enabled)
-		{
-			gltexture_t *const emissive_detail_binding = emissive_detail_texture ? emissive_detail_texture : emissive_texture;
-			vulkan_globals.vk_cmd_bind_descriptor_sets (
-				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1, &emissive_detail_binding->descriptor_set, 0, NULL);
-			if (bandlimit_enabled)
-				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1,
-					&surface_indices_texture->descriptor_set, 0, NULL);
-		}
-		if (volume_selected || volume_oit_selected)
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &surface_trio, 0, NULL);
+		if (volume_selected || volume_oit_selected || bandlimit_volume_selected)
 		{
 			const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 			float volume_push[5];
 			vulkan_globals.vk_cmd_bind_descriptor_sets (
-				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+				cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1, &volume_set, 0, NULL);
 			R_EmissiveVolumeFragmentPush (volume_push);
 			// Split upload: the shader places volume_z_max (push[4]) at
 			// float 27 and volume_viewport (push[0..3]) at floats 28-31
@@ -1348,7 +1358,7 @@ using VBOs.
 */
 static void R_BatchSurface (
 	cb_context_t *cbx, msurface_t *s, qboolean fullbright_enabled, qboolean alpha_test, qboolean alpha_blend, qboolean use_zbias, gltexture_t *lightmap_texture,
-	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, qboolean receiver_detail_ready,
+	gltexture_t *emissive_texture, gltexture_t *emissive_detail_texture, gltexture_t *surface_indices_texture, VkDescriptorSet surface_trio, qboolean receiver_detail_ready,
 	const vec3_t emissive_add, uint32_t *brushpasses)
 {
 	int num_surf_indices;
@@ -1358,7 +1368,7 @@ static void R_BatchSurface (
 	if (cbx->num_vbo_indices + num_surf_indices > MAX_BATCH_SIZE)
 		R_FlushBatch (
 			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture, surface_indices_texture,
-			receiver_detail_ready, emissive_add, brushpasses);
+			surface_trio, receiver_detail_ready, emissive_add, brushpasses);
 
 	R_TriangleIndicesForSurf (s, &cbx->vbo_indices[cbx->num_vbo_indices]);
 	cbx->num_vbo_indices += num_surf_indices;
@@ -1506,23 +1516,23 @@ void R_DrawTextureChains_Water (cb_context_t *cbx, qmodel_t *model, entity_t *en
 				{
 					if (alpha_blend)
 						R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 20 * sizeof (float), 1 * sizeof (float), &alpha);
-					R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, NULL, &brushpasses);
+					R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, VK_NULL_HANDLE, false, NULL, &brushpasses);
 					lightmap_texture = (s->lightmaptexturenum >= 0) ? lightmaps[s->lightmaptexturenum].texture : greylightmap;
 					lastlightmap = s->lightmaptexturenum;
 				}
 				vec3_t		   emissive_add;
 				const qboolean emissive_receiver = R_EmissiveApproximateSurfaceLight (s, ent, emissive_add);
 				R_BatchSurface (
-					cbx, s, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, emissive_receiver ? emissive_add : NULL, &brushpasses);
+					cbx, s, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, VK_NULL_HANDLE, false, emissive_receiver ? emissive_add : NULL, &brushpasses);
 				if (r_emissive_rt_liquid_receivers.value > 0.0f)
 					R_FlushBatch (
-						cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, emissive_receiver ? emissive_add : NULL,
+						cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, VK_NULL_HANDLE, false, emissive_receiver ? emissive_add : NULL,
 						&brushpasses);
 			}
 
 			if (alpha_blend)
 				R_PushConstants (cbx, VK_SHADER_STAGE_ALL_GRAPHICS, 20 * sizeof (float), 1 * sizeof (float), &alpha);
-			R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, false, NULL, &brushpasses);
+			R_FlushBatch (cbx, false, false, alpha_blend, false, lightmap_texture, NULL, NULL, NULL, VK_NULL_HANDLE, false, NULL, &brushpasses);
 		}
 	}
 
@@ -1588,6 +1598,7 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 		gltexture_t *emissive_texture = NULL;
 		gltexture_t *emissive_detail_texture = NULL;
 		gltexture_t *surface_indices_texture = NULL;
+		VkDescriptorSet surface_trio = VK_NULL_HANDLE;
 		qboolean	 receiver_detail_ready = false;
 		uint32_t	 emissive_atlas_offset[2] = {0, 0};
 		R_ClearBatch (cbx);
@@ -1611,11 +1622,12 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 			gltexture_t *surface_emissive_texture = NULL;
 			gltexture_t *surface_emissive_detail_texture = NULL;
 			gltexture_t *surface_emissive_indices_texture = NULL;
+			VkDescriptorSet surface_emissive_trio = VK_NULL_HANDLE;
 			uint32_t	 surface_emissive_atlas_offset[2] = {0, 0};
 			const qboolean brush_receiver = !bounce_debug && model != cl.worldmodel && ent &&
 				R_EmissiveBrushReceiverTextures (
 					ent, s->lightmaptexturenum, &surface_emissive_texture, &surface_emissive_detail_texture,
-					&surface_emissive_indices_texture, surface_emissive_atlas_offset);
+					&surface_emissive_indices_texture, surface_emissive_atlas_offset, &surface_emissive_trio);
 			const qboolean surface_emissive = world_surface_emissive || brush_receiver;
 			if (world_surface_emissive)
 			{
@@ -1625,21 +1637,24 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 				else
 					R_EmissiveResolvedTextures (s->lightmaptexturenum, &surface_emissive_texture, &surface_emissive_detail_texture);
 				surface_emissive_indices_texture = lightmaps[s->lightmaptexturenum].surface_indices_texture;
+				surface_emissive_trio = R_EmissiveSurfaceTrioSet (s->lightmaptexturenum);
 			}
 			if (!surface_emissive || bounce_debug)
 				surface_emissive_detail_texture = NULL;
 			if (s->lightmaptexturenum != lastlightmap || surface_emissive_texture != emissive_texture ||
 				surface_emissive_detail_texture != emissive_detail_texture || surface_emissive_indices_texture != surface_indices_texture ||
+				surface_emissive_trio != surface_trio ||
 				brush_receiver != receiver_detail_ready || surface_emissive_atlas_offset[0] != emissive_atlas_offset[0] ||
 				surface_emissive_atlas_offset[1] != emissive_atlas_offset[1])
 			{
 				R_FlushBatch (
 					cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-					surface_indices_texture, receiver_detail_ready, NULL, &brushpasses);
+					surface_indices_texture, surface_trio, receiver_detail_ready, NULL, &brushpasses);
 				lightmap_texture = lightmaps[s->lightmaptexturenum].texture;
 				emissive_texture = surface_emissive_texture;
 				emissive_detail_texture = surface_emissive_detail_texture;
 				surface_indices_texture = surface_emissive_indices_texture;
+				surface_trio = surface_emissive_trio;
 				receiver_detail_ready = brush_receiver;
 				emissive_atlas_offset[0] = surface_emissive_atlas_offset[0];
 				emissive_atlas_offset[1] = surface_emissive_atlas_offset[1];
@@ -1650,12 +1665,12 @@ void R_DrawTextureChains_Multitexture (cb_context_t *cbx, qmodel_t *model, entit
 			lastlightmap = s->lightmaptexturenum;
 			R_BatchSurface (
 				cbx, s, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture,
-				surface_indices_texture, receiver_detail_ready, NULL, &brushpasses);
+				surface_indices_texture, surface_trio, receiver_detail_ready, NULL, &brushpasses);
 		}
 
 		R_FlushBatch (
 			cbx, fullbright_enabled, alpha_test, alpha_blend, use_zbias, lightmap_texture, emissive_texture, emissive_detail_texture, surface_indices_texture,
-			receiver_detail_ready, NULL, &brushpasses);
+			surface_trio, receiver_detail_ready, NULL, &brushpasses);
 	}
 
 	Atomic_AddUInt32 (&rs_brushpasses, brushpasses);

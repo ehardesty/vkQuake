@@ -49,6 +49,7 @@ DECLARE_SHADER_SPV (world_frag);
 DECLARE_SHADER_SPV (world_emissive_frag);
 DECLARE_SHADER_SPV (world_volume_frag);
 DECLARE_SHADER_SPV (world_emissive_volume_frag);
+DECLARE_SHADER_SPV (world_emissive_bandlimit_volume_frag);
 DECLARE_SHADER_SPV (world_liquid_volume_frag);
 DECLARE_SHADER_SPV (world_oit_volume_frag);
 DECLARE_SHADER_SPV (world_mboit_composite_volume_frag);

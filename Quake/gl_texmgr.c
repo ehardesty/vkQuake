@@ -264,6 +264,7 @@ static void TexMgr_SetFilterModes (gltexture_t *glt)
 		image_info.sampler = linear_sampler;
 	else
 		image_info.sampler = (vid_filter.value == 1) ? point_sampler : linear_sampler;
+	glt->graphics_sampler = image_info.sampler;
 
 	ZEROED_STRUCT (VkWriteDescriptorSet, texture_write);
 	texture_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

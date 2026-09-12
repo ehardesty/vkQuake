@@ -145,6 +145,7 @@ shader_variants = [
     ['Shaders/world.frag', 'world_emissive.frag', ['-DEMISSIVE_COARSE=1', '-DEMISSIVE_DETAIL=1']],
     ['Shaders/world.frag', 'world_volume.frag', ['-DEMISSIVE_VOLUME=1']],
     ['Shaders/world.frag', 'world_emissive_volume.frag', ['-DEMISSIVE_COARSE=1', '-DEMISSIVE_DETAIL=1', '-DEMISSIVE_VOLUME=1']],
+    ['Shaders/world.frag', 'world_emissive_bandlimit_volume.frag', ['-DEMISSIVE_COARSE=1', '-DEMISSIVE_DETAIL=1', '-DEMISSIVE_BANDLIMIT=1', '-DEMISSIVE_VOLUME=1']],
     ['Shaders/world.frag', 'world_liquid_volume.frag', ['-DEMISSIVE_VOLUME=1', '-DEMISSIVE_ADD=1']],
     ['Shaders/world.frag', 'world_oit_volume.frag', ['-DEMISSIVE_VOLUME=1', '-DWBOIT=1']],
     ['Shaders/world.frag', 'world_mboit_composite_volume.frag', ['-DEMISSIVE_VOLUME=1', '-DMBOIT=1', '-DMBOIT_COMPOSITE=1']],

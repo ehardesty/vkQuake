@@ -91,6 +91,11 @@ typedef struct gltexture_s
 	VkImageView			target_image_view;
 	glheapallocation_t *allocation;
 	VkDescriptorSet		descriptor_set;
+	// Sampler currently bound in descriptor_set (written by
+	// TexMgr_SetFilterModes, refreshed with it on restart/LOD change).
+	// Bandlimit+volume coexistence pushes the surface-emissive trio
+	// per batch and must reuse this exact sampler per texture.
+	VkSampler			graphics_sampler;
 	VkFramebuffer		frame_buffer;
 	VkDescriptorSet		storage_descriptor_set;
 } gltexture_t;

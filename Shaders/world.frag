@@ -34,11 +34,16 @@ layout (set = 0, binding = 0) uniform sampler2D diffuse_tex;
 layout (set = 1, binding = 0) uniform sampler2D lightmap_tex;
 layout (set = 2, binding = 0) uniform sampler2D fullbright_tex;
 #ifdef EMISSIVE_COARSE
+// Surface-emissive trio in world set 5 (coarse, detail, and — under
+// bandlimit — the surface-index texture). One 3-binding set fits the
+// frame-varying resolved triple where three fixed sets cannot; the
+// frame-dependent volume lives alone in set 6 so bandlimit and
+// volumetrics no longer share set 7.
 layout (set = 5, binding = 0) uniform sampler2D emissive_coarse_tex;
 #ifdef EMISSIVE_DETAIL
-layout (set = 6, binding = 0) uniform sampler2D emissive_detail_tex;
+layout (set = 5, binding = 1) uniform sampler2D emissive_detail_tex;
 #ifdef EMISSIVE_BANDLIMIT
-layout (set = 7, binding = 0) uniform usampler2D emissive_surface_indices_tex;
+layout (set = 5, binding = 2) uniform usampler2D emissive_surface_indices_tex;
 #endif
 #endif
 #endif
@@ -60,7 +65,7 @@ layout (constant_id = 7) const bool emissive_bandlimit_enabled = false;
 #endif
 
 #ifdef EMISSIVE_VOLUME
-#define VOLUME_SAMPLER_SET 7
+#define VOLUME_SAMPLER_SET 6
 #define VOLUME_SCATTER_ID 8
 #include "emissive_volume.inc"
 #endif

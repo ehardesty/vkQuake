@@ -1386,6 +1386,34 @@ void R_CreateDescriptorSetLayouts ()
 	}
 
 	{
+		// Surface-emissive trio for world set 5: coarse (binding 0),
+		// detail (binding 1), surface-index (binding 2), all fragment-stage
+		// combined image samplers. Ordinary (non-push) layout so it exists
+		// on every device; per-slot set objects are refreshed once per
+		// frame from the resolved triple (see R_UpdateEmissiveSurfaceTrioSets).
+		ZEROED_STRUCT_ARRAY (VkDescriptorSetLayoutBinding, emissive_surface_layout_bindings, 3);
+		for (int i = 0; i < 3; ++i)
+		{
+			emissive_surface_layout_bindings[i].binding = (uint32_t)i;
+			emissive_surface_layout_bindings[i].descriptorCount = 1;
+			emissive_surface_layout_bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			emissive_surface_layout_bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		}
+
+		descriptor_set_layout_create_info.bindingCount = countof (emissive_surface_layout_bindings);
+		descriptor_set_layout_create_info.pBindings = emissive_surface_layout_bindings;
+		descriptor_set_layout_create_info.flags = 0;
+
+		memset (&vulkan_globals.emissive_surface_set_layout, 0, sizeof (vulkan_globals.emissive_surface_set_layout));
+		vulkan_globals.emissive_surface_set_layout.num_combined_image_samplers = 3;
+
+		err = vkCreateDescriptorSetLayout (vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.emissive_surface_set_layout.handle);
+		if (err != VK_SUCCESS)
+			Sys_Error ("vkCreateDescriptorSetLayout failed with code %i", (int)err);
+		GL_SetObjectName ((uint64_t)vulkan_globals.emissive_surface_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "emissive surface trio");
+	}
+
+	{
 		ZEROED_STRUCT (VkDescriptorSetLayoutBinding, ubo_layout_bindings);
 		ubo_layout_bindings.binding = 0;
 		ubo_layout_bindings.descriptorCount = 1;
@@ -1843,7 +1871,12 @@ void R_CreateDescriptorPool ()
 {
 	ZEROED_STRUCT_ARRAY (VkDescriptorPoolSize, pool_sizes, 8);
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	pool_sizes[0].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2) + (MAX_GLTEXTURES + 1);
+	// Trio allowance: 3 bindings x 2 in-flight slots per lightmap, on top of
+	// the per-texture sets. Push descriptors would need no pool, but the
+	// trio is an ordinary layout (it must exist on non-ray-query devices
+	// too), so its sets are accounted here explicitly.
+	pool_sizes[0].descriptorCount =
+		MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2) + (MAX_GLTEXTURES + 1) + (MAX_SANITY_LIGHTMAPS * 6);
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 5;
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
@@ -1861,7 +1894,7 @@ void R_CreateDescriptorPool ()
 
 	ZEROED_STRUCT (VkDescriptorPoolCreateInfo, descriptor_pool_create_info);
 	descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 5 + 128;
+	descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS * 5 + 128 + (MAX_SANITY_LIGHTMAPS * 2);
 	descriptor_pool_create_info.poolSizeCount = countof (pool_sizes);
 	descriptor_pool_create_info.pPoolSizes = pool_sizes;
 	descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -1909,12 +1942,16 @@ void R_CreatePipelineLayouts ()
 	}
 
 	{
-		// World
-		VkDescriptorSetLayout world_descriptor_set_layouts[8] = {
+		// World: sets 0-4 preserved (diffuse, lightmap, fullbright, MBOIT
+		// input, bmodel instances). Set 5 is the surface-emissive trio
+		// (coarse/detail/surface-index) push set; set 6 is the
+		// frame-dependent volume (single). Bandlimit and volumetrics no
+		// longer share set 7, which is dropped from this layout.
+		VkDescriptorSetLayout world_descriptor_set_layouts[7] = {
 			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.single_texture_set_layout.handle,
 			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.mboit_input_attachment_set_layout.handle,
-			vulkan_globals.bmodel_instances_set_layout.handle, vulkan_globals.single_texture_set_layout.handle,
-			vulkan_globals.single_texture_set_layout.handle,   vulkan_globals.single_texture_set_layout.handle};
+			vulkan_globals.bmodel_instances_set_layout.handle, vulkan_globals.emissive_surface_set_layout.handle,
+			vulkan_globals.single_texture_set_layout.handle};
 
 		ZEROED_STRUCT (VkPushConstantRange, push_constant_range);
 		push_constant_range.offset = 0;
@@ -2823,6 +2860,7 @@ DECLARE_SHADER_MODULE (md5_mboit_composite_volume_msaa_frag);
 DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 DECLARE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 DECLARE_SHADER_MODULE (world_emissive_bandlimit_frag);
+DECLARE_SHADER_MODULE (world_emissive_bandlimit_volume_frag);
 DECLARE_SHADER_MODULE (world_oit_frag);
 DECLARE_SHADER_MODULE (world_mboit_moment_frag);
 DECLARE_SHADER_MODULE (world_mboit_composite_frag);
@@ -4294,6 +4332,39 @@ void R_CreateEmissiveVolumePipelines (void)
 							}
 					}
 		}
+	// Bandlimit+volume opaque family: the coexistence configuration.
+	// Only coarse+detail+bandlimit combos exist (alpha-blend stays excluded
+	// with coarse exactly like the loops above); the +64 pipeline_index bit
+	// matches draw-time selection. OIT/liquid/alias/sky volume paths never
+	// sample the surface trio and need no bandlimit twin.
+	for (alpha_test = 0; alpha_test < 2; ++alpha_test)
+		for (fullbright_enabled = 0; fullbright_enabled < 2; ++fullbright_enabled)
+			for (quantize_lm = 0; quantize_lm < 2; ++quantize_lm)
+			{
+				const int pipeline_index = fullbright_enabled + (alpha_test * 2) + (quantize_lm * 8) + 16 + 32 + 64;
+				volume_spec_data[0] = (uint32_t)fullbright_enabled;
+				volume_spec_data[1] = (uint32_t)alpha_test;
+				volume_spec_data[2] = 0;
+				volume_spec_data[3] = (uint32_t)quantize_lm;
+				volume_spec_data[5] = 0;
+				volume_spec_data[6] = 1;
+				volume_spec_data[7] = 1;
+				volume_spec_info.mapEntryCount = 9;
+				for (variant = 0; variant < MAIN_RENDER_PASS_VARIANT_COUNT; ++variant)
+					for (scatter_only = 0; scatter_only < 2; ++scatter_only)
+					{
+						volume_spec_data[8] = (uint32_t)scatter_only;
+						R_CopyPipelineCreateInfos (&infos, &base);
+						infos.graphics_pipeline.renderPass = vulkan_globals.main_render_pass[variant][MAIN_RENDER_PASS_STENCIL_CLEAR];
+						infos.shader_stages[1].module = world_emissive_bandlimit_volume_frag_module;
+						infos.shader_stages[1].pSpecializationInfo = &volume_spec_info;
+						infos.blend_attachment_states[0].blendEnable = VK_FALSE;
+						infos.depth_stencil_state.depthWriteEnable = VK_TRUE;
+						R_CreateGraphicsPipeline (
+							&vulkan_globals.world_bandlimit_volume_pipelines[variant][pipeline_index][scatter_only], &infos,
+							vulkan_globals.world_pipeline_layout, va ("world_bandlimit_volume %d%s", pipeline_index, scatter_only ? " scatter" : ""));
+					}
+			}
 	R_CreateAliasVolumePipelines ();
 	R_CreateMD5VolumePipelineSet (
 		vulkan_globals.md5_volume_pipelines, md5_vertex_input_attribute_descriptions, countof (md5_vertex_input_attribute_descriptions),
@@ -4756,6 +4827,8 @@ void R_DestroyEmissiveVolumePipelines (void)
 			{
 				vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_volume_pipelines[variant][i][s].handle, NULL);
 			vulkan_globals.world_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
+			vkDestroyPipeline (vulkan_globals.device, vulkan_globals.world_bandlimit_volume_pipelines[variant][i][s].handle, NULL);
+			vulkan_globals.world_bandlimit_volume_pipelines[variant][i][s].handle = VK_NULL_HANDLE;
 			}
 	emissive_volume_pipelines_created = false;
 }
@@ -5373,6 +5446,7 @@ static void R_CreateShaderModules ()
 	CREATE_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 	CREATE_SHADER_MODULE_COND (md5_alphatest_mboit_composite_volume_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
 	CREATE_SHADER_MODULE (world_emissive_bandlimit_frag);
+	CREATE_SHADER_MODULE (world_emissive_bandlimit_volume_frag);
 	CREATE_SHADER_MODULE (world_oit_frag);
 	CREATE_SHADER_MODULE (world_mboit_moment_frag);
 	CREATE_SHADER_MODULE (world_mboit_composite_frag);
@@ -5498,6 +5572,7 @@ static void R_DestroyShaderModules ()
 	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_frag);
 	DESTROY_SHADER_MODULE (md5_alphatest_mboit_composite_volume_msaa_frag);
 	DESTROY_SHADER_MODULE (world_emissive_bandlimit_frag);
+	DESTROY_SHADER_MODULE (world_emissive_bandlimit_volume_frag);
 	DESTROY_SHADER_MODULE (world_oit_frag);
 	DESTROY_SHADER_MODULE (world_mboit_moment_frag);
 	DESTROY_SHADER_MODULE (world_mboit_composite_frag);

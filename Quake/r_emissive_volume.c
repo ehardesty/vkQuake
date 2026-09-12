@@ -96,9 +96,7 @@ static qboolean R_EmissiveVolumeRequested (void)
 		return false;
 	if (R_EmissiveVolumeClampedStrength () <= 0.0f)
 		return false;
-	if (R_EmissiveBandlimitActive ())
-		return false;
-	return true;
+	return true; // bandlimit coexistence has dedicated pipelines; never gated here
 }
 
 void R_EmissiveVolumeInit (void)
@@ -204,7 +202,7 @@ void R_EmissiveVolumePrepare (void)
 		else if (R_EmissiveVolumeClampedStrength () <= 0.0f)
 			volume_inactive_reason = "strength is zero";
 		else
-			volume_inactive_reason = "bandlimit combination unsupported (zero addition)";
+			volume_inactive_reason = "request cvars off";
 		if (volume_resources_valid)
 			R_EmissiveVolumeTeardownResources ();
 		else
@@ -687,7 +685,7 @@ static void R_EmissiveVolumeEnsureResources (void)
 	int wanted_nx;
 	int wanted_ny;
 	int i;
-	if (!R_EmissiveVolumeActive () || R_EmissiveBandlimitActive ())
+	if (!R_EmissiveVolumeActive ())
 	{
 		if (volume_resources_valid)
 			R_EmissiveVolumeTeardownResources ();
@@ -808,8 +806,6 @@ qboolean R_EmissiveVolumeReady (void)
 		return false;
 	if (vulkan_globals.emissive_volume_pipeline.handle == VK_NULL_HANDLE)
 		return false;
-	if (R_EmissiveBandlimitActive ())
-		return false;
 	// Shadowed modes never fall back silently: without a resident world AS
 	// (or its pipeline) they expose zero addition and report the reason.
 	if (R_EmissiveVolumeShadowed () &&
@@ -863,6 +859,17 @@ vulkan_pipeline_t R_EmissiveVolumeWorldPipeline (int variant, int pipeline_index
 		return null_pipeline;
 	}
 	return vulkan_globals.world_volume_pipelines[variant][pipeline_index][scatter_only ? 1 : 0];
+}
+
+vulkan_pipeline_t R_EmissiveVolumeBandlimitWorldPipeline (int variant, int pipeline_index, qboolean scatter_only)
+{
+	if (variant < 0 || variant >= MAIN_RENDER_PASS_VARIANT_COUNT || pipeline_index < 0 || pipeline_index >= WORLD_PIPELINE_COUNT)
+	{
+		vulkan_pipeline_t null_pipeline;
+		memset (&null_pipeline, 0, sizeof (null_pipeline));
+		return null_pipeline;
+	}
+	return vulkan_globals.world_bandlimit_volume_pipelines[variant][pipeline_index][scatter_only ? 1 : 0];
 }
 
 void R_EmissiveVolumeUpdate (struct cb_context_s *cbx)

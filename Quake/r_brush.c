@@ -391,6 +391,13 @@ typedef struct emissive_brush_receiver_layer_s
 	vulkan_memory_t visibility_memories[2];
 	VkDescriptorSet coarse_descriptor_set;
 	VkDescriptorSet detail_descriptor_set;
+	// Graphics trio (coarse/detail/surface-index) for world set 5. Layer
+	// textures are object-stable for the layer lifetime, so one set written
+	// once at creation — never refreshed, hence no slot pair.
+	VkDescriptorSet surface_trio;
+	// Graphics trio (coarse/detail/surface-index) for world set 5. Layer
+	// textures are object-stable for the layer lifetime, so one set written
+	// once at creation — never refreshed, hence no slot pair.
 } emissive_brush_receiver_layer_t;
 #define EMISSIVE_BRUSH_RECEIVER_MAX_SOURCES 32
 typedef struct emissive_brush_receiver_s
@@ -661,6 +668,9 @@ static void						R_AllocateEmissiveBounceDebugLightmaps (void);
 static void						R_InvalidateEmissiveBrushReceiverSources (void);
 static void						R_FreeEmissiveBrushReceiverDescriptorSets (void);
 static void						R_FreeEmissiveBrushReceivers (void);
+static void R_WriteEmissiveSurfaceTrio (
+	VkDescriptorSet dst_set, const gltexture_t *coarse, const gltexture_t *detail, const gltexture_t *surface_indices);
+static void R_UpdateEmissiveSurfaceTrioSets (void);
 static void						R_UpdateEmissiveBrushReceiverLightmaps (cb_context_t *cbx);
 static uint32_t R_EmissiveBrushReceiverRadianceSignature (const uint32_t *source_indices, int source_count);
 static void R_EmissiveComputeImageBarrier (cb_context_t *cbx, gltexture_t *texture, VkImageLayout old_layout, VkImageLayout new_layout);
@@ -1282,9 +1292,7 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 	}
 
 	gltexture_t *lastfullbright = NULL;
-	gltexture_t *lastemissive = NULL;
-	gltexture_t *lastemissivedetail = NULL;
-	gltexture_t *lastemissivesurfaceindices = NULL;
+	VkDescriptorSet lastsurfacetrio = VK_NULL_HANDLE;
 	gltexture_t *lastlightmap = NULL;
 	gltexture_t *lasttexture = NULL;
 	const int	 debug_mode = CLAMP (0, (int)r_emissive_rt_debug.value, 9);
@@ -1374,10 +1382,11 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 								 (vid_filter.value != 0 && vid_palettize.value != 0 ? 8 : 0) + (emissive_enabled ? 16 : 0) + (detail_enabled ? 32 : 0) +
 								 (bandlimit_enabled ? 64 : 0);
 			// RV2 volume mirrors R_FlushBatch: opaque/alpha-tested draws sample
-			// air scattering; liquid-receiver, alpha-blend, bandlimit, and
-			// surface-debug draws keep their original pipelines.
+			// air scattering; liquid-receiver, alpha-blend, and surface-debug
+			// draws keep their original pipelines. Bandlimit-combined draws
+			// select the dedicated bandlimit+volume family below.
 			const qboolean volume_scatter_only = R_EmissiveVolumeScatterOnly ();
-			const qboolean volume_wanted = !liquid_emissive_receiver && !bandlimit_enabled && !emissive_debug && !r_fullbright_cheatsafe &&
+			const qboolean volume_wanted = !liquid_emissive_receiver && !emissive_debug && !r_fullbright_cheatsafe &&
 										 !r_lightmap_cheatsafe && R_EmissiveVolumeReady ();
 			vulkan_pipeline_t volume_pipeline;
 			qboolean volume_selected = false;
@@ -1386,6 +1395,20 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 			{
 				volume_pipeline = R_EmissiveVolumeWorldPipeline (R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
 				volume_selected = volume_pipeline.handle != VK_NULL_HANDLE && R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+			}
+			vulkan_pipeline_t bandlimit_volume_pipeline;
+			qboolean bandlimit_volume_selected = false;
+			memset (&bandlimit_volume_pipeline, 0, sizeof (bandlimit_volume_pipeline));
+			if (volume_wanted && bandlimit_enabled && emissive_enabled && R_EmissiveVolumeMainPass (cbx->render_pass_index))
+			{
+				const VkDescriptorSet trio_set = R_EmissiveSurfaceTrioSet (lm_idx);
+				if (trio_set != VK_NULL_HANDLE)
+				{
+					bandlimit_volume_pipeline = R_EmissiveVolumeBandlimitWorldPipeline (
+						R_MainPassPipelineVariant (cbx->render_pass_index), pipeline_index, volume_scatter_only);
+					bandlimit_volume_selected = bandlimit_volume_pipeline.handle != VK_NULL_HANDLE &&
+											 R_EmissiveVolumeFragmentSet () != VK_NULL_HANDLE;
+				}
 			}
 			vulkan_pipeline_t volume_oit_pipeline;
 			qboolean volume_oit_selected = false;
@@ -1442,7 +1465,7 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 					float volume_push[5];
 					vulkan_globals.vk_cmd_bind_descriptor_sets (
-						cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+						cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1, &volume_set, 0, NULL);
 					R_EmissiveVolumeFragmentPush (volume_push);
 					// Split upload: the shader places volume_z_max (push[4]) at
 					// float 27 and volume_viewport (push[0..3]) at floats 28-31
@@ -1457,7 +1480,11 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					alpha_test + ((vid_filter.value != 0 && vid_palettize.value != 0) ? 2 : 0) + ((debug_mode - 1) * 4) + (bandlimit_enabled ? 36 : 0);
 				pipeline = vulkan_globals.world_emissive_debug_pipelines[R_MainPassPipelineVariant (cbx->render_pass_index)][debug_pipeline_index];
 			}
-			else if (volume_selected)
+			else if (bandlimit_volume_selected)
+				pipeline = bandlimit_volume_pipeline;
+			// Bandlimit draws without an emissive triple (plain batches) take
+			// the classic volume-only path: same air, no surface atlas.
+			else if (volume_selected && (!bandlimit_enabled || !emissive_enabled))
 				pipeline = volume_pipeline;
 			else if (volume_oit_selected)
 				pipeline = volume_oit_pipeline;
@@ -1467,12 +1494,12 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					vulkan_globals.world_wboit_pipelines[pipeline_index], vulkan_globals.world_mboit_moment_pipelines[pipeline_index],
 					vulkan_globals.world_mboit_composite_pipelines[pipeline_index]);
 			R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-			if (volume_selected || volume_oit_selected)
+			if (volume_selected || volume_oit_selected || bandlimit_volume_selected)
 			{
 				const VkDescriptorSet volume_set = R_EmissiveVolumeFragmentSet ();
 				float volume_push[5];
 				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1, &volume_set, 0, NULL);
+					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1, &volume_set, 0, NULL);
 				R_EmissiveVolumeFragmentPush (volume_push);
 				// Split upload: the shader places volume_z_max (push[4]) at
 				// float 27 and volume_viewport (push[0..3]) at floats 28-31
@@ -1509,27 +1536,15 @@ void R_DrawIndirectBrushes (cb_context_t *cbx, qboolean draw_water, qboolean tra
 					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 1, 1, &lightmap_texture->descriptor_set, 0, NULL);
 				lastlightmap = lightmap_texture;
 			}
-			if (emissive_enabled && lastemissive != emissive_texture)
+			if (emissive_enabled)
 			{
-				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &emissive_texture->descriptor_set, 0, NULL);
-				lastemissive = emissive_texture;
-			}
-			gltexture_t *const emissive_detail_binding = emissive_detail_texture ? emissive_detail_texture : emissive_texture;
-			if (emissive_enabled && lastemissivedetail != emissive_detail_binding)
-			{
-				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 6, 1,
-					&emissive_detail_binding->descriptor_set, 0, NULL);
-				lastemissivedetail = emissive_detail_binding;
-			}
-			gltexture_t *const emissive_surface_indices = bandlimit_enabled ? lightmaps[lm_idx].surface_indices_texture : NULL;
-			if (emissive_surface_indices && lastemissivesurfaceindices != emissive_surface_indices)
-			{
-				vulkan_globals.vk_cmd_bind_descriptor_sets (
-					cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 7, 1,
-					&emissive_surface_indices->descriptor_set, 0, NULL);
-				lastemissivesurfaceindices = emissive_surface_indices;
+				const VkDescriptorSet surface_trio = R_EmissiveSurfaceTrioSet (lm_idx);
+				if (surface_trio != VK_NULL_HANDLE && lastsurfacetrio != surface_trio)
+				{
+					vulkan_globals.vk_cmd_bind_descriptor_sets (
+						cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.world_pipeline_layout.handle, 5, 1, &surface_trio, 0, NULL);
+					lastsurfacetrio = surface_trio;
+				}
 			}
 		}
 
@@ -2421,6 +2436,12 @@ void GL_BuildLightmaps (void)
 			R_FreeDescriptorSet (lightmaps[i].emissive_coarse_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].emissive_detail_descriptor_set != VK_NULL_HANDLE)
 			R_FreeDescriptorSet (lightmaps[i].emissive_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
+		for (int slot = 0; slot < EMISSIVE_SURFACE_TRIO_SLOTS; ++slot)
+			if (lightmaps[i].emissive_surface_trio[slot] != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (lightmaps[i].emissive_surface_trio[slot], &vulkan_globals.emissive_surface_set_layout);
+				lightmaps[i].emissive_surface_trio[slot] = VK_NULL_HANDLE;
+			}
 		if (lightmaps[i].emissive_transient_descriptor_set != VK_NULL_HANDLE)
 			R_FreeDescriptorSet (lightmaps[i].emissive_transient_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 		if (lightmaps[i].emissive_transient_detail_descriptor_set != VK_NULL_HANDLE)
@@ -4605,6 +4626,60 @@ void R_EmissiveResolvedTextures (int lightmap_index, gltexture_t **coarse, gltex
 		*detail = bounce_detail;
 }
 
+/*
+==================
+R_UpdateEmissiveSurfaceTrioSets
+
+Refresh world set 5 for the frame being set up: one trio write per
+lightmap holding emissive textures, into that lightmap's set for the
+latched slot. Runs single-threaded in the update task (never per batch),
+so no two threads can write one set concurrently. Slot/fence safety
+mirrors the volume's own slots: the latched slot belongs to this frame's
+submissions, and the per-slot fence guarantees the previous user (two
+frames ago) completed before this frame reuses it. Skips cheaply when
+the parent is off; stale sets are then never bound because draws require
+the same cvars. Must run even when the volume is inactive (bandlimit-only
+draws sample the trio too).
+==================
+*/
+static int emissive_surface_trio_slot;
+static void R_UpdateEmissiveSurfaceTrioSets (void)
+{
+	if (r_emissive_rt.value <= 0.0f || gl_fullbrights.value <= 0.0f || lightmap_count <= 0)
+		return;
+	emissive_surface_trio_slot = current_compute_buffer_index % EMISSIVE_SURFACE_TRIO_SLOTS;
+	for (int i = 0; i < lightmap_count; ++i)
+	{
+		struct lightmap_s *const lightmap = &lightmaps[i];
+		if (lightmap->emissive_surface_trio[emissive_surface_trio_slot] == VK_NULL_HANDLE)
+			continue;
+		gltexture_t *coarse = NULL;
+		gltexture_t *detail = NULL;
+		R_EmissiveResolvedTextures (i, &coarse, &detail);
+		if (!coarse)
+			continue;
+		R_WriteEmissiveSurfaceTrio (
+			lightmap->emissive_surface_trio[emissive_surface_trio_slot], coarse, detail, lightmap->surface_indices_texture);
+	}
+}
+
+/*
+==================
+R_EmissiveSurfaceTrioSet
+
+World set 5 for a lightmap: the per-slot trio refreshed by
+R_UpdateEmissiveSurfaceTrioSets, or NULL when the lightmap has no trio
+setup (or the index is invalid). Brush receivers resolve their layer
+trio through R_EmissiveBrushReceiverTextures instead.
+==================
+*/
+VkDescriptorSet R_EmissiveSurfaceTrioSet (int lightmap_index)
+{
+	if (lightmap_index < 0 || lightmap_index >= lightmap_count)
+		return VK_NULL_HANDLE;
+	return lightmaps[lightmap_index].emissive_surface_trio[emissive_surface_trio_slot];
+}
+
 void R_TransientEmissiveDetailCompleted (uint32_t generation)
 {
 	if (generation == transient_emissive_generation)
@@ -4746,6 +4821,11 @@ static void R_FreeEmissiveBrushReceiverDescriptorSets (void)
 					R_FreeDescriptorSet (*sets[detail], &vulkan_globals.emissive_brush_receiver_set_layout);
 					*sets[detail] = VK_NULL_HANDLE;
 				}
+			if (layer->surface_trio != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (layer->surface_trio, &vulkan_globals.emissive_surface_set_layout);
+				layer->surface_trio = VK_NULL_HANDLE;
+			}
 		}
 }
 
@@ -4761,6 +4841,11 @@ static void R_FreeEmissiveBrushReceivers (void)
 				R_FreeDescriptorSet (layer->coarse_descriptor_set, &vulkan_globals.emissive_brush_receiver_set_layout);
 			if (layer->detail_descriptor_set != VK_NULL_HANDLE)
 				R_FreeDescriptorSet (layer->detail_descriptor_set, &vulkan_globals.emissive_brush_receiver_set_layout);
+			if (layer->surface_trio != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (layer->surface_trio, &vulkan_globals.emissive_surface_set_layout);
+				layer->surface_trio = VK_NULL_HANDLE;
+			}
 			for (int detail = 0; detail < 2; ++detail)
 			{
 				R_FreeBuffer (layer->visibility_buffers[detail], &layer->visibility_memories[detail], &num_vulkan_bmodel_allocations);
@@ -4952,6 +5037,13 @@ static qboolean R_BuildEmissiveBrushReceiverLayers (emissive_brush_receiver_t *r
 				(uint64_t)layer->width * R_EmissiveDetailScale () * layer->height * R_EmissiveDetailScale () * sizeof (uint32_t), visibility_usage,
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &num_vulkan_bmodel_allocations, NULL, name);
 		}
+		// Graphics trio for world set 5, written once: layer textures are
+		// object-stable for the layer lifetime (only contents refresh), so
+		// unlike the world triple this needs no per-frame rewrite and no
+		// slot pair.
+		layer->surface_trio = R_AllocateDescriptorSet (&vulkan_globals.emissive_surface_set_layout);
+		GL_SetObjectName ((uint64_t)layer->surface_trio, VK_OBJECT_TYPE_DESCRIPTOR_SET, va ("emissive receiver trio %08x %03i", receiver->receiver_instance_id, lightmap));
+		R_WriteEmissiveSurfaceTrio (layer->surface_trio, layer->coarse_texture, layer->detail_texture, layer->surface_indices_texture);
 		receiver->allocated_bytes += GL_HeapGetAllocationSize (layer->coarse_texture->allocation);
 		receiver->allocated_bytes += layer->visibility_memories[0].size;
 		if (layer->detail_texture)
@@ -5849,6 +5941,26 @@ void R_UpdateEmissiveBrushReceivers (void)
 		if (alias_receivers_enabled)
 			R_UpdateEmissiveAliasReceiverEntity (cl.static_entities[i]);
 	}
+	// Brush trio sets are written once at layer creation, but transient
+	// capacity growth frees all brush-receiver descriptor sets mid-map and
+	// only lazily rebuilds the compute ones. Re-create any missing trio
+	// here (single-threaded update, pre-record) so draws never face NULL.
+	for (int i = 0; i < emissive_brush_receiver_count; ++i)
+	{
+		emissive_brush_receiver_t *const receiver = &emissive_brush_receivers[i];
+		for (int layer_index = 0; layer_index < receiver->num_layers; ++layer_index)
+		{
+			emissive_brush_receiver_layer_t *const layer = &receiver->layers[layer_index];
+			if (layer->surface_trio == VK_NULL_HANDLE && layer->coarse_texture)
+			{
+				layer->surface_trio = R_AllocateDescriptorSet (&vulkan_globals.emissive_surface_set_layout);
+				GL_SetObjectName (
+					(uint64_t)layer->surface_trio, VK_OBJECT_TYPE_DESCRIPTOR_SET,
+					va ("emissive receiver trio %08x %03i", receiver->receiver_instance_id, layer->lightmap));
+				R_WriteEmissiveSurfaceTrio (layer->surface_trio, layer->coarse_texture, layer->detail_texture, layer->surface_indices_texture);
+			}
+		}
+	}
 }
 
 qboolean R_EmissiveBrushReceiverActive (entity_t *entity)
@@ -5860,11 +5972,14 @@ qboolean R_EmissiveBrushReceiverActive (entity_t *entity)
 }
 
 qboolean R_EmissiveBrushReceiverTextures (
-	entity_t *entity, int lightmap, gltexture_t **coarse, gltexture_t **detail, gltexture_t **surface_indices, uint32_t atlas_offset[2])
+	entity_t *entity, int lightmap, gltexture_t **coarse, gltexture_t **detail, gltexture_t **surface_indices, uint32_t atlas_offset[2],
+	VkDescriptorSet *surface_trio)
 {
 	*coarse = *detail = NULL;
 	*surface_indices = NULL;
 	atlas_offset[0] = atlas_offset[1] = 0;
+	if (surface_trio)
+		*surface_trio = VK_NULL_HANDLE;
 	for (int i = 0; i < emissive_brush_receiver_count; ++i)
 	{
 		const emissive_brush_receiver_t *const receiver = &emissive_brush_receivers[i];
@@ -5880,6 +5995,8 @@ qboolean R_EmissiveBrushReceiverTextures (
 			*surface_indices = layer->surface_indices_texture;
 			atlas_offset[0] = layer->atlas_offset[0];
 			atlas_offset[1] = layer->atlas_offset[1];
+			if (surface_trio)
+				*surface_trio = layer->surface_trio;
 			return *coarse != NULL;
 		}
 	}
@@ -6197,6 +6314,42 @@ void R_EmissiveLightmapStats (int *count, uint64_t *logical_bytes, uint64_t *all
 			*logical_bytes += (uint64_t)lightmaps[i].emissive_texture->width * lightmaps[i].emissive_texture->height * 8;
 			*allocated_bytes += GL_HeapGetAllocationSize (lightmaps[i].emissive_texture->allocation);
 		}
+}
+
+/*
+==================
+R_WriteEmissiveSurfaceTrio
+
+Write world set 5 (coarse b0, detail b1, surface-index b2) into dst_set
+from already-resolved textures. Detail falls back to coarse exactly like
+the per-texture binds this replaces, so sampling is bitwise identical;
+only the set packing changed. A NULL surface_indices leaves binding 2
+untouched, mirroring the old conditional bind — and bandlimit-family
+selection additionally requires it non-null, so no draw can sample a
+stale binding 2. Samplers come from each texture's stored graphics
+sampler (same source as its own set); layouts are SHADER_READ_ONLY.
+==================
+*/
+static void R_WriteEmissiveSurfaceTrio (
+	VkDescriptorSet dst_set, const gltexture_t *coarse, const gltexture_t *detail, const gltexture_t *surface_indices)
+{
+	const gltexture_t *const textures[3] = {coarse, detail ? detail : coarse, surface_indices};
+	const int write_count = surface_indices ? 3 : 2;
+	ZEROED_STRUCT_ARRAY (VkDescriptorImageInfo, image_infos, 3);
+	ZEROED_STRUCT_ARRAY (VkWriteDescriptorSet, writes, 3);
+	for (int binding = 0; binding < write_count; ++binding)
+	{
+		image_infos[binding].imageView = textures[binding]->image_view;
+		image_infos[binding].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		image_infos[binding].sampler = textures[binding]->graphics_sampler;
+		writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[binding].dstSet = dst_set;
+		writes[binding].dstBinding = (uint32_t)binding;
+		writes[binding].descriptorCount = 1;
+		writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		writes[binding].pImageInfo = &image_infos[binding];
+	}
+	vkUpdateDescriptorSets (vulkan_globals.device, (uint32_t)write_count, writes, 0, NULL);
 }
 
 /*
@@ -6582,6 +6735,12 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 			R_FreeDescriptorSet (lightmaps[i].emissive_detail_descriptor_set, &vulkan_globals.emissive_compute_set_layout);
 			lightmaps[i].emissive_detail_descriptor_set = VK_NULL_HANDLE;
 		}
+		for (int slot = 0; slot < EMISSIVE_SURFACE_TRIO_SLOTS; ++slot)
+			if (lightmaps[i].emissive_surface_trio[slot] != VK_NULL_HANDLE)
+			{
+				R_FreeDescriptorSet (lightmaps[i].emissive_surface_trio[slot], &vulkan_globals.emissive_surface_set_layout);
+				lightmaps[i].emissive_surface_trio[slot] = VK_NULL_HANDLE;
+			}
 		if (lightmaps[i].emissive_bounce_descriptor_set != VK_NULL_HANDLE)
 		{
 			R_FreeDescriptorSet (lightmaps[i].emissive_bounce_descriptor_set, &vulkan_globals.emissive_bounce_set_layout);
@@ -6800,6 +6959,14 @@ void R_SetEmissiveLights (const emissive_light_t *lights, const byte *styles, in
 		if (lightmap->emissive_texture)
 			lightmap->emissive_coarse_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
 				lightmap, lightmap->emissive_texture, NULL, source_buffers, "coarse", i);
+		// Trio for world set 5, every lightmap (see comment at the field).
+		for (int slot = 0; slot < EMISSIVE_SURFACE_TRIO_SLOTS; ++slot)
+		{
+			lightmap->emissive_surface_trio[slot] = R_AllocateDescriptorSet (&vulkan_globals.emissive_surface_set_layout);
+			GL_SetObjectName (
+				(uint64_t)lightmap->emissive_surface_trio[slot], VK_OBJECT_TYPE_DESCRIPTOR_SET,
+				va ("emissive surface trio %07i slot %d", i, slot));
+		}
 		if (lightmap->emissive_detail_texture)
 		{
 			lightmap->emissive_detail_descriptor_set = R_AllocateEmissiveComputeDescriptorSet (
@@ -10117,6 +10284,7 @@ void R_UpdateEmissiveLightmapsOnly (void)
 	R_UpdateEmissiveBrushReceiverLightmaps (cbx);
 	R_EmissiveVolumeUpdate (cbx);
 	R_RefreshEmissiveBounceLayers (cbx);
+	R_UpdateEmissiveSurfaceTrioSets ();
 	R_EndDebugUtilsLabel (cbx);
 }
 
@@ -10140,6 +10308,7 @@ void R_UpdateLightmapsAndIndirect (void *unused)
 	R_UpdateEmissiveBrushReceiverLightmaps (cbx);
 	R_EmissiveVolumeUpdate (cbx);
 	R_RefreshEmissiveBounceLayers (cbx);
+	R_UpdateEmissiveSurfaceTrioSets ();
 
 	for (int i = 0; i < MAX_LIGHTSTYLES; ++i)
 	{

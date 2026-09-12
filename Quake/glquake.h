@@ -498,6 +498,12 @@ typedef struct
 	vulkan_pipeline_t		 emissive_volume_pipeline;
 	vulkan_pipeline_t		 emissive_volume_shadow_pipeline;
 	vulkan_pipeline_t		 world_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT][2];
+	// Bandlimit+volume opaque world family: same pipeline_index encoding
+	// (bandlimit bit +64 included, so only indices 112..127 less the
+	// alpha-blend exclusions are ever created/selected), scatter last.
+	// OIT/liquid/alias/sky volume paths never sample the surface trio, so
+	// they need no bandlimit twin and keep their existing sets.
+	vulkan_pipeline_t		 world_bandlimit_volume_pipelines[MAIN_RENDER_PASS_VARIANT_COUNT][WORLD_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 world_oit_volume_pipelines[WORLD_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 world_mboit_composite_volume_pipelines[WORLD_PIPELINE_COUNT][2];
 	vulkan_pipeline_t		 liquid_oit_volume_pipelines[LIQUID_EMISSIVE_PIPELINE_COUNT][2];
@@ -541,6 +547,13 @@ typedef struct
 	VkDescriptorSet			 bmodel_instances_desc_set;
 	vulkan_desc_set_layout_t bmodel_instances_set_layout;
 	vulkan_desc_set_layout_t ray_query_push_set_layout;
+	// Surface-emissive trio (coarse/detail/surface-index) layout for world
+	// set 5. Regular (non-push) layout: push descriptors ride the ray-query
+	// device path, but emissive pipelines are created on all devices, so the
+	// trio uses per-slot set objects updated once per frame (see
+	// R_UpdateEmissiveSurfaceTrioSets) under the same slot/fence discipline
+	// as the volume's own slots.
+	vulkan_desc_set_layout_t emissive_surface_set_layout;
 	VkDescriptorSet			 ray_debug_desc_set;
 	vulkan_desc_set_layout_t ray_debug_set_layout;
 	vulkan_desc_set_layout_t joints_buffer_set_layout;
@@ -733,6 +746,9 @@ typedef struct glRect_s
 {
 	unsigned short l, t, w, h;
 } glRect_t;
+// In-flight slots for the per-frame surface-emissive trio (world set 5).
+// Matches the DOUBLE_BUFFERED graphics frames; see R_UpdateEmissiveSurfaceTrioSets.
+#define EMISSIVE_SURFACE_TRIO_SLOTS 2
 typedef struct glMaxUsed_s
 {
 	unsigned short w, h;
@@ -772,6 +788,12 @@ struct lightmap_s
 	VkDescriptorSet emissive_bounce_transient_output_descriptor_set;
 	VkDescriptorSet emissive_bounce_transient_output_detail_descriptor_set;
 	VkDescriptorSet emissive_bounce_debug_descriptor_set;
+	// Surface-emissive trio (coarse/detail/surface-index) for world set 5.
+	// The resolved triple swaps texture objects per frame (transient /
+	// bounce selection), so one set per in-flight slot, refreshed once per
+	// frame by R_UpdateEmissiveSurfaceTrioSets under the same slot/fence
+	// discipline as the volume's own slots. Never updated per batch.
+	VkDescriptorSet emissive_surface_trio[EMISSIVE_SURFACE_TRIO_SLOTS];
 	uint32_t	modified[TASKS_MAX_WORKERS]; // when using GPU lightmap update, bitmap of lightstyles that will be drawn using this lightmap (16..64 OR-folded
 											 // into bits 16..31)
 	VkBuffer	workgroup_bounds_buffer;
@@ -925,6 +947,8 @@ qboolean R_EmissiveVolumeReady (void);
 qboolean R_EmissiveVolumeScatterOnly (void);
 void R_EmissiveVolumeFragmentPush (float out_viewport_zmax[5]);
 vulkan_pipeline_t R_EmissiveVolumeWorldPipeline (int variant, int pipeline_index, qboolean scatter_only);
+vulkan_pipeline_t R_EmissiveVolumeBandlimitWorldPipeline (int variant, int pipeline_index, qboolean scatter_only);
+VkDescriptorSet R_EmissiveSurfaceTrioSet (int lightmap_index);
 VkDescriptorSet R_EmissiveVolumeFragmentSet (void);
 void R_CreateEmissiveVolumePipelines (void);
 void R_DestroyEmissiveVolumePipelines (void);
@@ -1012,7 +1036,7 @@ qboolean R_EmissiveAliasEntityIsSource (const entity_t *entity);
 void		  R_UpdateEmissiveBrushReceivers (void);
 qboolean	  R_EmissiveBrushReceiverActive (entity_t *entity);
 qboolean	  R_EmissiveBrushReceiverTextures (
-	entity_t *entity, int lightmap, gltexture_t **coarse, gltexture_t **detail, gltexture_t **surface_indices, uint32_t atlas_offset[2]);
+	entity_t *entity, int lightmap, gltexture_t **coarse, gltexture_t **detail, gltexture_t **surface_indices, uint32_t atlas_offset[2], VkDescriptorSet *surface_trio);
 void R_EmissiveBrushReceiverStats (
 	int *records, int *active, int *ready, int *dirty, int *layers, uint64_t *allocated_bytes, uint64_t *budget_bytes, qboolean *budget_limited,
 	uint32_t *updates, uint32_t *dispatches, uint32_t *no_ray_dispatches, uint32_t *transform_invalidations);
