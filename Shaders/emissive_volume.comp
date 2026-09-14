@@ -139,6 +139,16 @@ vec3 EvaluateSources (const vec3 sample_pos, const uvec2 column)
 	return contribution;
 }
 
+// RVQ4 deterministic within-segment integration (test-build setting, not a
+// cvar). K fixed depth subsegments per segment, evaluated together per
+// source (radiance + visibility, never an aggregate ratio). K=1 reproduces
+// the midpoint estimator up to float reassociation; K=2 halves depth-step
+// heights at fixed storage cost. Sample locations are fixed in-segment:
+// no frame index, clock, or noise dependency.
+#ifndef VOLUME_INTEGRATION_SAMPLES
+#define VOLUME_INTEGRATION_SAMPLES 1
+#endif
+
 // Shared storage guard: nonfinite or absurd inputs must not poison the
 // volume. Canonical colors above one are valid and pass through untouched.
 vec3 SanitizeVolumeRadiance (const vec3 radiance)
@@ -179,14 +189,17 @@ void main ()
 		const float t1 = float (s + 1) / float (segments);
 		const float z_a = z_max * t0 * t0;
 		const float z_b = z_max * t1 * t1;
-		const float z_m = 0.5f * (z_a + z_b);
-		const vec3  sample_pos = push_constants.camera_origin_zmax.xyz + q * z_m;
-		// Existing renderer fog transmittance, not opacity: at zero authored
-		// fog this weight is exactly one and can never gate scattering.
-		const float fog_transmittance = exp (-pow (fog_density * z_m, 2.0f));
-		const vec3  radiance = SanitizeVolumeRadiance (EvaluateSources (sample_pos, column));
-		const float ds = segment_length_scale * (z_b - z_a);
-		accumulated += strength * base_scattering * ds * fog_transmittance * radiance;
+		for (uint j = 0u; j < uint (VOLUME_INTEGRATION_SAMPLES); ++j)
+		{
+			const float z_j = z_a + (float (j) + 0.5f) * (z_b - z_a) / float (VOLUME_INTEGRATION_SAMPLES);
+			const vec3  sample_pos = push_constants.camera_origin_zmax.xyz + q * z_j;
+			// Existing renderer fog transmittance, not opacity: at zero authored
+			// fog this weight is exactly one and can never gate scattering.
+			const float fog_transmittance = exp (-pow (fog_density * z_j, 2.0f));
+			const vec3  radiance = SanitizeVolumeRadiance (EvaluateSources (sample_pos, column));
+			const float ds_j = segment_length_scale * (z_b - z_a) / float (VOLUME_INTEGRATION_SAMPLES);
+			accumulated += strength * base_scattering * ds_j * fog_transmittance * radiance;
+		}
 		// Storage-range defense for the RGBA16F volume; validation inside the
 		// representable range is unaffected.
 		imageStore (output_image, ivec3 (column, int (s + 1)), vec4 (min (accumulated, vec3 (1e4)), 1.0f));

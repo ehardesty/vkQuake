@@ -292,6 +292,11 @@ frames select the original pipelines and bind nothing.
 // identical across any sweep; each value runs in a fresh process
 // (no in-place depth switching: old dormant content is never compatible).
 #define EMISSIVE_VOLUME_SEGMENTS 128
+// RVQ4 paired test-build setting (not a cvar): fixed depth subsegments per
+// segment in the generation shader (VOLUME_INTEGRATION_SAMPLES there).
+// Only the scheduled-evaluation estimate and diagnostics read it here;
+// keep both defines identical per test build. K=1 is the midpoint default.
+#define EMISSIVE_VOLUME_INTEGRATION_SAMPLES 1
 #define EMISSIVE_VOLUME_BOUNDARIES (EMISSIVE_VOLUME_SEGMENTS + 1)
 #define EMISSIVE_VOLUME_REFERENCE_LENGTH 256.0f
 #define EMISSIVE_VOLUME_MEMORY_BUDGET_MB 64
@@ -445,7 +450,7 @@ static void R_EmissiveVolumeBuildLists (void)
 	volume_use_lists = true;
 	// Exact scheduled count: every column evaluates its group's admitted
 	// sources (fallback groups evaluate all sources) through every segment.
-	volume_evaluated_pairs_estimate = volume_list_eval_pairs * EMISSIVE_VOLUME_SEGMENTS;
+	volume_evaluated_pairs_estimate = volume_list_eval_pairs * EMISSIVE_VOLUME_SEGMENTS * EMISSIVE_VOLUME_INTEGRATION_SAMPLES;
 	volume_list_cpu_us = (uint32_t)((Sys_DoubleTime () - build_start) * 1000000.0);
 }
 
@@ -783,7 +788,7 @@ static void R_EmissiveVolumeEnsureResources (void)
 	volume_viewport[3] = (float)r_refdef.vrect.height;
 	volume_zmax = q_max (gl_farclip.value, 1.0f);
 	volume_evaluated_pairs_estimate =
-		(uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_SEGMENTS * (uint64_t)(volume_num_cacheable + volume_num_transient);
+		(uint64_t)volume_nx * (uint64_t)volume_ny * EMISSIVE_VOLUME_SEGMENTS * EMISSIVE_VOLUME_INTEGRATION_SAMPLES * (uint64_t)(volume_num_cacheable + volume_num_transient);
 	volume_resource_reason = "ready";
 }
 
@@ -1121,7 +1126,7 @@ static void R_EmissiveVolumeResourceStats (void)
 		volume_viewport[3], volume_viewport[0], volume_viewport[1], volume_slot,
 		volume_slot_initialized[volume_slot] ? "" : " (first use, cleared)");
 	Con_Printf ("   volume modulation checksum %.3f\n", volume_mod_checksum);
-	Con_Printf ("   volume grid: %dx%dx%d, extent %.0f, %s\n", volume_nx, volume_ny, EMISSIVE_VOLUME_SEGMENTS, volume_zmax,
+	Con_Printf ("   volume grid: %dx%dx%dxK%d, extent %.0f, %s\n", volume_nx, volume_ny, EMISSIVE_VOLUME_SEGMENTS, EMISSIVE_VOLUME_INTEGRATION_SAMPLES, volume_zmax,
 		R_EmissiveVolumeShadowed () ? "world-shadowed" : "unshadowed diagnostic");
 	Con_Printf (
 		"   volume shadows: world AS %s, mask 0x%02x (world-only; moving occluders excluded)\n",
