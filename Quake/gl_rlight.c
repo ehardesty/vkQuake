@@ -35,7 +35,7 @@ extern cvar_t r_gpulightmapupdate;
 extern cvar_t r_rtshadows;
 extern cvar_t gl_fullbrights;
 
-cvar_t r_emissive_rt = {"r_emissive_rt", "0", CVAR_NONE};
+cvar_t r_emissive_rt = {"r_emissive_rt", "1", CVAR_NONE};
 cvar_t r_emissive_rt_resolution = {"r_emissive_rt_resolution", "2", CVAR_NONE};
 cvar_t r_emissive_rt_occluders = {"r_emissive_rt_occluders", "0", CVAR_NONE};
 cvar_t r_emissive_rt_external_bsp = {"r_emissive_rt_external_bsp", "0", CVAR_NONE};
@@ -45,7 +45,7 @@ cvar_t r_emissive_rt_sprite_receivers = {"r_emissive_rt_sprite_receivers", "0", 
 cvar_t r_emissive_rt_particle_receivers = {"r_emissive_rt_particle_receivers", "0", CVAR_NONE};
 cvar_t r_emissive_rt_model_emitters = {"r_emissive_rt_model_emitters", "0", CVAR_NONE};
 cvar_t r_emissive_rt_debug = {"r_emissive_rt_debug", "0", CVAR_NONE};
-cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "0", CVAR_NONE};
+cvar_t r_emissive_rt_bandlimit = {"r_emissive_rt_bandlimit", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce = {"r_emissive_rt_bounce", "1", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_strength = {"r_emissive_rt_bounce_strength", "0.65", CVAR_NONE};
 cvar_t r_emissive_rt_bounce_reflectance = {"r_emissive_rt_bounce_reflectance", "1", CVAR_NONE};
